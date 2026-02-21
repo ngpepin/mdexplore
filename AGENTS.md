@@ -22,6 +22,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplor-icon.png`: primary app icon asset (preferred).
 - `DESCRIPTION.md`: short repository summary and suggested topic tags.
 - `LICENSE`: MIT license text.
+- Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
 
 ## Runtime Assumptions
 
@@ -33,7 +34,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 
 ## Core Behavior You Must Preserve
 
-- The default root is current working directory when no path arg is provided.
+- Without a path arg, default root is loaded from `~/.mdexplore.cfg` if valid;
+  otherwise home directory is used.
 - Both entrypoints support optional root path argument:
   - `mdexplore.sh [PATH]`
   - `mdexplore.py [PATH]`
@@ -41,13 +43,27 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Selecting a Markdown file updates preview quickly.
 - `^` navigates one directory level up and re-roots the tree.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
+- Effective root is persisted on close to `~/.mdexplore.cfg`.
+- Linux desktop identity should remain `mdexplore` so launcher icon matching
+  works (`QApplication.setDesktopFileName("mdexplore")` + desktop
+  `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
 - `F5` refreshes preview for the selected file.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
-- Copy-by-color buttons recurse from selected directory when a directory is selected, otherwise from current root.
+- Copy/Clear scope resolves in this order: selected directory, then most
+  recently selected/expanded directory, then current root.
 - Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
+- Preview context menu should keep standard actions and add
+  `Copy Rendered Text` and `Copy Source Markdown` when there is a text
+  selection.
+- `Copy Rendered Text` should copy the selected preview text as plain text.
+- `Copy Source Markdown` should map preview selection to source markdown line
+  ranges and copy source text (not rendered plain text).
+  If direct mapping fails, it should use selected-text matching and first/last
+  line fuzzy matching against source markdown lines, then fall back to copying
+  the full source file.
 
 ## Editing Rules
 
@@ -74,6 +90,17 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - install dependencies
   - run app
   - invoke `.venv/bin/python` directly (no shell activation required)
+  - do not use `exec -a` with Python (can break venv resolution)
+- Launcher arg handling must tolerate `.desktop` `%u` behavior:
+  - empty argument should behave like "no path"
+  - `file://` URIs should be decoded
+  - file arguments should resolve to parent directory
+- Non-interactive launcher runs should log to
+  `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
+  Log retention is capped to the most recent 1000 lines.
+- Launcher should verify key runtime imports (`markdown_it`, `linkify_it`,
+  `PySide6.QtWebEngineWidgets`) and self-heal by reinstalling requirements if
+  the environment is incomplete.
 - `--help` should stay lightweight and not require venv activation.
 
 ## Quality Gates Before Finishing

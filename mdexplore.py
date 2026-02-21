@@ -7,15 +7,18 @@ import argparse
 import html
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import zlib
 from collections import deque
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from markdown_it import MarkdownIt
 from PySide6.QtCore import QDir, QMimeData, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +35,31 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+CONFIG_FILE_NAME = ".mdexplore.cfg"
+
+
+def _config_file_path() -> Path:
+    return Path.home() / CONFIG_FILE_NAME
+
+
+def _load_default_root_from_config() -> Path:
+    """Resolve default root when no CLI path is provided."""
+    fallback = Path.home()
+    cfg_path = _config_file_path()
+    try:
+        if not cfg_path.exists():
+            return fallback
+        raw = cfg_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return fallback
+        candidate = Path(raw).expanduser()
+        if candidate.is_dir():
+            return candidate.resolve()
+    except Exception:
+        # Any read/parse/access issue should fall back to home directory.
+        pass
+    return fallback
 
 
 def _encode_plantuml_source(text: str) -> str:
@@ -200,11 +228,8 @@ def _build_markdown_icon() -> QIcon:
             asset_pixmap = QPixmap(str(icon_path))
             if not asset_pixmap.isNull():
                 cleaned = transparentize_outer_background(asset_pixmap)
+                print(f"mdexplore icon source: {icon_path}", file=sys.stderr)
                 return QIcon(fit_icon_canvas(cleaned))
-
-    themed = QIcon.fromTheme("text-markdown")
-    if not themed.isNull():
-        return themed
 
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -234,6 +259,7 @@ def _build_markdown_icon() -> QIcon:
     painter.drawLine(47, 33, 42, 38)
     painter.end()
 
+    print("mdexplore icon source: built-in fallback", file=sys.stderr)
     return QIcon(pixmap)
 
 
@@ -390,6 +416,7 @@ class MarkdownRenderer:
         ).enable("table").enable("strikethrough")
 
         default_fence = self._md.renderer.rules["fence"]
+        default_render_token = self._md.renderer.renderToken
 
         def custom_fence(tokens, idx, options, env):
             # Intercept known diagram fences and delegate the rest to the
@@ -397,18 +424,39 @@ class MarkdownRenderer:
             token = tokens[idx]
             info = token.info.strip().split(maxsplit=1)[0].lower() if token.info else ""
             code = token.content
+            line_attrs = ""
+            if token.map and len(token.map) == 2:
+                line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
 
             if info == "mermaid":
-                return f'<div class="mermaid">\n{html.escape(code)}\n</div>\n'
+                return (
+                    f'<div class="mdexplore-fence"{line_attrs}>'
+                    f'<div class="mermaid">\n{html.escape(code)}\n</div>'
+                    "</div>\n"
+                )
 
             if info in {"plantuml", "puml", "uml"}:
                 encoded = _encode_plantuml_source(code)
                 src = f"{self._plantuml_server}/svg/{encoded}"
-                return f'<img class="plantuml" src="{src}" alt="PlantUML diagram"/>\n'
+                return (
+                    f'<div class="mdexplore-fence"{line_attrs}>'
+                    f'<img class="plantuml" src="{src}" alt="PlantUML diagram"/>'
+                    "</div>\n"
+                )
 
             return default_fence(tokens, idx, options, env)
 
+        def custom_render_token(tokens, idx, options, env):
+            # Attach source-line metadata so preview selections can map back
+            # to source markdown ranges for copy operations.
+            token = tokens[idx]
+            if token.nesting == 1 and token.type.endswith("_open") and token.map and len(token.map) == 2:
+                token.attrSet("data-md-line-start", str(token.map[0]))
+                token.attrSet("data-md-line-end", str(token.map[1]))
+            return default_render_token(tokens, idx, options, env)
+
         self._md.renderer.rules["fence"] = custom_fence
+        self._md.renderer.renderToken = custom_render_token
 
     def render_document(self, markdown_text: str, title: str) -> str:
         body = self._md.render(markdown_text)
@@ -531,11 +579,13 @@ class MdExploreWindow(QMainWindow):
         ("Red", "#ef7d7d"),
     ]
 
-    def __init__(self, root: Path, app_icon: QIcon):
+    def __init__(self, root: Path, app_icon: QIcon, config_path: Path):
         super().__init__()
         self.root = root.resolve()
+        self.config_path = config_path
         self.renderer = MarkdownRenderer()
         self.current_file: Path | None = None
+        self.last_directory_selection: Path | None = self.root
         self.cache: dict[str, tuple[int, int, str]] = {}
         self._initial_split_applied = False
 
@@ -562,8 +612,11 @@ class MdExploreWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self.tree.selectionModel().currentChanged.connect(self._on_tree_selection_changed)
+        self.tree.expanded.connect(self._on_tree_directory_expanded)
 
         self.preview = QWebEngineView()
+        self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
 
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
@@ -663,6 +716,7 @@ class MdExploreWindow(QMainWindow):
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self.root = new_root.resolve()
+        self.last_directory_selection = self.root
         self.current_file = None
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
@@ -738,19 +792,343 @@ class MdExploreWindow(QMainWindow):
             self.model.set_color_for_file(path, color_actions[chosen])
         self.tree.viewport().update()
 
+    def _on_tree_directory_expanded(self, index) -> None:
+        """Treat expanded directories as active scope for quit persistence/title."""
+        if not index.isValid():
+            return
+        path = Path(self.model.filePath(index))
+        if not path.is_dir():
+            return
+        self.tree.setCurrentIndex(index)
+        self.last_directory_selection = path.resolve()
+        self._update_window_title()
+
+    def _show_preview_context_menu(self, pos) -> None:
+        """Extend the preview context menu with a markdown copy action."""
+        request = self.preview.lastContextMenuRequest()
+        selected_text_hint = request.selectedText() if request is not None else ""
+        click_x = int(pos.x())
+        click_y = int(pos.y())
+
+        # Capture selection mapping before context-menu interaction to avoid
+        # losing selection state when the menu action is triggered.
+        js = """
+(() => {
+  const sel = window.getSelection();
+
+  function lineInfo(node) {
+    if (!node) return null;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    if (!(node instanceof Element)) return null;
+    const el = node.closest('[data-md-line-start][data-md-line-end]');
+    if (!el) return null;
+    const start = parseInt(el.getAttribute('data-md-line-start'), 10);
+    const end = parseInt(el.getAttribute('data-md-line-end'), 10);
+    if (Number.isNaN(start) || Number.isNaN(end)) return null;
+    return { start, end };
+  }
+
+  function normalizeRange(startInfo, endInfo) {
+    let start = startInfo ? startInfo.start : endInfo.start;
+    let end = endInfo ? endInfo.end : startInfo.end;
+    if (start > end) {
+      const tmp = start;
+      start = end;
+      end = tmp;
+    }
+    if (end <= start) end = start + 1;
+    return { start, end };
+  }
+
+  const hasSelection = !!(sel && sel.toString && sel.toString().trim());
+  const selectedText = hasSelection ? sel.toString() : "";
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+    const range = sel.getRangeAt(0);
+    const startInfo = lineInfo(range.startContainer);
+    const endInfo = lineInfo(range.endContainer);
+    if (startInfo || endInfo) {
+      return { hasSelection: true, selectedText, ...normalizeRange(startInfo, endInfo), via: "selection" };
+    }
+  }
+
+  // Fallback: map from right-clicked block location.
+  const clicked = document.elementFromPoint(__CLICK_X__, __CLICK_Y__);
+  const clickedInfo = lineInfo(clicked);
+  if (clickedInfo) {
+    return {
+      hasSelection,
+      selectedText,
+      start: clickedInfo.start,
+      end: clickedInfo.end,
+      via: "click",
+    };
+  }
+
+  return { hasSelection, selectedText };
+})();
+"""
+        js = js.replace("__CLICK_X__", str(click_x)).replace("__CLICK_Y__", str(click_y))
+        self.preview.page().runJavaScript(
+            js,
+            lambda result: self._show_preview_context_menu_with_cached_selection(pos, result, selected_text_hint),
+        )
+
+    def _show_preview_context_menu_with_cached_selection(self, pos, selection_info, selected_text_hint: str) -> None:
+        """Build preview menu and use cached selection metadata for copy action."""
+        menu = self.preview.createStandardContextMenu()
+        has_selection = bool(selected_text_hint.strip() or self.preview.selectedText().strip())
+        if isinstance(selection_info, dict) and selection_info.get("hasSelection"):
+            has_selection = True
+
+        copy_source_action: QAction | None = None
+        copy_rendered_action: QAction | None = None
+        if has_selection:
+            menu.addSeparator()
+            copy_rendered_action = menu.addAction("Copy Rendered Text")
+            copy_source_action = menu.addAction("Copy Source Markdown")
+
+        chosen = menu.exec(self.preview.mapToGlobal(pos))
+        if copy_rendered_action is not None and chosen == copy_rendered_action:
+            self._copy_preview_selection_as_rendered_text(selection_info, selected_text_hint)
+            menu.deleteLater()
+            return
+        if copy_source_action is not None and chosen == copy_source_action:
+            self._copy_preview_selection_as_source_markdown(selection_info, selected_text_hint)
+        menu.deleteLater()
+
+    def _copy_preview_selection_as_rendered_text(self, selection_info, selected_text_hint: str) -> None:
+        """Copy currently selected rendered preview text as plain text."""
+        selected_text = ""
+        if isinstance(selection_info, dict):
+            selected_raw = selection_info.get("selectedText")
+            if isinstance(selected_raw, str):
+                selected_text = selected_raw
+        if not selected_text.strip():
+            selected_text = selected_text_hint
+        if not selected_text.strip():
+            selected_text = self.preview.selectedText()
+        if not selected_text.strip():
+            self.statusBar().showMessage("No selected rendered text to copy", 3000)
+            return
+
+        self._set_plain_text_clipboard(selected_text)
+        self.statusBar().showMessage("Copied rendered text", 3000)
+
+    def _copy_preview_selection_as_source_markdown(self, selection_info, selected_text_hint: str) -> None:
+        """Copy source markdown lines that correspond to selected preview content."""
+        if self.current_file is None:
+            self.statusBar().showMessage("No markdown file selected", 3000)
+            return
+        source_path = self.current_file
+        try:
+            lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        except Exception:
+            self.statusBar().showMessage("Could not read source markdown file", 3000)
+            return
+
+        if not lines:
+            QApplication.clipboard().setText("")
+            self.statusBar().showMessage("Copied source markdown (empty file)", 3000)
+            return
+
+        if isinstance(selection_info, dict):
+            start_raw = selection_info.get("start")
+            end_raw = selection_info.get("end")
+            if isinstance(start_raw, (int, float)) and isinstance(end_raw, (int, float)):
+                start = max(0, int(start_raw))
+                end = max(start + 1, int(end_raw))
+                start = min(start, len(lines) - 1)
+                end = min(end, len(lines))
+                snippet = "".join(lines[start:end])
+                self._set_plain_text_clipboard(snippet)
+                self.statusBar().showMessage(
+                    f"Copied source markdown lines {start + 1}-{end}",
+                    3500,
+                )
+                return
+
+        # Fallback: find selected text in source and copy containing source lines.
+        js_selected_text = ""
+        if isinstance(selection_info, dict):
+            selected_raw = selection_info.get("selectedText")
+            if isinstance(selected_raw, str):
+                js_selected_text = selected_raw.strip()
+
+        query = js_selected_text or selected_text_hint.strip() or self.preview.selectedText().strip()
+        if not query:
+            query = QApplication.clipboard().text(QClipboard.Mode.Clipboard).strip()
+        if query:
+            source_text = "".join(lines)
+            found_at = source_text.find(query)
+            if found_at != -1:
+                line_start = source_text.count("\n", 0, found_at)
+                line_end = source_text.count("\n", 0, found_at + len(query)) + 1
+                line_start = min(line_start, len(lines) - 1)
+                line_end = min(max(line_end, line_start + 1), len(lines))
+                snippet = "".join(lines[line_start:line_end])
+                self._set_plain_text_clipboard(snippet)
+                self.statusBar().showMessage(
+                    f"Copied source markdown lines {line_start + 1}-{line_end} (fallback)",
+                    4000,
+                )
+                return
+
+            if self._copy_source_by_fuzzy_lines(lines, query):
+                return
+
+        self._set_plain_text_clipboard("".join(lines))
+        self.statusBar().showMessage(
+            "Could not map selection exactly; copied full source markdown",
+            4500,
+        )
+
+    @staticmethod
+    def _normalize_for_fuzzy_match(text: str) -> str:
+        lowered = text.casefold()
+        stripped = re.sub(r"[`*_~>#\\[\\](){}|!+-]", " ", lowered)
+        return re.sub(r"\s+", " ", stripped).strip()
+
+    def _copy_source_by_fuzzy_lines(self, lines: list[str], query_text: str) -> bool:
+        """Fuzzy-match selected first/last lines against markdown source lines."""
+        raw_query_lines = [line.strip() for line in query_text.splitlines() if line.strip()]
+        if not raw_query_lines:
+            return False
+
+        normalized_lines = [self._normalize_for_fuzzy_match(line) for line in lines]
+        meaningful_query_lines: list[str] = []
+        for line in raw_query_lines:
+            normalized = self._normalize_for_fuzzy_match(line)
+            if normalized:
+                meaningful_query_lines.append(normalized)
+        if not meaningful_query_lines:
+            return False
+
+        def best_line_match(query_norm: str, start_index: int = 0) -> tuple[int, float]:
+            best_idx = -1
+            best_score = 0.0
+            for idx in range(start_index, len(normalized_lines)):
+                candidate = normalized_lines[idx]
+                if not candidate:
+                    continue
+                if query_norm in candidate:
+                    score = 0.90 + min(0.10, len(query_norm) / max(len(candidate), 1))
+                elif candidate in query_norm and len(candidate) >= 8:
+                    score = 0.60 + min(0.30, len(candidate) / max(len(query_norm), 1))
+                else:
+                    score = SequenceMatcher(None, query_norm, candidate).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+            return best_idx, best_score
+
+        def find_anchor(candidates: list[str], start_index: int, min_score: float) -> tuple[int, float]:
+            # Try candidate lines in order and stop at the first sufficiently
+            # strong match so non-identifying boundary lines are skipped.
+            best_idx = -1
+            best_score = 0.0
+            for query_norm in candidates:
+                idx, score = best_line_match(query_norm, start_index)
+                if score > best_score:
+                    best_idx = idx
+                    best_score = score
+                if idx >= 0 and score >= min_score:
+                    return idx, score
+            return best_idx, best_score
+
+        start_idx, start_score = find_anchor(meaningful_query_lines, 0, 0.45)
+        if start_idx < 0 or start_score < 0.45:
+            return False
+
+        end_idx = start_idx + 1
+        if len(meaningful_query_lines) > 1:
+            end_candidates = list(reversed(meaningful_query_lines))
+            end_match_idx, end_score = find_anchor(end_candidates, start_idx, 0.42)
+            if end_match_idx >= start_idx and end_score >= 0.42:
+                end_idx = end_match_idx + 1
+            else:
+                approx_span = max(1, len(meaningful_query_lines))
+                end_idx = min(len(lines), start_idx + approx_span)
+
+        end_idx = max(start_idx + 1, min(end_idx, len(lines)))
+        snippet = "".join(lines[start_idx:end_idx])
+        if not snippet.strip():
+            return False
+
+        self._set_plain_text_clipboard(snippet)
+        self.statusBar().showMessage(
+            f"Copied source markdown lines {start_idx + 1}-{end_idx} (fuzzy)",
+            4000,
+        )
+        return True
+
+    def _set_plain_text_clipboard(self, text: str) -> None:
+        """Set clipboard text via Qt, with platform CLI fallback for reliability."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text, QClipboard.Mode.Clipboard)
+        clipboard.setText(text, QClipboard.Mode.Selection)
+        QApplication.processEvents()
+
+        try:
+            if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+                subprocess.run(["wl-copy"], input=text, text=True, check=False)
+                return
+            if os.environ.get("DISPLAY") and shutil.which("xclip"):
+                subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=False)
+                return
+            if os.environ.get("DISPLAY") and shutil.which("xsel"):
+                subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=False)
+        except Exception:
+            # Qt clipboard already received the text; ignore CLI fallback errors.
+            pass
+
     def _highlight_scope_directory(self) -> Path:
-        """Use selected directory as scope when possible; otherwise current root."""
+        """Resolve active scope from selected/last-visited directory, then root."""
         index = self.tree.currentIndex()
         if index.isValid():
             selected = Path(self.model.filePath(index))
             if selected.is_dir():
-                return selected
+                try:
+                    resolved = selected.resolve()
+                except Exception:
+                    resolved = selected
+                self.last_directory_selection = resolved
+                return resolved
+        if self.last_directory_selection is not None and self.last_directory_selection.is_dir():
+            return self.last_directory_selection
         return self.root
 
     def _update_window_title(self) -> None:
         """Show the effective root in the application window title."""
         scope = self._highlight_scope_directory()
         self.setWindowTitle(f"mdexplore - {scope}")
+
+    def _effective_root_for_persistence(self) -> Path:
+        """Resolve persisted root, preferring selected or last visited directory."""
+        index = self.tree.currentIndex()
+        if index.isValid():
+            selected = Path(self.model.filePath(index))
+            if selected.is_dir():
+                try:
+                    return selected.resolve()
+                except Exception:
+                    return selected
+        if self.last_directory_selection is not None and self.last_directory_selection.is_dir():
+            return self.last_directory_selection
+        return self.root
+
+    def _persist_effective_root(self) -> None:
+        """Persist the effective root for future no-argument launches."""
+        scope = self._effective_root_for_persistence()
+        try:
+            self.config_path.write_text(str(scope.resolve()) + "\n", encoding="utf-8")
+        except Exception:
+            # Requested behavior is resilience; persistence failure should not
+            # block application exit.
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._persist_effective_root()
+        super().closeEvent(event)
 
     def _confirm_and_clear_all_highlighting(self) -> None:
         """Prompt and clear all highlight metadata recursively under current scope."""
@@ -798,6 +1176,12 @@ class MdExploreWindow(QMainWindow):
     def _on_tree_selection_changed(self, current, _previous) -> None:
         path = Path(self.model.filePath(current))
         self._update_window_title()
+        if path.is_dir():
+            try:
+                self.last_directory_selection = path.resolve()
+            except Exception:
+                self.last_directory_selection = path
+            return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
         self._load_preview(path)
@@ -853,12 +1237,12 @@ def main() -> int:
     parser.add_argument(
         "path",
         nargs="?",
-        default=".",
-        help="Root directory to browse (default: current directory).",
+        default=None,
+        help="Root directory to browse (default: ~/.mdexplore.cfg path, or home directory).",
     )
     args = parser.parse_args()
 
-    root = Path(args.path).expanduser()
+    root = Path(args.path).expanduser() if args.path is not None else _load_default_root_from_config()
     if not root.exists():
         print(f"Path does not exist: {root}", file=sys.stderr)
         return 2
@@ -868,10 +1252,13 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("mdexplore")
+    # Explicit desktop file name improves Linux shell mapping between the
+    # running window and mdexplore.desktop for icon/pinning behavior.
+    app.setDesktopFileName("mdexplore")
     app_icon = _build_markdown_icon()
     app.setWindowIcon(app_icon)
 
-    window = MdExploreWindow(root, app_icon)
+    window = MdExploreWindow(root, app_icon, _config_file_path())
     window.show()
     return app.exec()
 

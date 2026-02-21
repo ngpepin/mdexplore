@@ -13,13 +13,15 @@ GenericName=Markdown Explorer
 Comment=Browse and preview Markdown files with math and diagrams
 
 # Absolute path to your launcher script:
-Exec=/home/YOUR_USER/Projects/mdexplore/mdexplore.sh
+# Keep %u so file-manager integrations can pass a selected directory/URI.
+Exec=/home/YOUR_USER/Projects/mdexplore/mdexplore.sh %u
 
 # Optional working directory:
 Path=/home/YOUR_USER/Projects/mdexplore
 
 # Absolute path to icon file:
 Icon=/home/YOUR_USER/Projects/mdexplore/mdexplor-icon.png
+StartupWMClass=mdexplore
 
 Terminal=false
 StartupNotify=true
