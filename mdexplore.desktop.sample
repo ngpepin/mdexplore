@@ -1,0 +1,27 @@
+# Copy this file to: ~/.local/share/applications/mdexplore.desktop
+# Then edit the absolute paths below for your environment.
+#
+# Example:
+#   cp /path/to/mdexplore/mdexplore.desktop.sample ~/.local/share/applications/mdexplore.desktop
+#   chmod +x ~/.local/share/applications/mdexplore.desktop
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=mdexplore
+GenericName=Markdown Explorer
+Comment=Browse and preview Markdown files with math and diagrams
+
+# Absolute path to your launcher script:
+Exec=/home/YOUR_USER/Projects/mdexplore/mdexplore.sh
+
+# Optional working directory:
+Path=/home/YOUR_USER/Projects/mdexplore
+
+# Absolute path to icon file:
+Icon=/home/YOUR_USER/Projects/mdexplore/mdexplor-icon.webp
+
+Terminal=false
+StartupNotify=true
+Categories=Utility;Office;TextTools;
+Keywords=markdown;preview;mathjax;mermaid;plantuml;

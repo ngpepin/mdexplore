@@ -1,0 +1,54 @@
+# Python caches and compiled artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test, lint, and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local runtime files
+*.log
+*.pid
+*.core
+core.*
+.mdexplore-colors.json
+
+# Editors and OS junk
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Common executables/binaries (keep scripts like *.sh tracked)
+*.exe
+*.msi
+*.app
+*.bin
+*.out
+*.dll
+*.dylib
+*.a
+*.o
+*.obj
+*.class
+*.jar
