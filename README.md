@@ -16,12 +16,14 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - `^` moves root up one directory level.
   - `Quit` closes the app.
   - `Edit` opens the selected file in VS Code (`code` CLI).
+- Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - `F5` refresh shortcut for the currently selected file.
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
-- Top-right color buttons copy matching highlighted file lists to clipboard.
+- Top-right color buttons copy matching highlighted files to clipboard.
+- Clipboard copy uses file URI MIME formats compatible with Nemo/Nautilus paste.
 
 ## Requirements
 
@@ -75,11 +77,12 @@ python3 /path/to/mdexplore/mdexplore.py [PATH]
 ### File Highlights
 
 - In the file tree, right-click any `.md` file.
-- Choose a highlight color (or clear it).
+- Choose a highlight color (`Highlight Yellow`, then `... <Color>`), or clear it.
 - Colors are persisted in `.mdexplore-colors.json` in each affected directory.
 - If a directory is not writable, color persistence fails quietly by design.
 - Use the top-right "Copy to clipboard files matching:" color buttons to copy files
   with a given highlight color.
+- Right-click a directory to access recursive `Clear All` for that subtree.
 - Copy/Clear operations are recursive and use the selected directory as scope when
   a directory is selected; otherwise they use the current root directory.
 
@@ -99,6 +102,8 @@ PLANTUML_SERVER=https://your-server/plantuml /path/to/mdexplore/mdexplore.sh
 ```text
 mdexplore.py       # Qt application, file tree, renderer integration
 mdexplore.sh       # launcher (venv create/install/run)
+mdexplore.desktop.sample # sample desktop launcher entry for user customization
+mdexplor-icon.png  # primary app icon asset (preferred)
 requirements.txt   # Python runtime dependencies
 README.md          # project docs
 AGENTS.md          # coding-agent maintenance guide

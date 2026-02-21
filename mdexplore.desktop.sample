@@ -19,7 +19,7 @@ Exec=/home/YOUR_USER/Projects/mdexplore/mdexplore.sh
 Path=/home/YOUR_USER/Projects/mdexplore
 
 # Absolute path to icon file:
-Icon=/home/YOUR_USER/Projects/mdexplore/mdexplor-icon.webp
+Icon=/home/YOUR_USER/Projects/mdexplore/mdexplor-icon.png
 
 Terminal=false
 StartupNotify=true

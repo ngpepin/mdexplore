@@ -177,7 +177,9 @@ def _build_markdown_icon() -> QIcon:
         cropped = QPixmap.fromImage(image.copy(minx, miny, maxx - minx + 1, maxy - miny + 1))
 
         size = 256
-        inset = int(size * 0.08)
+        # Keep only a tiny safety inset so icon art occupies as much of the
+        # launcher tile as possible while still preserving aspect ratio.
+        inset = 2
         max_w = size - (2 * inset)
         max_h = size - (2 * inset)
         scaled = cropped.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -192,7 +194,7 @@ def _build_markdown_icon() -> QIcon:
         painter.end()
         return canvas
 
-    for icon_name in ("mdexplor-icon.webp", "mdexplore-icon.webp"):
+    for icon_name in ("mdexplor-icon.png", "mdexplor-icon.webp", "mdexplore-icon.webp"):
         icon_path = Path(__file__).resolve().with_name(icon_name)
         if icon_path.exists():
             asset_pixmap = QPixmap(str(icon_path))
@@ -665,13 +667,14 @@ class MdExploreWindow(QMainWindow):
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
-        self.path_label.setText(f"Root: {self.root}")
+        self.path_label.setText("Select a markdown file")
         self.preview.setHtml(
             self._placeholder_html("Select a markdown file to preview"),
             QUrl.fromLocalFile(f"{self.root}/"),
         )
         self._initial_split_applied = False
         self._update_up_button_state()
+        self._update_window_title()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _update_up_button_state(self) -> None:
@@ -703,6 +706,7 @@ class MdExploreWindow(QMainWindow):
         if not index.isValid():
             return
         self.tree.setCurrentIndex(index)
+        self._update_window_title()
         path = Path(self.model.filePath(index))
 
         menu = QMenu(self)
@@ -742,6 +746,11 @@ class MdExploreWindow(QMainWindow):
             if selected.is_dir():
                 return selected
         return self.root
+
+    def _update_window_title(self) -> None:
+        """Show the effective root in the application window title."""
+        scope = self._highlight_scope_directory()
+        self.setWindowTitle(f"mdexplore - {scope}")
 
     def _confirm_and_clear_all_highlighting(self) -> None:
         """Prompt and clear all highlight metadata recursively under current scope."""
@@ -788,6 +797,7 @@ class MdExploreWindow(QMainWindow):
 
     def _on_tree_selection_changed(self, current, _previous) -> None:
         path = Path(self.model.filePath(current))
+        self._update_window_title()
         if not path.is_file() or path.suffix.lower() != ".md":
             return
         self._load_preview(path)

@@ -10,6 +10,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
 - `^`, `Quit`, and `Edit` actions.
+- Top-right copy-by-color controls for clipboard file operations.
 
 ## Repository Map
 
@@ -17,6 +18,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `requirements.txt`: Python runtime dependencies.
 - `README.md`: user-facing setup and usage documentation.
+- `mdexplore.desktop.sample`: user-adaptable `.desktop` launcher template.
+- `mdexplor-icon.png`: primary app icon asset (preferred).
 - `DESCRIPTION.md`: short repository summary and suggested topic tags.
 - `LICENSE`: MIT license text.
 
@@ -37,12 +40,14 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Tree shows directories and `.md` files only.
 - Selecting a Markdown file updates preview quickly.
 - `^` navigates one directory level up and re-roots the tree.
+- Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - `Edit` opens currently selected file with `code`.
 - `F5` refreshes preview for the selected file.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
 - Copy-by-color buttons recurse from selected directory when a directory is selected, otherwise from current root.
+- Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
 
 ## Editing Rules
 
