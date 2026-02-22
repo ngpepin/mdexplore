@@ -9,7 +9,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Left-pane directory tree rooted at a target folder.
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
-- `^`, `Refresh`, `Quit`, and `Edit` actions.
+- `^`, `Refresh`, `PDF`, `Quit`, and `Edit` actions.
 - Top-right copy-by-color controls for clipboard file operations.
 
 ## Repository Map
@@ -29,6 +29,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Python `3.10+`.
 - Linux desktop with GUI support.
 - `PySide6` and `QtWebEngine` available via pip dependencies.
+- `pypdf` and `reportlab` available for PDF page-number stamping.
 - Mermaid should prefer a local bundle when available and only use CDN fallback.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
 - Java runtime is expected for local PlantUML rendering.
@@ -65,8 +66,16 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `Edit` opens currently selected file with `code`.
 - `Refresh` button and `F5` both refresh the current directory tree view
   (new files appear, deleted files disappear) without requiring app restart.
+- `PDF` exports the currently previewed markdown rendering to
+  `<source-basename>.pdf` beside the source file, with centered `N of M`
+  numbering at the bottom of each page.
+- PDF export should preflight preview readiness (MathJax/Mermaid/fonts) before
+  snapshotting, and apply print-focused math styling to avoid cramped glyphs.
 - If the currently previewed markdown file changes on disk, preview should
   auto-refresh and report that via status bar message.
+- Status bar should show progress during long-running operations (preview
+  loading/rendering, PlantUML completion, PDF export) and should not remain
+  blank during idle gaps.
 - Search input uses label `Search and highlight:` and includes an explicit in-field `X`
   clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.
@@ -116,7 +125,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.
-- PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`).
+- PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`),
+  defaulting to `vendor/plantuml/plantuml.jar` unless `PLANTUML_JAR` is set.
 - PlantUML failures should render inline as:
   `PlantUML render failed with error ...`, including detailed stderr context
   (line numbers when available).
@@ -140,8 +150,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
   Log retention is capped to the most recent 1000 lines.
 - Launcher should verify key runtime imports (`markdown_it`, `linkify_it`,
-  `PySide6.QtWebEngineWidgets`) and self-heal by reinstalling requirements if
-  the environment is incomplete.
+  `PySide6.QtWebEngineWidgets`, `pypdf`, `reportlab.pdfgen.canvas`) and
+  self-heal by reinstalling requirements if the environment is incomplete.
 - `--help` should stay lightweight and not require venv activation.
 
 ## Quality Gates Before Finishing

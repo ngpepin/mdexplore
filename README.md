@@ -16,6 +16,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Top actions:
   - `^` moves root up one directory level.
   - `Refresh` rescans the current directory view to pick up new/deleted files.
+  - `PDF` exports the current preview to `<filename>.pdf` with centered page numbering (`N of M`).
   - `Quit` closes the app.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
@@ -23,6 +24,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
+- Status bar reports active long-running work (preview load/render, PlantUML progress, PDF export) and returns to `Ready` instead of staying blank.
 - Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
@@ -50,7 +52,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Internet access for Mermaid only when no local Mermaid bundle is available.
 - Internet access for MathJax only when no local MathJax bundle is available.
 - Java runtime (`java` in `PATH`) for local PlantUML rendering.
-- `plantuml.jar` available (project root by default, or set `PLANTUML_JAR`).
+- `plantuml.jar` available (vendored path by default, or set `PLANTUML_JAR`).
 - Optional: VS Code `code` command in `PATH` for `Edit`.
 
 ## Quick Start
@@ -113,6 +115,17 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Right-click a directory to access recursive `Clear All` for that subtree.
 - Copy/Clear operations are recursive and use scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
+
+### PDF Export
+
+- Click `PDF` (between `Refresh` and `Quit`) to export the currently previewed file.
+- Output path is the previewed file path with `.pdf` extension in the same directory.
+- Export is based on the active rendered preview (markdown + math + Mermaid + PlantUML state).
+- Export waits briefly for math/diagram/font readiness to reduce rendering artifacts.
+- Export auto-scales page content into a print-style layout with top/side margins
+  and an uncluttered footer band.
+- Footer number font size is matched to the document's dominant scaled body text size.
+- Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
 
 ### Search and Match Highlighting
 
@@ -179,7 +192,7 @@ Requires all three terms to match (equivalent to `alpha AND beta AND gamma`).
 
 The app renders PlantUML blocks locally with `plantuml.jar`.
 
-- Default jar path: `/path/to/mdexplore/plantuml.jar`
+- Default jar path: `/path/to/mdexplore/vendor/plantuml/plantuml.jar`
 - Override jar path with `PLANTUML_JAR`:
 
 ```bash

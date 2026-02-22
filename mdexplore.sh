@@ -259,6 +259,8 @@ required = [
     "markdown_it",
     "linkify_it",
     "PySide6.QtWebEngineWidgets",
+    "pypdf",
+    "reportlab.pdfgen.canvas",
 ]
 
 missing = []

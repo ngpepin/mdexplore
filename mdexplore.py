@@ -8,6 +8,7 @@ import base64
 from bisect import bisect_right
 import html
 import hashlib
+from io import BytesIO
 import json
 import math
 import os
@@ -44,6 +45,8 @@ from PySide6.QtWidgets import (
 
 CONFIG_FILE_NAME = ".mdexplore.cfg"
 SEARCH_CLOSE_WORD_GAP = 50
+PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 20
+PDF_EXPORT_PRECHECK_INTERVAL_MS = 140
 
 
 def _config_file_path() -> Path:
@@ -85,6 +88,117 @@ def _extract_plantuml_error_details(stderr_text: str) -> str:
 
     # Fallback: keep the first few lines for context.
     return "\n".join(lines[:8])
+
+
+def _stamp_pdf_page_numbers(pdf_bytes: bytes) -> bytes:
+    """Overlay centered `N of M` footers on every page of a PDF payload."""
+    if not pdf_bytes:
+        raise ValueError("Empty PDF payload")
+
+    try:
+        from pypdf import PageObject, PdfReader, PdfWriter, Transformation
+    except Exception as exc:
+        raise RuntimeError("Missing dependency 'pypdf' for PDF page numbering") from exc
+
+    try:
+        from reportlab.pdfgen import canvas
+    except Exception as exc:
+        raise RuntimeError("Missing dependency 'reportlab' for PDF page numbering") from exc
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    page_total = len(reader.pages)
+    if page_total <= 0:
+        raise RuntimeError("Generated PDF has no pages")
+
+    def estimate_majority_font_size() -> float:
+        """Infer dominant body font size from PDF text operators."""
+        size_counts: dict[float, int] = {}
+        for page in reader.pages[: min(5, page_total)]:
+            try:
+                contents = page.get_contents()
+            except Exception:
+                contents = None
+            if contents is None:
+                continue
+
+            streams = contents if isinstance(contents, list) else [contents]
+            for stream in streams:
+                try:
+                    raw = stream.get_data()
+                except Exception:
+                    continue
+                if not raw:
+                    continue
+                text = raw.decode("latin-1", errors="ignore")
+                for match in re.finditer(r"([0-9]+(?:\\.[0-9]+)?)\\s+Tf\\b", text):
+                    try:
+                        size = float(match.group(1))
+                    except Exception:
+                        continue
+                    if 6.0 <= size <= 24.0:
+                        bucket = round(size * 2.0) / 2.0
+                        size_counts[bucket] = size_counts.get(bucket, 0) + 1
+
+        if not size_counts:
+            return 10.5
+        return max(size_counts.items(), key=lambda item: (item[1], -abs(item[0] - 11.0)))[0]
+
+    base_body_font_size = estimate_majority_font_size()
+
+    writer = PdfWriter()
+    for page_number, page in enumerate(reader.pages, start=1):
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        if width <= 0 or height <= 0:
+            writer.add_page(page)
+            continue
+
+        # Fit rendered content into a print-style content box with explicit
+        # top/side margins plus a dedicated footer band for page numbers.
+        side_margin = max(34.0, min(width * 0.12, base_body_font_size * 4.2))
+        top_margin = max(30.0, min(height * 0.10, base_body_font_size * 3.8))
+        footer_band_height = max(42.0, min(height * 0.16, base_body_font_size * 4.4))
+        content_box_width = max(72.0, width - (2.0 * side_margin))
+        content_box_height = max(72.0, height - top_margin - footer_band_height)
+
+        content_scale = min(
+            1.0,
+            content_box_width / width,
+            content_box_height / height,
+        )
+        content_width = width * content_scale
+        content_height = height * content_scale
+        content_translate_x = side_margin + max(0.0, (content_box_width - content_width) / 2.0)
+        content_translate_y = footer_band_height + max(0.0, (content_box_height - content_height) / 2.0)
+
+        composed_page = PageObject.create_blank_page(width=width, height=height)
+        transform = Transformation().scale(content_scale, content_scale).translate(
+            content_translate_x,
+            content_translate_y,
+        )
+        composed_page.merge_transformed_page(page, transform, over=True)
+
+        footer_font_size = max(8.0, min(14.0, base_body_font_size * content_scale))
+        footer_baseline_y = max(12.0, (footer_band_height - footer_font_size) / 2.0)
+
+        overlay_buffer = BytesIO()
+        footer_canvas = canvas.Canvas(overlay_buffer, pagesize=(width, height))
+        footer_canvas.setFont("Helvetica", footer_font_size)
+        footer_text = f"{page_number} of {page_total}"
+        footer_width = footer_canvas.stringWidth(footer_text, "Helvetica", footer_font_size)
+        x = max(0.0, (width - footer_width) / 2.0)
+        footer_canvas.drawString(x, footer_baseline_y, footer_text)
+        footer_canvas.save()
+
+        overlay_buffer.seek(0)
+        overlay_pdf = PdfReader(overlay_buffer)
+        if overlay_pdf.pages:
+            composed_page.merge_page(overlay_pdf.pages[0])
+        writer.add_page(composed_page)
+
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 def _build_markdown_icon() -> QIcon:
@@ -579,12 +693,14 @@ class MarkdownRenderer:
         return list(dict.fromkeys(sources))
 
     def _resolve_plantuml_jar_path(self) -> Path | None:
-        """Locate plantuml.jar from env, app directory, or current directory."""
+        """Locate plantuml.jar from env, vendor directory, app directory, or current directory."""
         env_value = os.environ.get("PLANTUML_JAR", "").strip()
         candidates: list[Path] = []
         if env_value:
             candidates.append(Path(env_value).expanduser())
         app_dir = Path(__file__).resolve().parent
+        # Prefer the vendored jar location, but keep legacy fallbacks for compatibility.
+        candidates.append(app_dir / "vendor" / "plantuml" / "plantuml.jar")
         candidates.append(app_dir / "plantuml.jar")
         candidates.append(Path.cwd() / "plantuml.jar")
 
@@ -599,7 +715,10 @@ class MarkdownRenderer:
     def _plantuml_setup_error(self) -> str | None:
         """Return setup error text when local PlantUML execution is unavailable."""
         if self._plantuml_jar_path is None:
-            return "plantuml.jar not found (set PLANTUML_JAR or place jar next to mdexplore.py)"
+            return (
+                "plantuml.jar not found "
+                "(set PLANTUML_JAR or place jar at vendor/plantuml/plantuml.jar)"
+            )
         if shutil.which("java") is None:
             return "Java runtime not found in PATH; install Java to render PlantUML diagrams"
         return None
@@ -1186,6 +1305,30 @@ class PlantUmlRenderWorker(QRunnable):
         self.signals.finished.emit(self.hash_key, "done", data_uri)
 
 
+class PdfExportWorkerSignals(QObject):
+    """Signals emitted by background PDF export workers."""
+
+    finished = Signal(str, str)
+
+
+class PdfExportWorker(QRunnable):
+    """Apply footer page numbers and write exported PDF in background."""
+
+    def __init__(self, output_path: Path, pdf_bytes: bytes):
+        super().__init__()
+        self.output_path = output_path
+        self.pdf_bytes = pdf_bytes
+        self.signals = PdfExportWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            stamped_pdf = _stamp_pdf_page_numbers(self.pdf_bytes)
+            self.output_path.write_bytes(stamped_pdf)
+            self.signals.finished.emit(str(self.output_path), "")
+        except Exception as exc:
+            self.signals.finished.emit(str(self.output_path), str(exc))
+
+
 class MdExploreWindow(QMainWindow):
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
@@ -1213,6 +1356,10 @@ class MdExploreWindow(QMainWindow):
         self._active_render_workers: set[PreviewRenderWorker] = set()
         self._plantuml_pool = QThreadPool(self)
         self._plantuml_pool.setMaxThreadCount(2)
+        self._pdf_pool = QThreadPool(self)
+        self._pdf_pool.setMaxThreadCount(1)
+        self._active_pdf_workers: set[PdfExportWorker] = set()
+        self._pdf_export_in_progress = False
         # Global, in-process result cache for PlantUML blocks keyed by hash of
         # normalized source. This survives file navigation during this run.
         self._plantuml_results: dict[str, tuple[str, str]] = {}
@@ -1239,6 +1386,11 @@ class MdExploreWindow(QMainWindow):
         self._scroll_capture_timer.setInterval(200)
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
         self._scroll_capture_timer.start()
+        self._default_status_text = "Ready"
+        self._status_idle_timer = QTimer(self)
+        self._status_idle_timer.setInterval(900)
+        self._status_idle_timer.timeout.connect(self._ensure_non_empty_status_message)
+        self._status_idle_timer.start()
         self._file_change_watch_timer = QTimer(self)
         self._file_change_watch_timer.setInterval(1200)
         self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
@@ -1249,7 +1401,8 @@ class MdExploreWindow(QMainWindow):
 
         self.setWindowTitle("mdexplore")
         self.setWindowIcon(app_icon)
-        self.resize(1300, 860)
+        # Give the top control bar a bit more horizontal/vertical room by default.
+        self.resize(1450, 920)
 
         # Use a custom QFileSystemModel so highlight colors render directly
         # in the tree and persist beside files in each directory.
@@ -1278,6 +1431,9 @@ class MdExploreWindow(QMainWindow):
         preview_settings = self.preview.settings()
         preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        if hasattr(QWebEngineSettings.WebAttribute, "PrintElementBackgrounds"):
+            # Keep PDF output visually closer to what users see in the preview.
+            preview_settings.setAttribute(QWebEngineSettings.WebAttribute.PrintElementBackgrounds, True)
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview.loadFinished.connect(self._on_preview_load_finished)
@@ -1287,6 +1443,9 @@ class MdExploreWindow(QMainWindow):
 
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_directory_view)
+
+        self.pdf_btn = QPushButton("PDF")
+        self.pdf_btn.clicked.connect(self._export_current_preview_pdf)
 
         quit_btn = QPushButton("Quit")
         quit_btn.clicked.connect(self.close)
@@ -1352,6 +1511,7 @@ class MdExploreWindow(QMainWindow):
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
+        top_bar.addWidget(self.pdf_btn)
         top_bar.addWidget(quit_btn)
         top_bar.addWidget(edit_btn)
         top_bar.addWidget(self.path_label, 1)
@@ -1377,6 +1537,7 @@ class MdExploreWindow(QMainWindow):
         layout.addWidget(self.splitter, 1)
 
         self.setCentralWidget(central)
+        self.statusBar().showMessage(self._default_status_text)
         # Root is initialized after widgets exist so view/model indexes are valid.
         self._set_root_directory(self.root)
         self._add_shortcuts()
@@ -1417,11 +1578,82 @@ class MdExploreWindow(QMainWindow):
 </html>
 """
 
+    def _ensure_non_empty_status_message(self) -> None:
+        """Keep a non-empty status bar message instead of blank idle periods."""
+        current = self.statusBar().currentMessage().strip()
+        if current:
+            return
+        self.statusBar().showMessage(self._default_status_text)
+
+    def _preview_plantuml_progress(self) -> tuple[int, int, int] | None:
+        """Return (done, pending, failed) PlantUML counts for current preview."""
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return None
+        placeholders = self._plantuml_placeholders_by_doc.get(path_key, {})
+        if not placeholders:
+            return (0, 0, 0)
+
+        done = 0
+        pending = 0
+        failed = 0
+        for hash_key in placeholders:
+            status = self._plantuml_results.get(hash_key, ("pending", ""))[0]
+            if status == "done":
+                done += 1
+            elif status == "error":
+                failed += 1
+            else:
+                pending += 1
+        return (done, pending, failed)
+
+    def _show_preview_progress_status(self) -> None:
+        """Publish a detailed current-file status while preview assets settle."""
+        if self.current_file is None:
+            self.statusBar().showMessage(self._default_status_text)
+            return
+
+        progress = self._preview_plantuml_progress()
+        if progress is None:
+            self.statusBar().showMessage(self._default_status_text)
+            return
+
+        done, pending, failed = progress
+        if done == 0 and pending == 0 and failed == 0:
+            self.statusBar().showMessage(f"Preview ready: {self.current_file.name}", 3500)
+            return
+
+        total = done + pending + failed
+        if pending > 0:
+            message = (
+                f"Preview shown: {self.current_file.name} "
+                f"(PlantUML {done}/{total} ready, {pending} rendering"
+            )
+            if failed > 0:
+                message += f", {failed} failed"
+            message += ")"
+            self.statusBar().showMessage(message)
+            return
+
+        if failed > 0:
+            self.statusBar().showMessage(
+                f"Preview ready: {self.current_file.name} "
+                f"(PlantUML {done}/{total} ready, {failed} failed)",
+                5000,
+            )
+            return
+
+        self.statusBar().showMessage(
+            f"Preview ready: {self.current_file.name} (PlantUML {done}/{total} ready)",
+            3500,
+        )
+
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self._capture_current_preview_scroll(force=True)
         self._capture_splitter_sizes_for_session()
         self.root = new_root.resolve()
+        self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         self.last_directory_selection = self.root
         self.current_file = None
         self._clear_current_preview_signature()
@@ -1447,6 +1679,7 @@ class MdExploreWindow(QMainWindow):
     def _on_preview_load_finished(self, ok: bool) -> None:
         """Apply deferred in-preview highlighting after a page finishes loading."""
         if not ok:
+            self.statusBar().showMessage("Preview load failed", 5000)
             return
         current_key = self._current_preview_path_key()
         if current_key is None:
@@ -1480,6 +1713,7 @@ class MdExploreWindow(QMainWindow):
         else:
             self._preview_capture_enabled = True
             self._scroll_restore_block_until = 0.0
+        self._show_preview_progress_status()
 
     def _trigger_client_renderers_for(self, expected_key: str) -> None:
         """Run in-page renderer helpers only if the same preview is still active."""
@@ -1556,6 +1790,7 @@ class MdExploreWindow(QMainWindow):
 
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         """Refresh tree contents to detect newly created/deleted markdown files."""
+        self.statusBar().showMessage("Refreshing directory view...")
         selected_path: Path | None = None
         current_index = self.tree.currentIndex()
         if current_index.isValid():
@@ -1697,6 +1932,9 @@ class MdExploreWindow(QMainWindow):
         scope = self._highlight_scope_directory()
         predicate = self._compile_match_predicate(query)
         candidates = self._list_markdown_files_non_recursive(scope)
+        self.statusBar().showMessage(
+            f"Searching {len(candidates)} markdown file(s) in {scope}...",
+        )
         matches: list[Path] = []
 
         for path in candidates:
@@ -3013,6 +3251,7 @@ class MdExploreWindow(QMainWindow):
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
+        self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
 
     def _on_preview_render_finished(
@@ -3051,6 +3290,7 @@ class MdExploreWindow(QMainWindow):
         else:
             self.cache[path_key] = (mtime_ns, size, html_doc)
             self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
+            self.statusBar().showMessage(f"Preview rendered: {self.current_file.name}")
 
         try:
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
@@ -3235,6 +3475,11 @@ class MdExploreWindow(QMainWindow):
             self.cache.pop(doc_key, None)
 
         self._apply_plantuml_result_to_current_preview(hash_key)
+        current_key = self._current_preview_path_key()
+        if current_key is not None:
+            current_placeholders = self._plantuml_placeholders_by_doc.get(current_key, {})
+            if hash_key in current_placeholders:
+                self._show_preview_progress_status()
 
     def _apply_plantuml_result_to_current_preview(self, hash_key: str) -> None:
         if self.current_file is None:
@@ -3303,6 +3548,7 @@ class MdExploreWindow(QMainWindow):
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
         self._pending_preview_search_close_groups = self._current_close_term_groups() if should_highlight_search else []
+        self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
         try:
@@ -3323,9 +3569,11 @@ class MdExploreWindow(QMainWindow):
             self._set_current_preview_signature(cache_key, int(stat.st_mtime_ns), int(stat.st_size))
             cached = self.cache.get(cache_key)
             if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+                self.statusBar().showMessage(f"Using cached preview: {resolved.name}...")
                 self.preview.setHtml(cached[2], base_url)
                 return
 
+            self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
             markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
             doc_id = self._doc_id_for_path(cache_key)
 
@@ -3360,6 +3608,7 @@ class MdExploreWindow(QMainWindow):
             html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
+            self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
             self.preview.setHtml(html_doc, base_url)
         except Exception as exc:
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
@@ -3377,12 +3626,167 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             cache_key = str(self.current_file)
         self.cache.pop(cache_key, None)
+        self.statusBar().showMessage(f"Refreshing preview: {self.current_file.name}...")
         self._load_preview(self.current_file)
         if reason:
             self.statusBar().showMessage(
                 f"Auto-refreshed preview: {self.current_file.name} ({reason})",
                 4500,
             )
+
+    def _set_pdf_export_busy(self, busy: bool) -> None:
+        """Toggle PDF export UI state while async export is running."""
+        self._pdf_export_in_progress = busy
+        self.pdf_btn.setEnabled(not busy)
+
+    def _export_current_preview_pdf(self) -> None:
+        """Export the currently previewed markdown rendering to a numbered PDF."""
+        if self.current_file is None:
+            QMessageBox.information(self, "No file selected", "Select a markdown file before exporting to PDF.")
+            return
+        if self._pdf_export_in_progress:
+            self.statusBar().showMessage("PDF export already in progress", 3000)
+            return
+
+        try:
+            source_path = self.current_file.resolve()
+        except Exception:
+            source_path = self.current_file
+        output_path = source_path.with_suffix(".pdf")
+
+        self._set_pdf_export_busy(True)
+        self.statusBar().showMessage(f"Preparing PDF for {source_path.name}...")
+        self._prepare_preview_for_pdf_export(output_path, attempt=0)
+
+    def _prepare_preview_for_pdf_export(self, output_path: Path, attempt: int) -> None:
+        """Wait for math/fonts readiness and inject print math style before export."""
+        js = """
+(() => {
+  // Print-only math tuning to avoid cramped/squished glyph appearance in PDF.
+  if (!document.getElementById("__mdexplore_pdf_math_style")) {
+    const style = document.createElement("style");
+    style.id = "__mdexplore_pdf_math_style";
+    style.textContent = `
+@media print {
+  mjx-container[jax="CHTML"] {
+    font-family: "STIX Two Math", "STIXGeneral", "Cambria Math", "Noto Sans Math", "Latin Modern Math", serif !important;
+    font-kerning: normal !important;
+    text-rendering: geometricPrecision;
+  }
+  mjx-container[jax="CHTML"] mjx-mi,
+  mjx-container[jax="CHTML"] mjx-mo,
+  mjx-container[jax="CHTML"] mjx-mn,
+  mjx-container[jax="CHTML"] mjx-mtext {
+    letter-spacing: 0.01em !important;
+  }
+}
+`;
+    document.head.appendChild(style);
+  }
+
+  if (window.__mdexploreRunClientRenderers) {
+    window.__mdexploreRunClientRenderers();
+  }
+
+  const hasMath = !!document.querySelector("mjx-container, .MathJax");
+  const hasMermaid = !!document.querySelector(".mermaid");
+  const mathReady = !hasMath || !!window.__mdexploreMathReady;
+  const mermaidReady = !hasMermaid || !!window.__mdexploreMermaidReady;
+  const fontsReady = !document.fonts || document.fonts.status === "loaded";
+
+  return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid };
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, target=output_path, tries=attempt: self._on_pdf_precheck_result(target, tries, result),
+        )
+
+    def _on_pdf_precheck_result(self, output_path: Path, attempt: int, result) -> None:
+        """Continue waiting until print assets are ready, then trigger print."""
+        math_ready = False
+        mermaid_ready = False
+        fonts_ready = False
+        if isinstance(result, dict):
+            math_ready = bool(result.get("mathReady"))
+            mermaid_ready = bool(result.get("mermaidReady"))
+            fonts_ready = bool(result.get("fontsReady"))
+
+        if math_ready and mermaid_ready and fonts_ready:
+            self._trigger_pdf_print(output_path)
+            return
+
+        if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
+            if attempt == 0:
+                self.statusBar().showMessage("Waiting for math/fonts before PDF export...")
+            QTimer.singleShot(
+                PDF_EXPORT_PRECHECK_INTERVAL_MS,
+                lambda target=output_path, tries=attempt + 1: self._prepare_preview_for_pdf_export(target, tries),
+            )
+            return
+
+        # Fall back instead of blocking export indefinitely if some assets never settle.
+        self.statusBar().showMessage(
+            "Proceeding with PDF export before all preview assets reported ready",
+            3500,
+        )
+        self._trigger_pdf_print(output_path)
+
+    def _trigger_pdf_print(self, output_path: Path) -> None:
+        """Start Qt WebEngine PDF generation for the active preview page."""
+        self.statusBar().showMessage(f"Rendering PDF snapshot: {output_path.name}...")
+        try:
+            self.preview.page().printToPdf(
+                lambda pdf_data, target=output_path: self._on_pdf_render_ready(target, pdf_data)
+            )
+        except Exception as exc:
+            self._set_pdf_export_busy(False)
+            error_text = self._truncate_error_text(str(exc), 500)
+            QMessageBox.critical(self, "PDF export failed", f"Could not start PDF rendering:\n{error_text}")
+            self.statusBar().showMessage(f"PDF export failed: {error_text}", 5000)
+
+    def _on_pdf_render_ready(self, output_path: Path, pdf_data) -> None:
+        """Receive raw PDF bytes from WebEngine and start footer stamping."""
+        try:
+            raw_pdf = bytes(pdf_data)
+        except Exception:
+            raw_pdf = b""
+
+        if not raw_pdf:
+            self._set_pdf_export_busy(False)
+            message = "Qt WebEngine returned an empty PDF payload"
+            QMessageBox.critical(self, "PDF export failed", message)
+            self.statusBar().showMessage(f"PDF export failed: {message}", 5000)
+            return
+
+        worker = PdfExportWorker(output_path, raw_pdf)
+        self._active_pdf_workers.add(worker)
+        worker.signals.finished.connect(
+            lambda path_text, error_text, current_worker=worker: self._on_pdf_export_finished(
+                current_worker,
+                path_text,
+                error_text,
+            )
+        )
+        self._pdf_pool.start(worker)
+        self.statusBar().showMessage(f"Writing numbered PDF: {output_path.name}...")
+
+    def _on_pdf_export_finished(self, worker: PdfExportWorker, output_path_text: str, error_text: str) -> None:
+        """Finalize async PDF export and report result."""
+        self._active_pdf_workers.discard(worker)
+        self._set_pdf_export_busy(False)
+
+        if error_text:
+            short_error = self._truncate_error_text(error_text, 500)
+            QMessageBox.critical(
+                self,
+                "PDF export failed",
+                f"Could not create PDF:\n{output_path_text}\n\n{short_error}",
+            )
+            self.statusBar().showMessage(f"PDF export failed: {short_error}", 5000)
+            return
+
+        self.statusBar().showMessage(f"Exported PDF: {output_path_text}", 5000)
 
     def _edit_current_file(self) -> None:
         """Open the selected markdown file in VS Code."""
