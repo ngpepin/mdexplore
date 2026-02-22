@@ -43,6 +43,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - `mdexplore.py [PATH]`
 - Tree shows directories and `.md` files only.
 - Selecting a Markdown file updates preview quickly.
+- Navigating to a previously cached file must still stat-check mtime/size;
+  if changed, it must re-render instead of showing stale cached HTML.
 - PlantUML rendering jobs must run off the UI thread to keep the window responsive.
 - PlantUML blocks should not block markdown preview; show placeholders first,
   then progressively replace each diagram as local render jobs complete.
@@ -60,6 +62,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
 - `Refresh` button and `F5` both refresh the selected file preview.
+- If the currently previewed markdown file changes on disk, preview should
+  auto-refresh and report that via status bar message.
 - Search input uses label `Search:` and includes an explicit in-field `X`
   clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.

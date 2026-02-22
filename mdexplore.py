@@ -1222,6 +1222,10 @@ class MdExploreWindow(QMainWindow):
         self._active_plantuml_workers: set[PlantUmlRenderWorker] = set()
         # Per-file session scroll memory (not persisted to disk).
         self._preview_scroll_positions: dict[str, float] = {}
+        # Signature of the currently previewed markdown file so we can detect
+        # on-disk edits and auto-refresh when content changes externally.
+        self._current_preview_signature_key: str | None = None
+        self._current_preview_signature: tuple[int, int] | None = None
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
         self._match_input_text = ""
@@ -1233,6 +1237,10 @@ class MdExploreWindow(QMainWindow):
         self._scroll_capture_timer.setInterval(200)
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
         self._scroll_capture_timer.start()
+        self._file_change_watch_timer = QTimer(self)
+        self._file_change_watch_timer.setInterval(1200)
+        self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
+        self._file_change_watch_timer.start()
         self._initial_split_applied = False
 
         self.setWindowTitle("mdexplore")
@@ -1410,6 +1418,7 @@ class MdExploreWindow(QMainWindow):
         self.root = new_root.resolve()
         self.last_directory_selection = self.root
         self.current_file = None
+        self._clear_current_preview_signature()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
         self._pending_preview_search_terms = []
@@ -2388,6 +2397,7 @@ class MdExploreWindow(QMainWindow):
             html_doc = self._placeholder_html(f"Could not render preview for {self.current_file.name}: {error_text}")
         else:
             self.cache[path_key] = (mtime_ns, size, html_doc)
+            self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
 
         try:
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
@@ -2406,6 +2416,46 @@ class MdExploreWindow(QMainWindow):
             return str(self.current_file.resolve())
         except Exception:
             return str(self.current_file)
+
+    def _clear_current_preview_signature(self) -> None:
+        """Drop tracked mtime/size signature for the active preview file."""
+        self._current_preview_signature_key = None
+        self._current_preview_signature = None
+
+    def _set_current_preview_signature(self, path_key: str, mtime_ns: int, size: int) -> None:
+        """Record the latest observed on-disk signature for a previewed file."""
+        self._current_preview_signature_key = path_key
+        self._current_preview_signature = (int(mtime_ns), int(size))
+
+    def _on_file_change_watch_tick(self) -> None:
+        """Auto-refresh preview when the active markdown file changes on disk."""
+        if self.current_file is None:
+            return
+
+        try:
+            resolved = self.current_file.resolve()
+            path_key = str(resolved)
+        except Exception:
+            resolved = self.current_file
+            path_key = str(self.current_file)
+
+        try:
+            stat = resolved.stat()
+        except Exception:
+            # File may be temporarily inaccessible while external tools save.
+            return
+
+        current_sig = (int(stat.st_mtime_ns), int(stat.st_size))
+        if self._current_preview_signature_key != path_key or self._current_preview_signature is None:
+            self._set_current_preview_signature(path_key, current_sig[0], current_sig[1])
+            return
+        if current_sig == self._current_preview_signature:
+            return
+
+        # Update baseline first so repeated timer ticks during one save do not
+        # trigger duplicate refresh cycles.
+        self._set_current_preview_signature(path_key, current_sig[0], current_sig[1])
+        self._refresh_current_preview(reason="file changed on disk")
 
     def _has_saved_scroll_for_current_preview(self) -> bool:
         key = self._current_preview_path_key()
@@ -2616,6 +2666,7 @@ class MdExploreWindow(QMainWindow):
             resolved = path.resolve()
             stat = resolved.stat()
             cache_key = str(resolved)
+            self._set_current_preview_signature(cache_key, int(stat.st_mtime_ns), int(stat.st_size))
             cached = self.cache.get(cache_key)
             if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
                 self.preview.setHtml(cached[2], base_url)
@@ -2663,12 +2714,21 @@ class MdExploreWindow(QMainWindow):
                 base_url,
             )
 
-    def _refresh_current_preview(self) -> None:
+    def _refresh_current_preview(self, _checked: bool = False, *, reason: str | None = None) -> None:
         """Force re-render of the currently selected file."""
         if self.current_file is None:
             return
-        self.cache.pop(str(self.current_file.resolve()), None)
+        try:
+            cache_key = str(self.current_file.resolve())
+        except Exception:
+            cache_key = str(self.current_file)
+        self.cache.pop(cache_key, None)
         self._load_preview(self.current_file)
+        if reason:
+            self.statusBar().showMessage(
+                f"Auto-refreshed preview: {self.current_file.name} ({reason})",
+                4500,
+            )
 
     def _edit_current_file(self) -> None:
         """Open the selected markdown file in VS Code."""
