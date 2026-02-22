@@ -24,6 +24,8 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
 - Top-right color buttons copy matching highlighted files to clipboard.
+- Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
+- When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
 - Right-click selected text in the preview pane to use:
   - `Copy Rendered Text` for plain rendered selection text.
   - `Copy Source Markdown` for markdown source content.
@@ -99,11 +101,20 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Choose a highlight color (`Highlight Yellow`, then `... <Color>`), or clear it.
 - Colors are persisted in `.mdexplore-colors.json` in each affected directory.
 - If a directory is not writable, color persistence fails quietly by design.
-- Use the top-right "Copy to clipboard files matching:" color buttons to copy files
+- Use the top-right "Copy to clipboard:" color buttons to copy files
   with a given highlight color.
 - Right-click a directory to access recursive `Clear All` for that subtree.
 - Copy/Clear operations are recursive and use scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
+
+### Search and Match Highlighting
+
+- Use `Search:` for non-recursive matching in the current effective scope.
+- Matching files are shown in bold in the tree.
+- Press `Enter` in the search field to run search immediately (skip debounce).
+- Clicking the `X` in the search field clears search text and removes bolding.
+- Opening a matched file while search is active highlights matching text in yellow
+  in the preview and scrolls to the first highlighted match.
 
 ## PlantUML Server Configuration
 

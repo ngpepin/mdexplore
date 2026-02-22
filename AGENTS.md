@@ -49,6 +49,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
 - `Refresh` button and `F5` both refresh the selected file preview.
+- Search input uses label `Search:` and includes an explicit in-field `X`
+  clear action.
+- Pressing `Enter` in search should bypass debounce and run search immediately.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
@@ -64,6 +67,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   If direct mapping fails, it should use selected-text matching and first/last
   line fuzzy matching against source markdown lines, then fall back to copying
   the full source file.
+- While search is active, opening a matched markdown file should highlight
+  matched terms in yellow in preview and scroll to the first match.
 
 ## Editing Rules
 

@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,13 +19,14 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from PySide6.QtCore import QDir, QMimeData, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
     QFileSystemModel,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -263,6 +265,22 @@ def _build_markdown_icon() -> QIcon:
     return QIcon(pixmap)
 
 
+def _build_clear_x_icon() -> QIcon:
+    """Return a small, explicit X icon for the search-field clear action."""
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#9ca3af"))
+    pen.setWidth(2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawLine(3, 3, 11, 11)
+    painter.drawLine(11, 3, 3, 11)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class ColorizedMarkdownModel(QFileSystemModel):
     """Filesystem model with per-directory persisted file highlight colors."""
 
@@ -272,6 +290,7 @@ class ColorizedMarkdownModel(QFileSystemModel):
         super().__init__(parent)
         self._dir_color_map: dict[str, dict[str, str]] = {}
         self._loaded_dirs: set[str] = set()
+        self._search_match_paths: set[str] = set()
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         # Paint colorized markdown rows without affecting directories.
@@ -286,6 +305,14 @@ class ColorizedMarkdownModel(QFileSystemModel):
                             return QBrush(color)
                         luminance = (0.299 * color.redF()) + (0.587 * color.greenF()) + (0.114 * color.blueF())
                         return QBrush(QColor("#101418") if luminance > 0.6 else QColor("#f8fafc"))
+        if role == Qt.ItemDataRole.FontRole:
+            info = self.fileInfo(index)
+            if info.isFile() and info.suffix().lower() == "md":
+                if self._path_key(Path(info.filePath())) in self._search_match_paths:
+                    base_font = super().data(index, role)
+                    font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
+                    font.setBold(True)
+                    return font
         return super().data(index, role)
 
     def set_color_for_file(self, path: Path, color_name: str | None) -> None:
@@ -359,6 +386,18 @@ class ColorizedMarkdownModel(QFileSystemModel):
     def _color_for_file(self, path: Path) -> str | None:
         color_map = self._load_directory_colors(path.parent)
         return color_map.get(path.name)
+
+    def set_search_match_paths(self, paths: set[Path]) -> None:
+        self._search_match_paths = {self._path_key(path) for path in paths}
+
+    def clear_search_match_paths(self) -> None:
+        self._search_match_paths.clear()
+
+    def _path_key(self, path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
 
     def _directory_key(self, directory: Path) -> str:
         return str(directory)
@@ -587,6 +626,13 @@ class MdExploreWindow(QMainWindow):
         self.current_file: Path | None = None
         self.last_directory_selection: Path | None = self.root
         self.cache: dict[str, tuple[int, int, str]] = {}
+        self.current_match_files: list[Path] = []
+        self._pending_preview_search_terms: list[str] = []
+        self._match_input_text = ""
+        self.match_timer = QTimer(self)
+        self.match_timer.setSingleShot(True)
+        self.match_timer.setInterval(1000)
+        self.match_timer.timeout.connect(self._run_match_search)
         self._initial_split_applied = False
 
         self.setWindowTitle("mdexplore")
@@ -617,6 +663,7 @@ class MdExploreWindow(QMainWindow):
         self.preview = QWebEngineView()
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
+        self.preview.loadFinished.connect(self._on_preview_load_finished)
 
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
@@ -633,7 +680,7 @@ class MdExploreWindow(QMainWindow):
         self.path_label = QLabel("")
         self.path_label.setTextInteractionFlags(self.path_label.textInteractionFlags())
 
-        copy_label = QLabel("Copy to clipboard files matching: ")
+        copy_label = QLabel("Copy to clipboard:")
         copy_buttons_widget = QWidget()
         copy_buttons_layout = QHBoxLayout(copy_buttons_widget)
         copy_buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -651,6 +698,39 @@ class MdExploreWindow(QMainWindow):
             )
             copy_buttons_layout.addWidget(color_btn)
 
+        match_label = QLabel("Search: ")
+        self.match_input = QLineEdit()
+        self.match_input.setClearButtonEnabled(False)
+        self.match_input.setPlaceholderText('words, "quoted phrases", AND/OR/NOT')
+        self.match_input.setMinimumWidth(220)
+        self.match_clear_action = self.match_input.addAction(
+            _build_clear_x_icon(),
+            QLineEdit.ActionPosition.TrailingPosition,
+        )
+        self.match_clear_action.setToolTip("Clear search")
+        self.match_clear_action.triggered.connect(self._clear_match_input)
+        self.match_clear_action.setVisible(False)
+        self.match_input.textChanged.connect(self._on_match_text_changed)
+        self.match_input.returnPressed.connect(self._run_match_search_now)
+
+        match_buttons_widget = QWidget()
+        match_buttons_layout = QHBoxLayout(match_buttons_widget)
+        match_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        match_buttons_layout.setSpacing(4)
+        match_buttons_layout.addWidget(match_label)
+        match_buttons_layout.addWidget(self.match_input)
+        for color_name, color_value in self.HIGHLIGHT_COLORS:
+            color_btn = QPushButton("")
+            color_btn.setFixedSize(18, 18)
+            color_btn.setToolTip(f"Highlight current matches with {color_name.lower()}")
+            color_btn.setStyleSheet(
+                f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
+            )
+            color_btn.clicked.connect(
+                lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(c, n)
+            )
+            match_buttons_layout.addWidget(color_btn)
+
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.addWidget(self.up_btn)
@@ -659,6 +739,8 @@ class MdExploreWindow(QMainWindow):
         top_bar.addWidget(edit_btn)
         top_bar.addWidget(self.path_label, 1)
         top_bar.addWidget(copy_buttons_widget, 0, Qt.AlignmentFlag.AlignRight)
+        top_bar.addSpacing(16)
+        top_bar.addWidget(match_buttons_widget, 0, Qt.AlignmentFlag.AlignRight)
 
         top_bar_widget = QWidget()
         top_bar_widget.setLayout(top_bar)
@@ -722,6 +804,7 @@ class MdExploreWindow(QMainWindow):
         self.root = new_root.resolve()
         self.last_directory_selection = self.root
         self.current_file = None
+        self._pending_preview_search_terms = []
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
@@ -734,6 +817,13 @@ class MdExploreWindow(QMainWindow):
         self._update_up_button_state()
         self._update_window_title()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
+
+    def _on_preview_load_finished(self, ok: bool) -> None:
+        """Apply deferred in-preview highlighting after a page finishes loading."""
+        if not ok:
+            return
+        if self._pending_preview_search_terms:
+            self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=True)
 
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
@@ -757,6 +847,400 @@ class MdExploreWindow(QMainWindow):
         right_width = max(400, total_width - left_width)
         self.splitter.setSizes([left_width, right_width])
         self._initial_split_applied = True
+
+    def _on_match_text_changed(self, text: str) -> None:
+        """Debounce free-form match input before running a new search."""
+        self._match_input_text = text
+        self.match_clear_action.setVisible(bool(text.strip()))
+        if not text.strip():
+            self.match_timer.stop()
+            self._clear_match_results()
+            return
+        self.match_timer.start()
+
+    def _clear_match_input(self) -> None:
+        """Clear search text and immediately remove any active match styling."""
+        self.match_timer.stop()
+        self.match_input.clear()
+        self._clear_match_results()
+
+    def _run_match_search_now(self) -> None:
+        """Run search immediately, bypassing debounce delay."""
+        self.match_timer.stop()
+        self._run_match_search()
+
+    def _clear_match_results(self) -> None:
+        """Clear bolded search matches without affecting persisted highlights."""
+        self.current_match_files = []
+        self.model.clear_search_match_paths()
+        self.tree.viewport().update()
+        self._remove_preview_search_highlights()
+
+    def _run_match_search(self) -> None:
+        """Search current scope non-recursively and bold matching markdown files."""
+        query = self.match_input.text().strip()
+        if not query:
+            self._clear_match_results()
+            return
+
+        scope = self._highlight_scope_directory()
+        predicate = self._compile_match_predicate(query)
+        candidates = self._list_markdown_files_non_recursive(scope)
+        matches: list[Path] = []
+
+        for path in candidates:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                content = ""
+            haystack = f"{path.name}\n{content}".casefold()
+            if predicate(haystack):
+                matches.append(path)
+
+        self.current_match_files = matches
+        self.model.set_search_match_paths(set(matches))
+        self.tree.viewport().update()
+        self.statusBar().showMessage(
+            f"Matched {len(matches)} of {len(candidates)} markdown file(s) in {scope}",
+            3500,
+        )
+        if self.current_file is not None:
+            if self._is_path_in_current_matches(self.current_file):
+                self._highlight_preview_search_terms(self._current_search_terms(), scroll_to_first=False)
+            else:
+                self._remove_preview_search_highlights()
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    def _is_path_in_current_matches(self, path: Path) -> bool:
+        """Return whether a file path is in the latest search match set."""
+        target = self._path_key(path)
+        for candidate in self.current_match_files:
+            if self._path_key(candidate) == target:
+                return True
+        return False
+
+    def _current_search_terms(self) -> list[str]:
+        """Extract searchable terms from the current query (operators excluded)."""
+        query = self.match_input.text().strip()
+        if not query:
+            return []
+        terms: list[str] = []
+        seen: set[str] = set()
+        for token_type, token_value in self._tokenize_match_query(query):
+            if token_type != "TERM":
+                continue
+            term = token_value.strip()
+            if not term:
+                continue
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+        terms.sort(key=len, reverse=True)
+        return terms
+
+    def _remove_preview_search_highlights(self) -> None:
+        """Remove in-preview search highlight spans from the current page."""
+        js = """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  if (!root) return 0;
+  const marks = root.querySelectorAll('span[data-mdexplore-search-mark="1"]');
+  for (const mark of marks) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
+    parent.normalize();
+  }
+  return marks.length;
+})();
+"""
+        self.preview.page().runJavaScript(js)
+
+    def _highlight_preview_search_terms(self, terms: list[str], scroll_to_first: bool) -> None:
+        """Highlight term matches in preview and optionally scroll to first one."""
+        cleaned_terms = [term.strip() for term in terms if term.strip()]
+        if not cleaned_terms:
+            self._remove_preview_search_highlights()
+            return
+
+        terms_json = json.dumps(cleaned_terms)
+        scroll_json = "true" if scroll_to_first else "false"
+        js = f"""
+(() => {{
+  const terms = {terms_json};
+  const shouldScroll = {scroll_json};
+  const root = document.querySelector("main") || document.body;
+  if (!root || !terms.length) return 0;
+
+  const markSelector = 'span[data-mdexplore-search-mark="1"]';
+  for (const oldMark of root.querySelectorAll(markSelector)) {{
+    const parent = oldMark.parentNode;
+    if (!parent) continue;
+    parent.replaceChild(document.createTextNode(oldMark.textContent || ""), oldMark);
+    parent.normalize();
+  }}
+
+  const escaped = terms
+    .map((term) => term.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&'))
+    .filter((term) => term.length > 0);
+  if (!escaped.length) return 0;
+
+  const regex = new RegExp(escaped.join("|"), "gi");
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
+  const acceptedNodes = [];
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    {{
+      acceptNode(node) {{
+        if (!node || !node.nodeValue || !node.nodeValue.trim()) {{
+          return NodeFilter.FILTER_REJECT;
+        }}
+        const parent = node.parentElement;
+        if (!parent) {{
+          return NodeFilter.FILTER_REJECT;
+        }}
+        if (skipTags.has(parent.tagName)) {{
+          return NodeFilter.FILTER_REJECT;
+        }}
+        if (parent.closest(markSelector)) {{
+          return NodeFilter.FILTER_REJECT;
+        }}
+        regex.lastIndex = 0;
+        return regex.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }},
+    }},
+  );
+
+  while (walker.nextNode()) {{
+    acceptedNodes.push(walker.currentNode);
+  }}
+
+  let firstMark = null;
+  let matchCount = 0;
+  for (const textNode of acceptedNodes) {{
+    const text = textNode.nodeValue || "";
+    regex.lastIndex = 0;
+    let cursor = 0;
+    let changed = false;
+    const fragment = document.createDocumentFragment();
+    let match = null;
+    while ((match = regex.exec(text)) !== null) {{
+      changed = true;
+      const start = match.index;
+      const end = start + match[0].length;
+      if (start > cursor) {{
+        fragment.appendChild(document.createTextNode(text.slice(cursor, start)));
+      }}
+      const mark = document.createElement("span");
+      mark.setAttribute("data-mdexplore-search-mark", "1");
+      mark.style.backgroundColor = "#f5d34f";
+      mark.style.color = "#111827";
+      mark.style.padding = "0 1px";
+      mark.style.borderRadius = "2px";
+      mark.textContent = match[0];
+      fragment.appendChild(mark);
+      if (!firstMark) {{
+        firstMark = mark;
+      }}
+      matchCount += 1;
+      cursor = end;
+      if (regex.lastIndex <= start) {{
+        regex.lastIndex = start + 1;
+      }}
+    }}
+
+    if (!changed) {{
+      continue;
+    }}
+    if (cursor < text.length) {{
+      fragment.appendChild(document.createTextNode(text.slice(cursor)));
+    }}
+    const parent = textNode.parentNode;
+    if (parent) {{
+      parent.replaceChild(fragment, textNode);
+    }}
+  }}
+
+  if (firstMark && shouldScroll) {{
+    firstMark.scrollIntoView({{ behavior: "auto", block: "center", inline: "nearest" }});
+  }}
+  return matchCount;
+}})();
+"""
+        self.preview.page().runJavaScript(js)
+
+    def _list_markdown_files_non_recursive(self, directory: Path) -> list[Path]:
+        """Return direct child markdown files from a directory (non-recursive)."""
+        if not directory.is_dir():
+            return []
+
+        try:
+            entries = sorted(directory.iterdir(), key=lambda item: item.name.casefold())
+        except Exception:
+            return []
+
+        files: list[Path] = []
+        for entry in entries:
+            try:
+                if entry.is_file() and entry.suffix.lower() == ".md":
+                    files.append(entry.resolve())
+            except Exception:
+                # Ignore files that disappear or become inaccessible mid-scan.
+                pass
+        return files
+
+    def _compile_match_predicate(self, query: str):
+        """Compile basic boolean query with implicit AND and quoted terms."""
+        tokens = self._tokenize_match_query(query)
+        if not tokens:
+            return lambda _haystack: True
+
+        expanded_tokens: list[tuple[str, str]] = []
+        previous_type: str | None = None
+        for token_type, token_value in tokens:
+            if previous_type in {"TERM", "RPAREN"} and token_type in {"TERM", "LPAREN"}:
+                expanded_tokens.append(("OP", "AND"))
+            elif previous_type in {"TERM", "RPAREN"} and token_type == "OP" and token_value == "NOT":
+                expanded_tokens.append(("OP", "AND"))
+            expanded_tokens.append((token_type, token_value))
+            previous_type = token_type
+
+        precedence = {"OR": 1, "AND": 2, "NOT": 3}
+        output: list[tuple[str, str]] = []
+        operators: list[tuple[str, str]] = []
+
+        for token_type, token_value in expanded_tokens:
+            if token_type == "TERM":
+                output.append((token_type, token_value.casefold()))
+                continue
+
+            if token_type == "OP":
+                while operators and operators[-1][0] == "OP":
+                    top_op = operators[-1][1]
+                    current_prec = precedence[token_value]
+                    top_prec = precedence[top_op]
+                    right_associative = token_value == "NOT"
+                    if (not right_associative and current_prec <= top_prec) or (right_associative and current_prec < top_prec):
+                        output.append(operators.pop())
+                    else:
+                        break
+                operators.append((token_type, token_value))
+                continue
+
+            if token_type == "LPAREN":
+                operators.append((token_type, token_value))
+                continue
+
+            if token_type == "RPAREN":
+                found_lparen = False
+                while operators:
+                    top = operators.pop()
+                    if top[0] == "LPAREN":
+                        found_lparen = True
+                        break
+                    output.append(top)
+                if not found_lparen:
+                    return self._compile_simple_match_predicate(tokens)
+
+        while operators:
+            top = operators.pop()
+            if top[0] == "LPAREN":
+                return self._compile_simple_match_predicate(tokens)
+            output.append(top)
+
+        def predicate(haystack: str) -> bool:
+            stack: list[bool] = []
+            for token_type, token_value in output:
+                if token_type == "TERM":
+                    stack.append(token_value in haystack)
+                    continue
+
+                if token_type != "OP":
+                    return False
+
+                if token_value == "NOT":
+                    if not stack:
+                        return False
+                    stack.append(not stack.pop())
+                    continue
+
+                if len(stack) < 2:
+                    return False
+                right = stack.pop()
+                left = stack.pop()
+                if token_value == "AND":
+                    stack.append(left and right)
+                elif token_value == "OR":
+                    stack.append(left or right)
+                else:
+                    return False
+
+            return len(stack) == 1 and stack[0]
+
+        return predicate
+
+    def _compile_simple_match_predicate(self, tokens: list[tuple[str, str]]):
+        """Fallback matcher: all terms must appear in haystack."""
+        terms = [value.casefold() for token_type, value in tokens if token_type == "TERM"]
+        if not terms:
+            return lambda _haystack: True
+        return lambda haystack: all(term in haystack for term in terms)
+
+    def _tokenize_match_query(self, query: str) -> list[tuple[str, str]]:
+        """Tokenize query supporting AND/OR/NOT, quotes, and parentheses."""
+        prepared = query.replace("(", " ( ").replace(")", " ) ")
+        try:
+            raw_tokens = shlex.split(prepared)
+        except ValueError:
+            raw_tokens = prepared.split()
+
+        tokens: list[tuple[str, str]] = []
+        for token in raw_tokens:
+            upper = token.upper()
+            if token == "(":
+                tokens.append(("LPAREN", token))
+            elif token == ")":
+                tokens.append(("RPAREN", token))
+            elif upper in {"AND", "OR", "NOT"}:
+                tokens.append(("OP", upper))
+            else:
+                tokens.append(("TERM", token))
+        return tokens
+
+    def _apply_match_highlight_color(self, color_value: str, color_name: str) -> None:
+        """Apply a highlight color to current match set, then clear bolding."""
+        self.match_timer.stop()
+        if self.match_input.text().strip():
+            self._run_match_search()
+
+        if not self.current_match_files:
+            self.statusBar().showMessage("No matched files to highlight", 3000)
+            return
+
+        updated = 0
+        for path in self.current_match_files:
+            try:
+                if path.is_file() and path.suffix.lower() == ".md":
+                    self.model.set_color_for_file(path, color_value)
+                    updated += 1
+            except Exception:
+                # Ignore files that are no longer available.
+                pass
+
+        self._clear_match_results()
+        self.statusBar().showMessage(
+            f"Applied {color_name.lower()} highlight to {updated} matched file(s)",
+            4000,
+        )
 
     def _show_tree_context_menu(self, pos) -> None:
         """Show right-click menu for assigning a file highlight color."""
@@ -1194,6 +1678,8 @@ class MdExploreWindow(QMainWindow):
         # Cache rendered HTML by size+mtime to keep repeated file switches fast.
         stat = path.stat()
         cache_key = str(path.resolve())
+        should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
+        self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
         cached = self.cache.get(cache_key)
         if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
             html_doc = cached[2]
