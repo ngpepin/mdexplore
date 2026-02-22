@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from markdown_it import MarkdownIt
-from PySide6.QtCore import QDir, QMimeData, Qt, QTimer, QUrl
+from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -436,6 +436,12 @@ class MarkdownRenderer:
                 )
 
             if info in {"plantuml", "puml", "uml"}:
+                resolver = env.get("plantuml_resolver") if isinstance(env, dict) else None
+                if callable(resolver):
+                    plantuml_index = int(env.get("plantuml_index", 0))
+                    env["plantuml_index"] = plantuml_index + 1
+                    return resolver(code, plantuml_index, line_attrs)
+
                 data_uri, error_message = self._render_plantuml_data_uri(code)
                 if data_uri is not None:
                     return (
@@ -495,7 +501,8 @@ class MarkdownRenderer:
 
     def _render_plantuml_data_uri(self, code: str) -> tuple[str | None, str | None]:
         """Render PlantUML source locally and return an SVG data URI."""
-        cache_key = hashlib.sha1(code.encode("utf-8", errors="replace")).hexdigest()
+        prepared_code = self._prepare_plantuml_source(code)
+        cache_key = hashlib.sha1(prepared_code.encode("utf-8", errors="replace")).hexdigest()
         cached = self._plantuml_svg_cache.get(cache_key)
         if cached is not None:
             return cached, None
@@ -519,7 +526,7 @@ class MarkdownRenderer:
         try:
             result = subprocess.run(
                 command,
-                input=code,
+                input=prepared_code,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -544,8 +551,30 @@ class MarkdownRenderer:
         self._plantuml_svg_cache[cache_key] = data_uri
         return data_uri, None
 
-    def render_document(self, markdown_text: str, title: str) -> str:
-        body = self._md.render(markdown_text)
+    @staticmethod
+    def _prepare_plantuml_source(code: str) -> str:
+        """Normalize PlantUML fence content for local jar rendering."""
+        normalized = code.replace("\r\n", "\n").strip("\n")
+        if not normalized:
+            return "@startuml\n@enduml\n"
+
+        has_start_directive = any(
+            line.strip().casefold().startswith("@start")
+            for line in normalized.splitlines()
+            if line.strip()
+        )
+        if has_start_directive:
+            return normalized + "\n"
+
+        # Support shorthand fenced blocks that omit @startuml/@enduml.
+        return f"@startuml\n{normalized}\n@enduml\n"
+
+    def render_document(self, markdown_text: str, title: str, plantuml_resolver=None) -> str:
+        env = {}
+        if callable(plantuml_resolver):
+            env["plantuml_resolver"] = plantuml_resolver
+            env["plantuml_index"] = 0
+        body = self._md.render(markdown_text, env)
         escaped_title = html.escape(title)
         return f"""<!doctype html>
 <html lang="en">
@@ -627,6 +656,14 @@ class MarkdownRenderer:
       color: #b91c1c;
       font-weight: 600;
     }}
+    .plantuml-pending {{
+      margin: 0.8rem 0;
+      padding: 0.55rem 0.7rem;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      font-style: italic;
+      opacity: 0.9;
+    }}
   </style>
   <script>
     window.MathJax = {{
@@ -660,6 +697,109 @@ class MarkdownRenderer:
 """
 
 
+class PreviewRenderWorkerSignals(QObject):
+    """Signals emitted by background preview rendering workers."""
+
+    finished = Signal(int, str, str, object, object, str)
+
+
+class PreviewRenderWorker(QRunnable):
+    """Render markdown HTML in a worker thread to keep UI responsive."""
+
+    def __init__(self, path: Path, request_id: int):
+        super().__init__()
+        self.path = path
+        self.request_id = request_id
+        self.signals = PreviewRenderWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            resolved = self.path.resolve()
+            stat = resolved.stat()
+            markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+            renderer = MarkdownRenderer()
+            html_doc = renderer.render_document(markdown_text, resolved.name)
+            self.signals.finished.emit(
+                self.request_id,
+                str(resolved),
+                html_doc,
+                stat.st_mtime_ns,
+                stat.st_size,
+                "",
+            )
+        except Exception as exc:
+            path_text = str(self.path)
+            self.signals.finished.emit(self.request_id, path_text, "", 0, 0, str(exc))
+
+
+class PlantUmlRenderWorkerSignals(QObject):
+    """Signals emitted by background PlantUML render workers."""
+
+    finished = Signal(str, str, str)
+
+
+class PlantUmlRenderWorker(QRunnable):
+    """Render one PlantUML source block to SVG data URI in background."""
+
+    def __init__(self, hash_key: str, prepared_code: str, jar_path: Path | None, setup_issue: str | None):
+        super().__init__()
+        self.hash_key = hash_key
+        self.prepared_code = prepared_code
+        self.jar_path = jar_path
+        self.setup_issue = setup_issue
+        self.signals = PlantUmlRenderWorkerSignals()
+
+    def run(self) -> None:
+        if self.setup_issue is not None:
+            self.signals.finished.emit(self.hash_key, "error", self.setup_issue)
+            return
+        if self.jar_path is None:
+            self.signals.finished.emit(self.hash_key, "error", "plantuml.jar not available")
+            return
+
+        command = [
+            "java",
+            "-Djava.awt.headless=true",
+            "-jar",
+            str(self.jar_path),
+            "-pipe",
+            "-tsvg",
+            "-charset",
+            "UTF-8",
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                input=self.prepared_code,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            self.signals.finished.emit(self.hash_key, "error", "Local PlantUML render timed out")
+            return
+        except Exception as exc:
+            self.signals.finished.emit(self.hash_key, "error", f"Local PlantUML render failed: {exc}")
+            return
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            details = stderr.splitlines()[-1] if stderr else "unknown error"
+            self.signals.finished.emit(self.hash_key, "error", f"Local PlantUML render failed: {details}")
+            return
+
+        svg_text = (result.stdout or "").strip()
+        if "<svg" not in svg_text.casefold():
+            self.signals.finished.emit(self.hash_key, "error", "Local PlantUML did not return SVG output")
+            return
+
+        encoded_svg = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+        data_uri = f"data:image/svg+xml;base64,{encoded_svg}"
+        self.signals.finished.emit(self.hash_key, "done", data_uri)
+
+
 class MdExploreWindow(QMainWindow):
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
@@ -680,6 +820,17 @@ class MdExploreWindow(QMainWindow):
         self.cache: dict[str, tuple[int, int, str]] = {}
         self.current_match_files: list[Path] = []
         self._pending_preview_search_terms: list[str] = []
+        self._render_pool = QThreadPool(self)
+        self._render_pool.setMaxThreadCount(1)
+        self._render_request_id = 0
+        self._active_render_workers: set[PreviewRenderWorker] = set()
+        self._plantuml_pool = QThreadPool(self)
+        self._plantuml_pool.setMaxThreadCount(2)
+        self._plantuml_results: dict[str, tuple[str, str]] = {}
+        self._plantuml_inflight: set[str] = set()
+        self._plantuml_docs_by_hash: dict[str, set[str]] = {}
+        self._plantuml_placeholders_by_doc: dict[str, dict[str, list[str]]] = {}
+        self._active_plantuml_workers: set[PlantUmlRenderWorker] = set()
         self._match_input_text = ""
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
@@ -868,6 +1019,7 @@ class MdExploreWindow(QMainWindow):
         self._initial_split_applied = False
         self._update_up_button_state()
         self._update_window_title()
+        self._cancel_pending_preview_render()
         self._rerun_active_search_for_scope()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
@@ -875,6 +1027,7 @@ class MdExploreWindow(QMainWindow):
         """Apply deferred in-preview highlighting after a page finishes loading."""
         if not ok:
             return
+        self._apply_all_ready_plantuml_to_current_preview()
         if self._pending_preview_search_terms:
             self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=True)
 
@@ -921,6 +1074,11 @@ class MdExploreWindow(QMainWindow):
         """Run search immediately, bypassing debounce delay."""
         self.match_timer.stop()
         self._run_match_search()
+
+    def _cancel_pending_preview_render(self) -> None:
+        """Drop queued preview render jobs and invalidate running results."""
+        self._render_request_id += 1
+        self._render_pool.clear()
 
     def _rerun_active_search_for_scope(self) -> None:
         """Re-run search immediately when scope changes and query is active."""
@@ -1738,28 +1896,239 @@ class MdExploreWindow(QMainWindow):
             return
         self._load_preview(path)
 
+    def _on_preview_render_finished(
+        self,
+        request_id: int,
+        path_key: str,
+        html_doc: str,
+        mtime_ns: int,
+        size: int,
+        error_text: str,
+    ) -> None:
+        """Apply finished background render if it is still the active request."""
+        worker_to_remove = None
+        for worker in self._active_render_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_render_workers.remove(worker_to_remove)
+
+        if request_id != self._render_request_id:
+            return
+
+        if self.current_file is None:
+            return
+        try:
+            current_key = str(self.current_file.resolve())
+        except Exception:
+            current_key = str(self.current_file)
+        if current_key != path_key:
+            return
+
+        if error_text:
+            self.statusBar().showMessage(f"Preview render failed: {error_text}", 5000)
+            html_doc = self._placeholder_html(f"Could not render preview for {self.current_file.name}: {error_text}")
+        else:
+            self.cache[path_key] = (mtime_ns, size, html_doc)
+
+        try:
+            base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
+        except Exception:
+            base_url = QUrl.fromLocalFile(f"{self.root}/")
+        self.preview.setHtml(html_doc, base_url)
+
+    @staticmethod
+    def _doc_id_for_path(path_key: str) -> str:
+        return hashlib.sha1(path_key.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+    @staticmethod
+    def _truncate_error_text(text: str, max_len: int = 240) -> str:
+        normalized = " ".join(text.split())
+        if len(normalized) <= max_len:
+            return normalized
+        return normalized[: max_len - 1] + "..."
+
+    def _plantuml_inner_html(self, status: str, payload: str) -> str:
+        if status == "done":
+            return f'<img class="plantuml" src="{payload}" alt="PlantUML diagram"/>'
+        safe_error = html.escape(self._truncate_error_text(payload or "unknown error"))
+        return f'<div class="plantuml-error-message">PlantUML render failed with error {safe_error}</div>'
+
+    def _plantuml_block_html(self, placeholder_id: str, line_attrs: str, status: str, payload: str) -> str:
+        inner = self._plantuml_inner_html(status, payload) if status in {"done", "error"} else "PlantUML rendering..."
+        classes = ["mdexplore-fence", "plantuml-async"]
+        if status == "pending":
+            classes.append("plantuml-pending")
+        elif status == "error":
+            classes.append("plantuml-error")
+        else:
+            classes.append("plantuml-ready")
+        class_attr = " ".join(classes)
+        return (
+            f'<div class="{class_attr}" id="{placeholder_id}"{line_attrs}>'
+            f"{inner}"
+            "</div>\n"
+        )
+
+    def _ensure_plantuml_render_started(self, hash_key: str, prepared_code: str) -> None:
+        result = self._plantuml_results.get(hash_key)
+        if result is not None and result[0] in {"done", "error"}:
+            return
+        if hash_key in self._plantuml_inflight:
+            return
+
+        self._plantuml_inflight.add(hash_key)
+        self._plantuml_results[hash_key] = ("pending", "")
+        worker = PlantUmlRenderWorker(
+            hash_key,
+            prepared_code,
+            self.renderer._plantuml_jar_path,
+            self.renderer._plantuml_setup_issue,
+        )
+        self._active_plantuml_workers.add(worker)
+        worker.signals.finished.connect(self._on_plantuml_render_finished)
+        self._plantuml_pool.start(worker)
+
+    def _on_plantuml_render_finished(self, hash_key: str, status: str, payload: str) -> None:
+        worker_to_remove = None
+        for worker in self._active_plantuml_workers:
+            if worker.hash_key == hash_key:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_plantuml_workers.remove(worker_to_remove)
+
+        self._plantuml_inflight.discard(hash_key)
+        final_status = "done" if status == "done" else "error"
+        self._plantuml_results[hash_key] = (final_status, payload)
+
+        for doc_key in self._plantuml_docs_by_hash.get(hash_key, set()):
+            self.cache.pop(doc_key, None)
+
+        self._apply_plantuml_result_to_current_preview(hash_key)
+
+    def _apply_plantuml_result_to_current_preview(self, hash_key: str) -> None:
+        if self.current_file is None:
+            return
+        try:
+            current_key = str(self.current_file.resolve())
+        except Exception:
+            current_key = str(self.current_file)
+
+        placeholders_by_hash = self._plantuml_placeholders_by_doc.get(current_key, {})
+        placeholder_ids = placeholders_by_hash.get(hash_key, [])
+        if not placeholder_ids:
+            return
+
+        status, payload = self._plantuml_results.get(hash_key, ("pending", ""))
+        if status not in {"done", "error"}:
+            return
+        if status == "done":
+            class_name = "plantuml-ready"
+            inner_html = self._plantuml_inner_html("done", payload)
+        else:
+            class_name = "plantuml-error"
+            inner_html = self._plantuml_inner_html("error", payload)
+
+        ids_json = json.dumps(placeholder_ids)
+        html_json = json.dumps(inner_html)
+        class_json = json.dumps(class_name)
+        js = f"""
+(() => {{
+  const ids = {ids_json};
+  const inner = {html_json};
+  const className = {class_json};
+  for (const id of ids) {{
+    const node = document.getElementById(id);
+    if (!node) continue;
+    node.classList.remove("plantuml-pending", "plantuml-ready", "plantuml-error");
+    node.classList.add(className);
+    node.innerHTML = inner;
+  }}
+}})();
+"""
+        self.preview.page().runJavaScript(js)
+
+    def _apply_all_ready_plantuml_to_current_preview(self) -> None:
+        if self.current_file is None:
+            return
+        try:
+            current_key = str(self.current_file.resolve())
+        except Exception:
+            current_key = str(self.current_file)
+
+        placeholders_by_hash = self._plantuml_placeholders_by_doc.get(current_key, {})
+        for hash_key in placeholders_by_hash:
+            self._apply_plantuml_result_to_current_preview(hash_key)
+
     def _load_preview(self, path: Path) -> None:
-        # Cache rendered HTML by size+mtime to keep repeated file switches fast.
-        stat = path.stat()
-        cache_key = str(path.resolve())
+        # Render markdown quickly with async PlantUML placeholders so the
+        # document appears immediately while diagrams render in background.
+        self._cancel_pending_preview_render()
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
-        cached = self.cache.get(cache_key)
-        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-            html_doc = cached[2]
-        else:
-            markdown_text = path.read_text(encoding="utf-8", errors="replace")
-            html_doc = self.renderer.render_document(markdown_text, path.name)
-            self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
 
-        base_url = QUrl.fromLocalFile(f"{path.parent.resolve()}/")
-        self.preview.setHtml(html_doc, base_url)
         self.current_file = path
         try:
             rel = path.relative_to(self.root)
             self.path_label.setText(str(rel))
         except ValueError:
             self.path_label.setText(str(path))
+
+        try:
+            base_url = QUrl.fromLocalFile(f"{path.parent.resolve()}/")
+        except Exception:
+            base_url = QUrl.fromLocalFile(f"{self.root}/")
+
+        try:
+            resolved = path.resolve()
+            stat = resolved.stat()
+            cache_key = str(resolved)
+            cached = self.cache.get(cache_key)
+            if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+                self.preview.setHtml(cached[2], base_url)
+                return
+
+            markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+            doc_id = self._doc_id_for_path(cache_key)
+
+            # Remove stale dependency links for this document before rebuilding.
+            previous_placeholders = self._plantuml_placeholders_by_doc.get(cache_key, {})
+            for hash_key in previous_placeholders:
+                docs = self._plantuml_docs_by_hash.get(hash_key)
+                if docs is not None:
+                    docs.discard(cache_key)
+                    if not docs:
+                        self._plantuml_docs_by_hash.pop(hash_key, None)
+
+            placeholders_by_hash: dict[str, list[str]] = {}
+
+            def plantuml_resolver(code: str, index: int, line_attrs: str) -> str:
+                prepared_code = self.renderer._prepare_plantuml_source(code)
+                hash_key = hashlib.sha1(prepared_code.encode("utf-8", errors="replace")).hexdigest()
+                placeholder_id = f"mdexplore-plantuml-{doc_id}-{index}"
+
+                placeholders_by_hash.setdefault(hash_key, []).append(placeholder_id)
+                self._plantuml_docs_by_hash.setdefault(hash_key, set()).add(cache_key)
+
+                status, payload = self._plantuml_results.get(hash_key, ("pending", ""))
+                if status in {"done", "error"}:
+                    return self._plantuml_block_html(placeholder_id, line_attrs, status, payload)
+
+                self._ensure_plantuml_render_started(hash_key, prepared_code)
+                return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "")
+
+            html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
+            self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
+            self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
+            self.preview.setHtml(html_doc, base_url)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
+            self.preview.setHtml(
+                self._placeholder_html(f"Could not render preview for {path.name}: {exc}"),
+                base_url,
+            )
 
     def _refresh_current_preview(self) -> None:
         """Force re-render of the currently selected file."""

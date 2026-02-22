@@ -42,6 +42,13 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - `mdexplore.py [PATH]`
 - Tree shows directories and `.md` files only.
 - Selecting a Markdown file updates preview quickly.
+- PlantUML rendering jobs must run off the UI thread to keep the window responsive.
+- PlantUML blocks should not block markdown preview; show placeholders first,
+  then progressively replace each diagram as local render jobs complete.
+- PlantUML progressive updates should be applied in-place so the preview scroll
+  location is preserved.
+- PlantUML progress should persist across file navigation so returning to a
+  file shows completed diagrams without restarting work.
 - `^` navigates one directory level up and re-roots the tree.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.
@@ -87,6 +94,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Markdown parser is `markdown-it-py`.
 - Mermaid and MathJax are rendered client-side in web view.
 - PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`).
+- PlantUML failures should render inline as:
+  `PlantUML render failed with error XYZ`.
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
 

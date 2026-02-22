@@ -7,11 +7,12 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Expandable left-pane directory tree rooted at a chosen folder.
 - Shows Markdown files only (`*.md`), while still allowing folder navigation.
 - Large right-pane rendered preview with scroll support.
+- PlantUML diagram renders run in background workers so markdown preview stays responsive.
 - Supports:
   - CommonMark + tables + strikethrough.
   - TeX/LaTeX math via MathJax.
   - Mermaid diagrams.
-  - PlantUML diagrams.
+  - PlantUML diagrams (asynchronous local render with placeholders).
 - Top actions:
   - `^` moves root up one directory level.
   - `Refresh` reloads the currently displayed markdown preview.
@@ -129,6 +130,14 @@ The app renders PlantUML blocks locally with `plantuml.jar`.
 ```bash
 PLANTUML_JAR=/path/to/plantuml.jar /path/to/mdexplore/mdexplore.sh
 ```
+
+Behavior details:
+
+- Markdown preview loads immediately with `PlantUML rendering...` placeholders.
+- Each diagram is replaced automatically as soon as it completes.
+- Diagram replacements are applied in-place so scroll position is preserved.
+- Failed diagrams show `PlantUML render failed with error XYZ`.
+- Diagram progress continues while you browse other files; returning shows completed progress.
 
 ## Project Structure
 
