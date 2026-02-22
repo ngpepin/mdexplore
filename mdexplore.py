@@ -1206,6 +1206,7 @@ class MdExploreWindow(QMainWindow):
         self.cache: dict[str, tuple[int, int, str]] = {}
         self.current_match_files: list[Path] = []
         self._pending_preview_search_terms: list[str] = []
+        self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
         self._render_pool = QThreadPool(self)
         self._render_pool.setMaxThreadCount(1)
         self._render_request_id = 0
@@ -1427,6 +1428,7 @@ class MdExploreWindow(QMainWindow):
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
         self._pending_preview_search_terms = []
+        self._pending_preview_search_close_groups = []
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
@@ -1461,7 +1463,11 @@ class MdExploreWindow(QMainWindow):
         if self._pending_preview_search_terms:
             # Search normally scrolls to first hit. If this file has a saved
             # scroll position, preserve that location instead.
-            self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=not has_saved_scroll)
+            self._highlight_preview_search_terms(
+                self._pending_preview_search_terms,
+                scroll_to_first=not has_saved_scroll,
+                close_term_groups=self._pending_preview_search_close_groups,
+            )
         if has_saved_scroll:
             # Re-apply a few times because late MathJax/Mermaid/layout work can
             # shift content after the initial load.
@@ -1711,7 +1717,11 @@ class MdExploreWindow(QMainWindow):
         )
         if self.current_file is not None:
             if self._is_path_in_current_matches(self.current_file):
-                self._highlight_preview_search_terms(self._current_search_terms(), scroll_to_first=False)
+                self._highlight_preview_search_terms(
+                    self._current_search_terms(),
+                    scroll_to_first=False,
+                    close_term_groups=self._current_close_term_groups(),
+                )
             else:
                 self._remove_preview_search_highlights()
 
@@ -1751,6 +1761,56 @@ class MdExploreWindow(QMainWindow):
         terms.sort(key=len, reverse=True)
         return terms
 
+    def _current_close_term_groups(self) -> list[list[tuple[str, bool]]]:
+        """Extract CLOSE(...) argument groups from the current query."""
+        query = self.match_input.text().strip()
+        if not query:
+            return []
+
+        tokens = self._tokenize_match_query(query)
+        groups: list[list[tuple[str, bool]]] = []
+        i = 0
+        token_count = len(tokens)
+
+        while i < token_count:
+            token_type, _token_value, _token_quoted = tokens[i]
+            if token_type != "CLOSE":
+                i += 1
+                continue
+
+            # Require function-style CLOSE (...) call shape.
+            if i + 1 >= token_count or tokens[i + 1][0] != "LPAREN":
+                i += 1
+                continue
+
+            j = i + 2
+            group: list[tuple[str, bool]] = []
+            is_valid = False
+
+            while j < token_count:
+                part_type, part_value, part_quoted = tokens[j]
+                if part_type == "RPAREN":
+                    is_valid = True
+                    break
+                if part_type == "COMMA":
+                    j += 1
+                    continue
+                if part_type == "TERM":
+                    cleaned = part_value.strip()
+                    if cleaned:
+                        group.append((cleaned, part_quoted))
+                    j += 1
+                    continue
+                # Any nested expression token invalidates this CLOSE group.
+                is_valid = False
+                break
+
+            if is_valid and len(group) >= 2:
+                groups.append(group)
+            i = j + 1 if j > i else i + 1
+
+        return groups
+
     def _remove_preview_search_highlights(self) -> None:
         """Remove in-preview search highlight spans from the current page."""
         js = """
@@ -1771,7 +1831,12 @@ class MdExploreWindow(QMainWindow):
         # Mutates preview DOM to strip search marks; return value is not needed.
         self.preview.page().runJavaScript(js)
 
-    def _highlight_preview_search_terms(self, terms: list[str], scroll_to_first: bool) -> None:
+    def _highlight_preview_search_terms(
+        self,
+        terms: list[str],
+        scroll_to_first: bool,
+        close_term_groups: list[list[tuple[str, bool]]] | None = None,
+    ) -> None:
         """Highlight term matches in preview and optionally scroll to first one."""
         cleaned_terms = [term.strip() for term in terms if term.strip()]
         if not cleaned_terms:
@@ -1780,111 +1845,316 @@ class MdExploreWindow(QMainWindow):
 
         terms_json = json.dumps(cleaned_terms)
         scroll_json = "true" if scroll_to_first else "false"
-        js = f"""
-(() => {{
+        close_word_gap_json = str(int(SEARCH_CLOSE_WORD_GAP))
+        close_groups_payload: list[list[dict[str, object]]] = []
+        for group in close_term_groups or []:
+            payload_group: list[dict[str, object]] = []
+            for term_text, is_quoted in group:
+                cleaned = term_text.strip()
+                if cleaned:
+                    payload_group.append({"text": cleaned, "quoted": bool(is_quoted)})
+            if len(payload_group) >= 2:
+                close_groups_payload.append(payload_group)
+        close_groups_json = json.dumps(close_groups_payload)
+        js = """
+(() => {
   // Rebuild highlight spans from plain text each pass so updates are idempotent.
-  const terms = {terms_json};
-  const shouldScroll = {scroll_json};
+  const terms = __TERMS_JSON__;
+  const shouldScroll = __SCROLL_BOOL__;
+  const closeWordGap = __CLOSE_WORD_GAP__;
+  const closeTermGroups = __CLOSE_GROUPS_JSON__;
   const root = document.querySelector("main") || document.body;
   if (!root || !terms.length) return 0;
 
   const markSelector = 'span[data-mdexplore-search-mark="1"]';
-  for (const oldMark of root.querySelectorAll(markSelector)) {{
+  for (const oldMark of root.querySelectorAll(markSelector)) {
     const parent = oldMark.parentNode;
     if (!parent) continue;
     parent.replaceChild(document.createTextNode(oldMark.textContent || ""), oldMark);
     parent.normalize();
-  }}
+  }
 
-  const escaped = terms
-    .map((term) => term.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&'))
-    .filter((term) => term.length > 0);
-  if (!escaped.length) return 0;
-
-  // One regex across all terms keeps traversal cost low for large documents.
-  const regex = new RegExp(escaped.join("|"), "gi");
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
-  const acceptedNodes = [];
   const walker = document.createTreeWalker(
     root,
     NodeFilter.SHOW_TEXT,
-    {{
-      acceptNode(node) {{
-        if (!node || !node.nodeValue || !node.nodeValue.trim()) {{
+    {
+      acceptNode(node) {
+        if (!node || !node.nodeValue || !node.nodeValue.trim()) {
           return NodeFilter.FILTER_REJECT;
-        }}
+        }
         const parent = node.parentElement;
-        if (!parent) {{
+        if (!parent) {
           return NodeFilter.FILTER_REJECT;
-        }}
-        if (skipTags.has(parent.tagName)) {{
+        }
+        if (skipTags.has(parent.tagName)) {
           return NodeFilter.FILTER_REJECT;
-        }}
-        if (parent.closest(markSelector)) {{
+        }
+        if (parent.closest(markSelector)) {
           return NodeFilter.FILTER_REJECT;
-        }}
-        regex.lastIndex = 0;
-        return regex.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }},
-    }},
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    },
   );
 
-  while (walker.nextNode()) {{
-    acceptedNodes.push(walker.currentNode);
-  }}
+  const segments = [];
+  let fullText = "";
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    if (!value) {
+      continue;
+    }
+    const start = fullText.length;
+    fullText += value;
+    const end = fullText.length;
+    segments.push({ node, text: value, start, end });
+    // Separate nodes to avoid accidental cross-node token merging.
+    fullText += "\\n";
+  }
+  if (!segments.length) return 0;
+
+  function escapeRegExp(input) {
+    return String(input || "").replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+  }
+
+  function upperBound(values, target) {
+    let lo = 0;
+    let hi = values.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (values[mid] <= target) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
+  function normalizeCloseGroups(groups) {
+    if (!Array.isArray(groups)) return [];
+    const normalized = [];
+    for (const group of groups) {
+      if (!Array.isArray(group)) continue;
+      const next = [];
+      for (const item of group) {
+        if (!item || typeof item.text !== "string") continue;
+        const text = item.text.trim();
+        if (!text) continue;
+        next.push({ text, quoted: !!item.quoted });
+      }
+      if (next.length >= 2) normalized.push(next);
+    }
+    return normalized;
+  }
+
+  const normalizedCloseGroups = normalizeCloseGroups(closeTermGroups);
+  let closeFocusRange = null;
+  let closeFocusTerms = null;
+
+  if (normalizedCloseGroups.length) {
+    const wordMatches = [];
+    const wordRegex = /\\S+/g;
+    let wordMatch = null;
+    while ((wordMatch = wordRegex.exec(fullText)) !== null) {
+      wordMatches.push({ start: wordMatch.index, end: wordMatch.index + wordMatch[0].length });
+      if (wordRegex.lastIndex <= wordMatch.index) {
+        wordRegex.lastIndex = wordMatch.index + 1;
+      }
+    }
+
+    if (wordMatches.length) {
+      const wordStarts = wordMatches.map((item) => item.start);
+
+      function bestWindowForGroup(group) {
+        const occurrences = [];
+        const found = new Array(group.length).fill(false);
+
+        for (let termIndex = 0; termIndex < group.length; termIndex += 1) {
+          const termInfo = group[termIndex];
+          const pattern = new RegExp(escapeRegExp(termInfo.text), termInfo.quoted ? "g" : "gi");
+          let m = null;
+          while ((m = pattern.exec(fullText)) !== null) {
+            const startChar = m.index;
+            const wordIndex = upperBound(wordStarts, startChar) - 1;
+            if (wordIndex >= 0) {
+              occurrences.push({ word: wordIndex, term: termIndex });
+              found[termIndex] = true;
+            }
+            if (pattern.lastIndex <= startChar) {
+              pattern.lastIndex = startChar + 1;
+            }
+          }
+        }
+
+        if (!occurrences.length || found.some((value) => !value)) {
+          return null;
+        }
+
+        occurrences.sort((a, b) => a.word - b.word);
+        const counts = new Array(group.length).fill(0);
+        let have = 0;
+        let left = 0;
+        let best = null;
+
+        for (let right = 0; right < occurrences.length; right += 1) {
+          const rightOcc = occurrences[right];
+          if (counts[rightOcc.term] === 0) {
+            have += 1;
+          }
+          counts[rightOcc.term] += 1;
+
+          while (have === group.length && left <= right) {
+            const leftOcc = occurrences[left];
+            const span = rightOcc.word - leftOcc.word;
+            if (span <= closeWordGap) {
+              if (!best || span < best.span || (span === best.span && leftOcc.word < best.leftWord)) {
+                best = { span, leftWord: leftOcc.word, rightWord: rightOcc.word };
+              }
+            }
+            counts[leftOcc.term] -= 1;
+            if (counts[leftOcc.term] === 0) {
+              have -= 1;
+            }
+            left += 1;
+          }
+        }
+
+        if (!best) {
+          return null;
+        }
+        const startWord = wordMatches[best.leftWord];
+        const endWord = wordMatches[best.rightWord];
+        if (!startWord || !endWord) {
+          return null;
+        }
+        return {
+          span: best.span,
+          startChar: startWord.start,
+          endChar: endWord.end,
+          terms: group,
+        };
+      }
+
+      let chosenWindow = null;
+      for (const group of normalizedCloseGroups) {
+        const candidate = bestWindowForGroup(group);
+        if (!candidate) continue;
+        if (!chosenWindow || candidate.span < chosenWindow.span || (candidate.span === chosenWindow.span && candidate.startChar < chosenWindow.startChar)) {
+          chosenWindow = candidate;
+        }
+      }
+
+      if (chosenWindow) {
+        closeFocusRange = { startChar: chosenWindow.startChar, endChar: chosenWindow.endChar };
+        closeFocusTerms = chosenWindow.terms;
+      }
+    }
+  }
+
+  // If CLOSE(...) is present, only highlight the matched CLOSE window.
+  if (normalizedCloseGroups.length && !closeFocusRange) {
+    return 0;
+  }
+
+  const targetTerms = closeFocusTerms || terms.map((text) => ({ text, quoted: false }));
+  if (!targetTerms.length) return 0;
+
+  function collectRanges(segment) {
+    const ranges = [];
+    for (const termInfo of targetTerms) {
+      const rawText = termInfo && typeof termInfo.text === "string" ? termInfo.text : "";
+      const termText = rawText.trim();
+      if (!termText) continue;
+      const pattern = new RegExp(escapeRegExp(termText), termInfo.quoted ? "g" : "gi");
+      let m = null;
+      while ((m = pattern.exec(segment.text)) !== null) {
+        const localStart = m.index;
+        const localEnd = localStart + m[0].length;
+        const absoluteStart = segment.start + localStart;
+        const absoluteEnd = segment.start + localEnd;
+        if (closeFocusRange) {
+          if (absoluteStart < closeFocusRange.startChar || absoluteEnd > closeFocusRange.endChar) {
+            if (pattern.lastIndex <= localStart) {
+              pattern.lastIndex = localStart + 1;
+            }
+            continue;
+          }
+        }
+        ranges.push({ start: localStart, end: localEnd });
+        if (pattern.lastIndex <= localStart) {
+          pattern.lastIndex = localStart + 1;
+        }
+      }
+    }
+
+    if (!ranges.length) {
+      return [];
+    }
+
+    ranges.sort((a, b) => {
+      if (a.start !== b.start) return a.start - b.start;
+      return (b.end - b.start) - (a.end - a.start);
+    });
+
+    const deduped = [];
+    let lastEnd = -1;
+    for (const item of ranges) {
+      if (item.start < lastEnd) continue;
+      deduped.push(item);
+      lastEnd = item.end;
+    }
+    return deduped;
+  }
 
   let firstMark = null;
   let matchCount = 0;
-  for (const textNode of acceptedNodes) {{
-    const text = textNode.nodeValue || "";
-    regex.lastIndex = 0;
+  for (const segment of segments) {
+    const ranges = collectRanges(segment);
+    if (!ranges.length) continue;
+
+    const text = segment.text;
     let cursor = 0;
-    let changed = false;
     const fragment = document.createDocumentFragment();
-    let match = null;
-    while ((match = regex.exec(text)) !== null) {{
-      changed = true;
-      const start = match.index;
-      const end = start + match[0].length;
-      if (start > cursor) {{
-        fragment.appendChild(document.createTextNode(text.slice(cursor, start)));
-      }}
+    for (const range of ranges) {
+      if (range.start > cursor) {
+        fragment.appendChild(document.createTextNode(text.slice(cursor, range.start)));
+      }
       const mark = document.createElement("span");
       mark.setAttribute("data-mdexplore-search-mark", "1");
       mark.style.backgroundColor = "#f5d34f";
       mark.style.color = "#111827";
       mark.style.padding = "0 1px";
       mark.style.borderRadius = "2px";
-      mark.textContent = match[0];
+      mark.textContent = text.slice(range.start, range.end);
       fragment.appendChild(mark);
-      if (!firstMark) {{
+      if (!firstMark) {
         firstMark = mark;
-      }}
+      }
       matchCount += 1;
-      cursor = end;
-      if (regex.lastIndex <= start) {{
-        regex.lastIndex = start + 1;
-      }}
-    }}
-
-    if (!changed) {{
-      continue;
-    }}
-    if (cursor < text.length) {{
+      cursor = range.end;
+    }
+    if (cursor < text.length) {
       fragment.appendChild(document.createTextNode(text.slice(cursor)));
-    }}
-    const parent = textNode.parentNode;
-    if (parent) {{
-      parent.replaceChild(fragment, textNode);
-    }}
-  }}
+    }
+    const parent = segment.node.parentNode;
+    if (parent) {
+      parent.replaceChild(fragment, segment.node);
+    }
+  }
 
-  if (firstMark && shouldScroll) {{
-    firstMark.scrollIntoView({{ behavior: "auto", block: "center", inline: "nearest" }});
-  }}
+  if (firstMark && shouldScroll) {
+    firstMark.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+  }
   return matchCount;
-}})();
+})();
 """
+        js = js.replace("__TERMS_JSON__", terms_json)
+        js = js.replace("__SCROLL_BOOL__", scroll_json)
+        js = js.replace("__CLOSE_WORD_GAP__", close_word_gap_json)
+        js = js.replace("__CLOSE_GROUPS_JSON__", close_groups_json)
         # Mutates preview DOM by inserting mark spans (and optional scroll).
         self.preview.page().runJavaScript(js)
 
@@ -1951,57 +2221,85 @@ class MdExploreWindow(QMainWindow):
             idx += 1
             return token_type, token_value, token_quoted
 
-        def parse_expression():
-            return parse_or()
+        def parse_expression(allow_implicit_and: bool = True):
+            return parse_or(allow_implicit_and)
 
-        def parse_or():
-            node = parse_and()
+        def parse_or(allow_implicit_and: bool = True):
+            node = parse_and(allow_implicit_and)
             while True:
                 token = peek()
                 if token is None or token[0] != "OP" or token[1] != "OR":
                     break
                 consume("OP", "OR")
-                right = parse_and()
+                right = parse_and(allow_implicit_and)
                 node = ("OR", node, right)
             return node
 
-        def parse_and():
-            node = parse_not()
+        def parse_and(allow_implicit_and: bool = True):
+            node = parse_not(allow_implicit_and)
             while True:
                 token = peek()
                 if token is not None and token[0] == "OP" and token[1] == "AND":
                     consume("OP", "AND")
-                    right = parse_not()
+                    right = parse_not(allow_implicit_and)
                     node = ("AND", node, right)
                     continue
                 # Implicit AND between adjacent expressions.
-                if token_starts_expression(idx):
-                    right = parse_not()
+                if allow_implicit_and and token_starts_expression(idx):
+                    right = parse_not(allow_implicit_and)
                     node = ("AND", node, right)
                     continue
                 break
             return node
 
-        def parse_not():
+        def parse_not(allow_implicit_and: bool = True):
             token = peek()
             if token is not None and token[0] == "OP" and token[1] == "NOT":
                 consume("OP", "NOT")
-                return ("NOT", parse_not())
-            return parse_primary()
+                return ("NOT", parse_not(allow_implicit_and))
+            return parse_primary(allow_implicit_and)
 
         def parse_logic_call(operator_name: str):
             consume("OP", operator_name)
             consume("LPAREN")
-            if peek() is not None and peek()[0] == "RPAREN":
-                raise QueryParseError(f"{operator_name}() requires at least one argument")
-            items = [parse_expression()]
             while True:
                 token = peek()
-                if token is not None and token[0] == "COMMA":
+                if token is None:
+                    raise QueryParseError(f"Unterminated {operator_name}(...)")
+                if token[0] == "RPAREN":
+                    break
+                if token[0] == "COMMA":
                     consume("COMMA")
-                    items.append(parse_expression())
                     continue
+                if not token_starts_expression(idx):
+                    raise QueryParseError(f"{operator_name}() accepts expression arguments only")
                 break
+
+            items: list[tuple] = []
+            while True:
+                token = peek()
+                if token is None:
+                    raise QueryParseError(f"Unterminated {operator_name}(...)")
+                if token[0] == "RPAREN":
+                    break
+                if token[0] == "COMMA":
+                    consume("COMMA")
+                    continue
+
+                # Function-style args accept comma, whitespace, or a mix.
+                items.append(parse_expression(allow_implicit_and=False))
+                token = peek()
+                if token is None:
+                    raise QueryParseError(f"Unterminated {operator_name}(...)")
+                if token[0] == "COMMA":
+                    consume("COMMA")
+                    continue
+                if token[0] == "RPAREN":
+                    break
+                if token_starts_expression(idx):
+                    continue
+                raise QueryParseError(f"Unexpected token in {operator_name}(...)")
+
             consume("RPAREN")
             if not items:
                 raise QueryParseError(f"{operator_name}() requires at least one argument")
@@ -2036,7 +2334,7 @@ class MdExploreWindow(QMainWindow):
                 raise QueryParseError("CLOSE(...) requires at least two terms")
             return ("CLOSE", terms)
 
-        def parse_primary():
+        def parse_primary(_allow_implicit_and: bool = True):
             token = peek()
             if token is None:
                 raise QueryParseError("Missing query operand")
@@ -3004,6 +3302,7 @@ class MdExploreWindow(QMainWindow):
         self._scroll_restore_block_until = 0.0
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
+        self._pending_preview_search_close_groups = self._current_close_term_groups() if should_highlight_search else []
 
         self.current_file = path
         try:

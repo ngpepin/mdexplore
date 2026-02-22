@@ -124,11 +124,16 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
   reruns automatically for that directory.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
+- For `CLOSE(...)` queries, preview highlighting is constrained to the matched
+  CLOSE window (not every occurrence of those terms in the document).
 - Non-quoted terms are case-insensitive.
 - Quoted terms are case-sensitive.
 - Function-style operators accept both no-space and spaced forms before `(`:
   `CLOSE(...)`/`CLOSE (...)`, `OR(...)`/`OR (...)`, `AND(...)`/`AND (...)`,
   and `NOT(...)`/`NOT (...)`.
+- `AND(...)`, `OR(...)`, and `CLOSE(...)` accept comma-delimited, space-delimited,
+  or mixed argument lists.
+- `AND(...)` and `OR(...)` are variadic and can take 2+ arguments.
 - `CLOSE(...)` requires 2+ terms and matches only when all terms appear within
   50 words of each other in file content.
 
@@ -163,6 +168,12 @@ Joe "Anne Smith" NOT draft
 ```
 
 Implicit `AND`: equivalent to `Joe AND "Anne Smith" AND NOT draft`.
+
+```text
+AND(alpha beta gamma)
+```
+
+Requires all three terms to match (equivalent to `alpha AND beta AND gamma`).
 
 ## PlantUML Local Configuration
 

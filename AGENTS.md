@@ -76,6 +76,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
 - Function-style operators should accept both no-space and spaced forms before
   `(` (for example `OR(...)` and `OR (...)`).
+- `AND(...)`, `OR(...)`, and `CLOSE(...)` should accept comma-delimited,
+  space-delimited, or mixed argument lists.
+- `AND(...)` and `OR(...)` should be variadic (2+ arguments).
 - If search is active and directory scope changes, search should rerun against
   the new directory scope.
 - File highlight colors are assigned from tree context menu and persisted per directory.
