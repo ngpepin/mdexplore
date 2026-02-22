@@ -1241,6 +1241,8 @@ class MdExploreWindow(QMainWindow):
         self._file_change_watch_timer.setInterval(1200)
         self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
         self._file_change_watch_timer.start()
+        # Keep user-adjusted tree/preview pane widths for this app run.
+        self._session_splitter_sizes: list[int] | None = None
         self._initial_split_applied = False
 
         self.setWindowTitle("mdexplore")
@@ -1365,6 +1367,7 @@ class MdExploreWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 3)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -1415,6 +1418,7 @@ class MdExploreWindow(QMainWindow):
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self._capture_current_preview_scroll(force=True)
+        self._capture_splitter_sizes_for_session()
         self.root = new_root.resolve()
         self.last_directory_selection = self.root
         self.current_file = None
@@ -1495,17 +1499,45 @@ class MdExploreWindow(QMainWindow):
             return
         self._set_root_directory(parent)
 
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        """Persist current pane split after any manual divider movement."""
+        self._capture_splitter_sizes_for_session()
+
+    def _capture_splitter_sizes_for_session(self) -> None:
+        """Store non-zero splitter sizes for reuse while app stays open."""
+        sizes = self.splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_width = int(sizes[0])
+        right_width = int(sizes[1])
+        if left_width <= 0 or right_width <= 0:
+            return
+        self._session_splitter_sizes = [left_width, right_width]
+
     def _maybe_apply_initial_split(self, *_args) -> None:
         # Qt may override splitter sizes during initial layout/model load.
-        # Apply the intended 25/75 split once after real geometry is known.
+        # Re-apply either user-adjusted session split or initial 25/75 once
+        # real geometry is known.
         if self._initial_split_applied:
             return
         total_width = max(self.splitter.width(), self.width())
         if total_width <= 0:
             return
-        left_width = max(260, min(700, total_width // 4))
+
+        left_min = max(200, self.tree.minimumWidth())
+        left_max = max(left_min, self.tree.maximumWidth())
+        if self._session_splitter_sizes and len(self._session_splitter_sizes) == 2:
+            previous_left, previous_right = self._session_splitter_sizes
+            previous_total = max(1, int(previous_left) + int(previous_right))
+            left_width = int(round(total_width * (int(previous_left) / previous_total)))
+        else:
+            left_width = total_width // 4
+
+        left_width = max(left_min, min(left_max, left_width))
         right_width = max(400, total_width - left_width)
+        left_width = max(left_min, min(left_max, total_width - right_width))
         self.splitter.setSizes([left_width, right_width])
+        self._capture_splitter_sizes_for_session()
         self._initial_split_applied = True
 
     def _on_match_text_changed(self, text: str) -> None:

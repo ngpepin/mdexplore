@@ -55,6 +55,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Preview scroll position should be remembered per markdown file for the
   current application run.
 - `^` navigates one directory level up and re-roots the tree.
+- User-adjusted splitter width between tree and preview should persist across
+  root changes for the current application run.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.
 - Linux desktop identity should remain `mdexplore` so launcher icon matching

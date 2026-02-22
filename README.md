@@ -23,6 +23,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
 - `F5` refresh shortcut for the currently selected file (same behavior as `Refresh` button).
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
+- Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
