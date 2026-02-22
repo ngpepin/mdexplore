@@ -312,6 +312,7 @@ class ColorizedMarkdownModel(QFileSystemModel):
                     base_font = super().data(index, role)
                     font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
                     font.setBold(True)
+                    font.setItalic(True)
                     return font
         return super().data(index, role)
 
