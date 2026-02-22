@@ -1313,7 +1313,7 @@ class MdExploreWindow(QMainWindow):
             )
             copy_buttons_layout.addWidget(color_btn)
 
-        match_label = QLabel("Search: ")
+        match_label = QLabel("Search and highlight: ")
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
         self.match_input.setPlaceholderText('words, "quoted phrases", AND/OR/NOT')
