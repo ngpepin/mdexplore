@@ -95,7 +95,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Mermaid and MathJax are rendered client-side in web view.
 - PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`).
 - PlantUML failures should render inline as:
-  `PlantUML render failed with error XYZ`.
+  `PlantUML render failed with error ...`, including detailed stderr context
+  (line numbers when available).
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
 

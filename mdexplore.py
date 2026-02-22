@@ -65,6 +65,24 @@ def _load_default_root_from_config() -> Path:
     return fallback
 
 
+def _extract_plantuml_error_details(stderr_text: str) -> str:
+    """Parse PlantUML stderr into a readable, more detailed message."""
+    raw = (stderr_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in raw.split("\n") if line.strip()]
+    if not lines:
+        return "unknown error"
+
+    # Common PlantUML stderr shape:
+    # ERROR
+    # <line-number>
+    # <message>
+    if len(lines) >= 3 and lines[0].upper() == "ERROR" and lines[1].isdigit():
+        return f"line {lines[1]}: {lines[2]}"
+
+    # Fallback: keep the first few lines for context.
+    return "\n".join(lines[:8])
+
+
 def _build_markdown_icon() -> QIcon:
     """Return a standard markdown icon (theme icon with a drawn fallback)."""
 
@@ -538,8 +556,7 @@ class MarkdownRenderer:
             return None, f"Local PlantUML render failed: {exc}"
 
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            details = stderr.splitlines()[-1] if stderr else "unknown error"
+            details = _extract_plantuml_error_details(result.stderr or "")
             return None, f"Local PlantUML render failed: {details}"
 
         svg_text = (result.stdout or "").strip()
@@ -655,6 +672,17 @@ class MarkdownRenderer:
       margin: 0.8rem 0 0.4rem 0;
       color: #b91c1c;
       font-weight: 600;
+    }}
+    pre.plantuml-error-detail {{
+      margin: 0 0 0.8rem 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #b91c1c;
+      background: color-mix(in srgb, var(--bg) 85%, #ef4444 15%);
+      border: 1px solid #ef9a9a;
+      border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.92rem;
     }}
     .plantuml-pending {{
       margin: 0.8rem 0;
@@ -785,8 +813,7 @@ class PlantUmlRenderWorker(QRunnable):
             return
 
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            details = stderr.splitlines()[-1] if stderr else "unknown error"
+            details = _extract_plantuml_error_details(result.stderr or "")
             self.signals.finished.emit(self.hash_key, "error", f"Local PlantUML render failed: {details}")
             return
 
@@ -1943,17 +1970,20 @@ class MdExploreWindow(QMainWindow):
         return hashlib.sha1(path_key.encode("utf-8", errors="replace")).hexdigest()[:12]
 
     @staticmethod
-    def _truncate_error_text(text: str, max_len: int = 240) -> str:
-        normalized = " ".join(text.split())
+    def _truncate_error_text(text: str, max_len: int = 1200) -> str:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
         if len(normalized) <= max_len:
             return normalized
-        return normalized[: max_len - 1] + "..."
+        return normalized[: max_len - 4] + "\n..."
 
     def _plantuml_inner_html(self, status: str, payload: str) -> str:
         if status == "done":
             return f'<img class="plantuml" src="{payload}" alt="PlantUML diagram"/>'
         safe_error = html.escape(self._truncate_error_text(payload or "unknown error"))
-        return f'<div class="plantuml-error-message">PlantUML render failed with error {safe_error}</div>'
+        return (
+            '<div class="plantuml-error-message">PlantUML render failed with error:</div>'
+            f'<pre class="plantuml-error-detail">{safe_error}</pre>'
+        )
 
     def _plantuml_block_html(self, placeholder_id: str, line_attrs: str, status: str, payload: str) -> str:
         inner = self._plantuml_inner_html(status, payload) if status in {"done", "error"} else "PlantUML rendering..."

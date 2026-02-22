@@ -136,7 +136,8 @@ Behavior details:
 - Markdown preview loads immediately with `PlantUML rendering...` placeholders.
 - Each diagram is replaced automatically as soon as it completes.
 - Diagram replacements are applied in-place so scroll position is preserved.
-- Failed diagrams show `PlantUML render failed with error XYZ`.
+- Failed diagrams show `PlantUML render failed with error ...` plus detailed
+  stderr context (including line number when PlantUML provides one).
 - Diagram progress continues while you browse other files; returning shows completed progress.
 
 ## Project Structure
