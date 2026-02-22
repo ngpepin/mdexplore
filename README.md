@@ -14,11 +14,12 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - PlantUML diagrams.
 - Top actions:
   - `^` moves root up one directory level.
+  - `Refresh` reloads the currently displayed markdown preview.
   - `Quit` closes the app.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
-- `F5` refresh shortcut for the currently selected file.
+- `F5` refresh shortcut for the currently selected file (same behavior as `Refresh` button).
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.

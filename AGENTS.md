@@ -9,7 +9,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Left-pane directory tree rooted at a target folder.
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
-- `^`, `Quit`, and `Edit` actions.
+- `^`, `Refresh`, `Quit`, and `Edit` actions.
 - Top-right copy-by-color controls for clipboard file operations.
 
 ## Repository Map
@@ -48,7 +48,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   works (`QApplication.setDesktopFileName("mdexplore")` + desktop
   `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
-- `F5` refreshes preview for the selected file.
+- `Refresh` button and `F5` both refresh the selected file preview.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.

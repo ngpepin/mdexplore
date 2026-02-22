@@ -621,6 +621,9 @@ class MdExploreWindow(QMainWindow):
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
 
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_current_preview)
+
         quit_btn = QPushButton("Quit")
         quit_btn.clicked.connect(self.close)
 
@@ -651,6 +654,7 @@ class MdExploreWindow(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.addWidget(self.up_btn)
+        top_bar.addWidget(refresh_btn)
         top_bar.addWidget(quit_btn)
         top_bar.addWidget(edit_btn)
         top_bar.addWidget(self.path_label, 1)
