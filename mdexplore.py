@@ -8,12 +8,14 @@ import base64
 import html
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections import deque
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -870,13 +872,15 @@ class MdExploreWindow(QMainWindow):
         self._active_plantuml_workers: set[PlantUmlRenderWorker] = set()
         # Per-file session scroll memory (not persisted to disk).
         self._preview_scroll_positions: dict[str, float] = {}
+        self._preview_capture_enabled = False
+        self._scroll_restore_block_until = 0.0
         self._match_input_text = ""
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
         self.match_timer.setInterval(1000)
         self.match_timer.timeout.connect(self._run_match_search)
         self._scroll_capture_timer = QTimer(self)
-        self._scroll_capture_timer.setInterval(400)
+        self._scroll_capture_timer.setInterval(200)
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
         self._scroll_capture_timer.start()
         self._initial_split_applied = False
@@ -1047,10 +1051,12 @@ class MdExploreWindow(QMainWindow):
 
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
-        self._capture_current_preview_scroll()
+        self._capture_current_preview_scroll(force=True)
         self.root = new_root.resolve()
         self.last_directory_selection = self.root
         self.current_file = None
+        self._preview_capture_enabled = False
+        self._scroll_restore_block_until = 0.0
         self._pending_preview_search_terms = []
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
@@ -1071,6 +1077,9 @@ class MdExploreWindow(QMainWindow):
         """Apply deferred in-preview highlighting after a page finishes loading."""
         if not ok:
             return
+        current_key = self._current_preview_path_key()
+        if current_key is None:
+            return
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
@@ -1080,8 +1089,17 @@ class MdExploreWindow(QMainWindow):
             # scroll position, preserve that location instead.
             self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=not has_saved_scroll)
         if has_saved_scroll:
-            # Small delay allows layout/MathJax/Mermaid updates to settle.
-            QTimer.singleShot(90, self._restore_current_preview_scroll)
+            # Re-apply a few times because late MathJax/Mermaid/layout work can
+            # shift content after the initial load.
+            self._preview_capture_enabled = False
+            self._scroll_restore_block_until = time.monotonic() + 1.2
+            QTimer.singleShot(90, lambda key=current_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(320, lambda key=current_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(900, lambda key=current_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(1250, lambda key=current_key: self._enable_preview_scroll_capture_for(key))
+        else:
+            self._preview_capture_enabled = True
+            self._scroll_restore_block_until = 0.0
 
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
@@ -2018,32 +2036,40 @@ class MdExploreWindow(QMainWindow):
         key = self._current_preview_path_key()
         return key is not None and key in self._preview_scroll_positions
 
-    def _capture_current_preview_scroll(self) -> None:
+    def _capture_current_preview_scroll(self, force: bool = False) -> None:
         """Capture current preview scroll position for the selected file."""
         path_key = self._current_preview_path_key()
         if path_key is None:
             return
-        js = """
-(() => {
-  // Use window/document fallbacks to support different engines/modes.
-  const y = window.scrollY ?? document.documentElement.scrollTop ?? document.body.scrollTop ?? 0;
-  return Number.isFinite(y) ? y : 0;
-})();
-"""
+        if not force:
+            if not self._preview_capture_enabled:
+                return
+            if time.monotonic() < self._scroll_restore_block_until:
+                return
+        # Use Qt's synchronous scrollPosition() to avoid async JS race conditions
+        # during rapid file switches.
+        try:
+            pos = self.preview.page().scrollPosition()
+            y = float(pos.y())
+        except Exception:
+            return
+        if math.isfinite(y):
+            self._preview_scroll_positions[path_key] = y
 
-        def on_result(value, expected_key=path_key):
-            # Store against the file that triggered this request, even if the
-            # user switched selection before JS finished.
-            if isinstance(value, (int, float)):
-                self._preview_scroll_positions[expected_key] = float(value)
+    def _enable_preview_scroll_capture_for(self, expected_key: str) -> None:
+        """Re-enable periodic scroll capture for the currently displayed file."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        self._preview_capture_enabled = True
+        self._scroll_restore_block_until = 0.0
+        self._capture_current_preview_scroll(force=True)
 
-        # Returns current scroll Y for this preview page.
-        self.preview.page().runJavaScript(js, on_result)
-
-    def _restore_current_preview_scroll(self) -> None:
+    def _restore_current_preview_scroll(self, expected_key: str | None = None) -> None:
         """Restore previously captured scroll position for the selected file."""
         path_key = self._current_preview_path_key()
         if path_key is None:
+            return
+        if expected_key is not None and path_key != expected_key:
             return
         scroll_y = self._preview_scroll_positions.get(path_key)
         if scroll_y is None:
@@ -2192,8 +2218,10 @@ class MdExploreWindow(QMainWindow):
     def _load_preview(self, path: Path) -> None:
         # Render markdown quickly with async PlantUML placeholders so the
         # document appears immediately while diagrams render in background.
-        self._capture_current_preview_scroll()
+        self._capture_current_preview_scroll(force=True)
         self._cancel_pending_preview_render()
+        self._preview_capture_enabled = False
+        self._scroll_restore_block_until = 0.0
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
 
