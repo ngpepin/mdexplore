@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
+import hashlib
 import json
 import os
 import re
@@ -12,7 +14,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import zlib
 from collections import deque
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -62,49 +63,6 @@ def _load_default_root_from_config() -> Path:
         # Any read/parse/access issue should fall back to home directory.
         pass
     return fallback
-
-
-def _encode_plantuml_source(text: str) -> str:
-    """Encode PlantUML text to the compact server format."""
-    # PlantUML's URL-safe encoding is custom and uses raw DEFLATE bytes.
-    # This helper mirrors PlantUML's own reference algorithm so diagrams can
-    # be fetched directly from a PlantUML server without local Java tooling.
-
-    def encode_6bit(value: int) -> str:
-        if value < 10:
-            return chr(48 + value)
-        value -= 10
-        if value < 26:
-            return chr(65 + value)
-        value -= 26
-        if value < 26:
-            return chr(97 + value)
-        if value == 0:
-            return "-"
-        if value == 1:
-            return "_"
-        return "?"
-
-    def append_3bytes(b1: int, b2: int, b3: int) -> str:
-        c1 = b1 >> 2
-        c2 = ((b1 & 0x3) << 4) | (b2 >> 4)
-        c3 = ((b2 & 0xF) << 2) | (b3 >> 6)
-        c4 = b3 & 0x3F
-        return "".join((encode_6bit(c1 & 0x3F), encode_6bit(c2 & 0x3F), encode_6bit(c3 & 0x3F), encode_6bit(c4 & 0x3F)))
-
-    compressor = zlib.compressobj(level=9, wbits=-15)
-    compressed = compressor.compress(text.encode("utf-8")) + compressor.flush()
-
-    out = []
-    for i in range(0, len(compressed), 3):
-        chunk = compressed[i : i + 3]
-        if len(chunk) == 3:
-            out.append(append_3bytes(chunk[0], chunk[1], chunk[2]))
-        elif len(chunk) == 2:
-            out.append(append_3bytes(chunk[0], chunk[1], 0))
-        else:
-            out.append(append_3bytes(chunk[0], 0, 0))
-    return "".join(out)
 
 
 def _build_markdown_icon() -> QIcon:
@@ -449,7 +407,9 @@ class MarkdownRenderer:
     """Converts markdown to HTML with Mermaid, MathJax, and PlantUML support."""
 
     def __init__(self) -> None:
-        self._plantuml_server = os.environ.get("PLANTUML_SERVER", "https://www.plantuml.com/plantuml").rstrip("/")
+        self._plantuml_jar_path = self._resolve_plantuml_jar_path()
+        self._plantuml_setup_issue = self._plantuml_setup_error()
+        self._plantuml_svg_cache: dict[str, str] = {}
         self._md = MarkdownIt(
             "commonmark",
             {"html": True, "linkify": True, "typographer": True},
@@ -476,11 +436,20 @@ class MarkdownRenderer:
                 )
 
             if info in {"plantuml", "puml", "uml"}:
-                encoded = _encode_plantuml_source(code)
-                src = f"{self._plantuml_server}/svg/{encoded}"
+                data_uri, error_message = self._render_plantuml_data_uri(code)
+                if data_uri is not None:
+                    return (
+                        f'<div class="mdexplore-fence"{line_attrs}>'
+                        f'<img class="plantuml" src="{data_uri}" alt="PlantUML diagram"/>'
+                        "</div>\n"
+                    )
+
+                escaped_error = html.escape(error_message or "PlantUML rendering failed")
+                escaped_code = html.escape(code)
                 return (
-                    f'<div class="mdexplore-fence"{line_attrs}>'
-                    f'<img class="plantuml" src="{src}" alt="PlantUML diagram"/>'
+                    f'<div class="mdexplore-fence plantuml-error"{line_attrs}>'
+                    f'<div class="plantuml-error-message">{escaped_error}</div>'
+                    f'<pre><code class="language-plantuml">{escaped_code}</code></pre>'
                     "</div>\n"
                 )
 
@@ -497,6 +466,83 @@ class MarkdownRenderer:
 
         self._md.renderer.rules["fence"] = custom_fence
         self._md.renderer.renderToken = custom_render_token
+
+    def _resolve_plantuml_jar_path(self) -> Path | None:
+        """Locate plantuml.jar from env, app directory, or current directory."""
+        env_value = os.environ.get("PLANTUML_JAR", "").strip()
+        candidates: list[Path] = []
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+        app_dir = Path(__file__).resolve().parent
+        candidates.append(app_dir / "plantuml.jar")
+        candidates.append(Path.cwd() / "plantuml.jar")
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.resolve()
+            except Exception:
+                continue
+        return None
+
+    def _plantuml_setup_error(self) -> str | None:
+        """Return setup error text when local PlantUML execution is unavailable."""
+        if self._plantuml_jar_path is None:
+            return "plantuml.jar not found (set PLANTUML_JAR or place jar next to mdexplore.py)"
+        if shutil.which("java") is None:
+            return "Java runtime not found in PATH; install Java to render PlantUML diagrams"
+        return None
+
+    def _render_plantuml_data_uri(self, code: str) -> tuple[str | None, str | None]:
+        """Render PlantUML source locally and return an SVG data URI."""
+        cache_key = hashlib.sha1(code.encode("utf-8", errors="replace")).hexdigest()
+        cached = self._plantuml_svg_cache.get(cache_key)
+        if cached is not None:
+            return cached, None
+
+        if self._plantuml_setup_issue is not None:
+            return None, self._plantuml_setup_issue
+        if self._plantuml_jar_path is None:
+            return None, "plantuml.jar not available"
+
+        command = [
+            "java",
+            "-Djava.awt.headless=true",
+            "-jar",
+            str(self._plantuml_jar_path),
+            "-pipe",
+            "-tsvg",
+            "-charset",
+            "UTF-8",
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                input=code,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            return None, "Local PlantUML render timed out"
+        except Exception as exc:
+            return None, f"Local PlantUML render failed: {exc}"
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            details = stderr.splitlines()[-1] if stderr else "unknown error"
+            return None, f"Local PlantUML render failed: {details}"
+
+        svg_text = (result.stdout or "").strip()
+        if "<svg" not in svg_text.casefold():
+            return None, "Local PlantUML did not return SVG output"
+
+        encoded_svg = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+        data_uri = f"data:image/svg+xml;base64,{encoded_svg}"
+        self._plantuml_svg_cache[cache_key] = data_uri
+        return data_uri, None
 
     def render_document(self, markdown_text: str, title: str) -> str:
         body = self._md.render(markdown_text)
@@ -575,6 +621,11 @@ class MarkdownRenderer:
       border: 1px solid var(--border);
       border-radius: 6px;
       background: #fff;
+    }}
+    .plantuml-error-message {{
+      margin: 0.8rem 0 0.4rem 0;
+      color: #b91c1c;
+      font-weight: 600;
     }}
   </style>
   <script>

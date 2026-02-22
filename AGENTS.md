@@ -29,7 +29,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Python `3.10+`.
 - Linux desktop with GUI support.
 - `PySide6` and `QtWebEngine` available via pip dependencies.
-- Network access is expected for MathJax/Mermaid CDNs and PlantUML server rendering.
+- Network access is expected for MathJax/Mermaid CDNs.
+- Java runtime is expected for local PlantUML rendering.
 - VS Code `code` command may or may not be installed; app should fail gracefully when missing.
 
 ## Core Behavior You Must Preserve
@@ -83,7 +84,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 
 - Markdown parser is `markdown-it-py`.
 - Mermaid and MathJax are rendered client-side in web view.
-- PlantUML fences are encoded and rendered through a PlantUML server URL.
+- PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`).
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
 

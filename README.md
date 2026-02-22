@@ -43,7 +43,8 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Python `3.10+`.
 - `python3-venv` package available.
 - Internet access for MathJax and Mermaid CDN scripts.
-- Internet access to a PlantUML server (or your own internal server).
+- Java runtime (`java` in `PATH`) for local PlantUML rendering.
+- `plantuml.jar` available (project root by default, or set `PLANTUML_JAR`).
 - Optional: VS Code `code` command in `PATH` for `Edit`.
 
 ## Quick Start
@@ -116,15 +117,15 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
 
-## PlantUML Server Configuration
+## PlantUML Local Configuration
 
-The app renders PlantUML blocks through a server endpoint.
+The app renders PlantUML blocks locally with `plantuml.jar`.
 
-- Default: `https://www.plantuml.com/plantuml`
-- Override:
+- Default jar path: `/path/to/mdexplore/plantuml.jar`
+- Override jar path with `PLANTUML_JAR`:
 
 ```bash
-PLANTUML_SERVER=https://your-server/plantuml /path/to/mdexplore/mdexplore.sh
+PLANTUML_JAR=/path/to/plantuml.jar /path/to/mdexplore/mdexplore.sh
 ```
 
 ## Project Structure
