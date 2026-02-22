@@ -19,7 +19,6 @@ coverage.xml
 
 # Build and packaging output
 build/
-dist/
 *.egg-info/
 .eggs/
 

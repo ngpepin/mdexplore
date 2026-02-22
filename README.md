@@ -44,7 +44,8 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Ubuntu/Linux desktop with GUI.
 - Python `3.10+`.
 - `python3-venv` package available.
-- Internet access for MathJax and Mermaid CDN scripts.
+- Internet access for Mermaid only when no local Mermaid bundle is available.
+- Internet access for MathJax only when no local MathJax bundle is available.
 - Java runtime (`java` in `PATH`) for local PlantUML rendering.
 - `plantuml.jar` available (project root by default, or set `PLANTUML_JAR`).
 - Optional: VS Code `code` command in `PATH` for `Edit`.
@@ -141,6 +142,52 @@ Behavior details:
   stderr context (including line number when PlantUML provides one).
 - Diagram progress continues while you browse other files; returning shows completed progress.
 
+## MathJax Local-First Configuration
+
+Math rendering is local-first:
+
+- mdexplore first tries a local `tex-mml-chtml.js` bundle.
+- If no local bundle is found, it falls back to CDN.
+
+Local lookup order:
+
+1. `MDEXPLORE_MATHJAX_JS` (explicit file path)
+2. `mathjax/es5/tex-mml-chtml.js` under the repo
+3. `mathjax/tex-mml-chtml.js` under the repo
+4. `assets/mathjax/es5/tex-mml-chtml.js` under the repo
+5. `vendor/mathjax/es5/tex-mml-chtml.js` under the repo
+6. System paths such as `/usr/share/javascript/mathjax/es5/tex-mml-chtml.js`
+
+Example override:
+
+```bash
+MDEXPLORE_MATHJAX_JS=/absolute/path/to/tex-mml-chtml.js /path/to/mdexplore/mdexplore.sh
+```
+
+## Mermaid Local-First Configuration
+
+Mermaid rendering is local-first:
+
+- mdexplore first tries a local `mermaid.min.js` bundle.
+- If no local bundle is found, it falls back to CDN.
+
+Local lookup order:
+
+1. `MDEXPLORE_MERMAID_JS` (explicit file path)
+2. `mermaid/mermaid.min.js` under the repo
+3. `mermaid/dist/mermaid.min.js` under the repo
+4. `assets/mermaid/mermaid.min.js` under the repo
+5. `assets/mermaid/dist/mermaid.min.js` under the repo
+6. `vendor/mermaid/mermaid.min.js` under the repo
+7. `vendor/mermaid/dist/mermaid.min.js` under the repo
+8. System paths such as `/usr/share/javascript/mermaid/mermaid.min.js`
+
+Example override:
+
+```bash
+MDEXPLORE_MERMAID_JS=/absolute/path/to/mermaid.min.js /path/to/mdexplore/mdexplore.sh
+```
+
 ## Project Structure
 
 ```text
@@ -201,7 +248,8 @@ If running the launcher appears to do nothing:
 ## Security Notes
 
 - Markdown HTML is enabled (`html=True`), so preview untrusted Markdown with care.
-- Mermaid and MathJax load from external CDNs at runtime.
+- Mermaid uses local-first loading with CDN fallback.
+- MathJax uses local-first loading with CDN fallback.
 
 ## Contributing
 

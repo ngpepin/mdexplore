@@ -122,6 +122,59 @@ print(path)
 PY
 }
 
+resolve_local_script_path() {
+  local candidate=""
+  for candidate in "$@"; do
+    [[ -z "${candidate}" ]] && continue
+    if [[ -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+configure_local_renderer_overrides() {
+  local detected_path=""
+
+  if [[ -z "${MDEXPLORE_MATHJAX_JS:-}" ]]; then
+    detected_path="$(resolve_local_script_path \
+      "${SCRIPT_DIR}/mathjax/es5/tex-mml-chtml.js" \
+      "${SCRIPT_DIR}/mathjax/tex-mml-chtml.js" \
+      "${SCRIPT_DIR}/assets/mathjax/es5/tex-mml-chtml.js" \
+      "${SCRIPT_DIR}/vendor/mathjax/es5/tex-mml-chtml.js" \
+      "/usr/share/javascript/mathjax/es5/tex-mml-chtml.js" \
+      "/usr/share/mathjax/es5/tex-mml-chtml.js" \
+      "/usr/share/nodejs/mathjax/es5/tex-mml-chtml.js" \
+      || true)"
+    if [[ -n "${detected_path}" ]]; then
+      export MDEXPLORE_MATHJAX_JS="${detected_path}"
+      echo "Using local MathJax bundle: ${MDEXPLORE_MATHJAX_JS}"
+    fi
+  else
+    echo "Using configured MDEXPLORE_MATHJAX_JS: ${MDEXPLORE_MATHJAX_JS}"
+  fi
+
+  if [[ -z "${MDEXPLORE_MERMAID_JS:-}" ]]; then
+    detected_path="$(resolve_local_script_path \
+      "${SCRIPT_DIR}/mermaid/mermaid.min.js" \
+      "${SCRIPT_DIR}/mermaid/dist/mermaid.min.js" \
+      "${SCRIPT_DIR}/assets/mermaid/mermaid.min.js" \
+      "${SCRIPT_DIR}/assets/mermaid/dist/mermaid.min.js" \
+      "${SCRIPT_DIR}/vendor/mermaid/mermaid.min.js" \
+      "${SCRIPT_DIR}/vendor/mermaid/dist/mermaid.min.js" \
+      "/usr/share/javascript/mermaid/mermaid.min.js" \
+      "/usr/share/nodejs/mermaid/dist/mermaid.min.js" \
+      || true)"
+    if [[ -n "${detected_path}" ]]; then
+      export MDEXPLORE_MERMAID_JS="${detected_path}"
+      echo "Using local Mermaid bundle: ${MDEXPLORE_MERMAID_JS}"
+    fi
+  else
+    echo "Using configured MDEXPLORE_MERMAID_JS: ${MDEXPLORE_MERMAID_JS}"
+  fi
+}
+
 TARGET_PATH=""
 if [[ $# -ge 1 ]]; then
   for RAW_PATH in "$@"; do
@@ -243,6 +296,8 @@ if ! runtime_import_check; then
   printf '%s\n' "${current_hash}" > "${REQ_HASH_FILE}"
   runtime_import_check
 fi
+
+configure_local_renderer_overrides
 
 if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
   trim_log_file_inplace "${LOG_FILE}" "${MAX_LOG_LINES}"

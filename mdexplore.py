@@ -23,6 +23,7 @@ from pathlib import Path
 from markdown_it import MarkdownIt
 from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -427,6 +428,8 @@ class MarkdownRenderer:
     """Converts markdown to HTML with Mermaid, MathJax, and PlantUML support."""
 
     def __init__(self) -> None:
+        self._mathjax_local_script = self._resolve_local_mathjax_script()
+        self._mermaid_local_script = self._resolve_local_mermaid_script()
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
         self._plantuml_setup_issue = self._plantuml_setup_error()
         self._plantuml_svg_cache: dict[str, str] = {}
@@ -492,6 +495,87 @@ class MarkdownRenderer:
 
         self._md.renderer.rules["fence"] = custom_fence
         self._md.renderer.renderToken = custom_render_token
+
+    def _resolve_local_mathjax_script(self) -> Path | None:
+        """Locate a local MathJax bundle to use before CDN fallback."""
+        env_value = os.environ.get("MDEXPLORE_MATHJAX_JS", "").strip()
+        candidates: list[Path] = []
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+
+        app_dir = Path(__file__).resolve().parent
+        candidates.extend(
+            [
+                app_dir / "mathjax" / "es5" / "tex-mml-chtml.js",
+                app_dir / "mathjax" / "tex-mml-chtml.js",
+                app_dir / "assets" / "mathjax" / "es5" / "tex-mml-chtml.js",
+                app_dir / "vendor" / "mathjax" / "es5" / "tex-mml-chtml.js",
+                Path("/usr/share/javascript/mathjax/es5/tex-mml-chtml.js"),
+                Path("/usr/share/mathjax/es5/tex-mml-chtml.js"),
+                Path("/usr/share/nodejs/mathjax/es5/tex-mml-chtml.js"),
+            ]
+        )
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.resolve()
+            except Exception:
+                continue
+        return None
+
+    def _mathjax_script_sources(self) -> list[str]:
+        """Return local-first MathJax script URLs with CDN fallback."""
+        sources: list[str] = []
+        if self._mathjax_local_script is not None:
+            try:
+                sources.append(self._mathjax_local_script.as_uri())
+            except Exception:
+                pass
+        sources.append("https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js")
+        # Keep order while dropping duplicates.
+        return list(dict.fromkeys(sources))
+
+    def _resolve_local_mermaid_script(self) -> Path | None:
+        """Locate a local Mermaid bundle to use before CDN fallback."""
+        env_value = os.environ.get("MDEXPLORE_MERMAID_JS", "").strip()
+        candidates: list[Path] = []
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+
+        app_dir = Path(__file__).resolve().parent
+        candidates.extend(
+            [
+                app_dir / "mermaid" / "mermaid.min.js",
+                app_dir / "mermaid" / "dist" / "mermaid.min.js",
+                app_dir / "assets" / "mermaid" / "mermaid.min.js",
+                app_dir / "assets" / "mermaid" / "dist" / "mermaid.min.js",
+                app_dir / "vendor" / "mermaid" / "mermaid.min.js",
+                app_dir / "vendor" / "mermaid" / "dist" / "mermaid.min.js",
+                Path("/usr/share/javascript/mermaid/mermaid.min.js"),
+                Path("/usr/share/nodejs/mermaid/dist/mermaid.min.js"),
+            ]
+        )
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.resolve()
+            except Exception:
+                continue
+        return None
+
+    def _mermaid_script_sources(self) -> list[str]:
+        """Return local-first Mermaid script URLs with CDN fallback."""
+        sources: list[str] = []
+        if self._mermaid_local_script is not None:
+            try:
+                sources.append(self._mermaid_local_script.as_uri())
+            except Exception:
+                pass
+        sources.append("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js")
+        # Keep order while dropping duplicates.
+        return list(dict.fromkeys(sources))
 
     def _resolve_plantuml_jar_path(self) -> Path | None:
         """Locate plantuml.jar from env, app directory, or current directory."""
@@ -597,6 +681,8 @@ class MarkdownRenderer:
             env["plantuml_index"] = 0
         body = self._md.render(markdown_text, env)
         escaped_title = html.escape(title)
+        mathjax_sources_json = json.dumps(self._mathjax_script_sources())
+        mermaid_sources_json = json.dumps(self._mermaid_script_sources())
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -699,6 +785,9 @@ class MarkdownRenderer:
   </style>
   <script>
     window.MathJax = {{
+      startup: {{
+        typeset: false
+      }},
       tex: {{
         inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
         displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
@@ -707,21 +796,282 @@ class MarkdownRenderer:
         skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
       }}
     }};
+    window.__mdexploreMathReady = false;
+    window.__mdexploreMathInFlight = false;
+    window.__mdexploreMathJaxSource = "";
+    window.__mdexploreMathJaxSources = {mathjax_sources_json};
+    window.__mdexploreMathJaxLoadPromise = null;
+    window.__mdexploreMermaidReady = false;
+    window.__mdexploreMermaidSource = "";
+    window.__mdexploreMermaidSources = {mermaid_sources_json};
+    window.__mdexploreMermaidLoadPromise = null;
+    window.__mdexploreMermaidAttempted = false;
+
+    window.__mdexploreLoadMathJaxScript = () => {{
+      if (window.__mdexploreMathJaxLoadPromise) {{
+        return window.__mdexploreMathJaxLoadPromise;
+      }}
+      window.__mdexploreMathJaxLoadPromise = (async () => {{
+        const sources = Array.isArray(window.__mdexploreMathJaxSources) ? window.__mdexploreMathJaxSources : [];
+        for (const src of sources) {{
+          try {{
+            await new Promise((resolve, reject) => {{
+              const script = document.createElement("script");
+              script.src = src;
+              script.defer = true;
+              script.onload = () => resolve(true);
+              script.onerror = () => reject(new Error(`Failed to load ${{src}}`));
+              document.head.appendChild(script);
+            }});
+            if (window.MathJax && MathJax.typesetPromise) {{
+              window.__mdexploreMathJaxSource = src;
+              return true;
+            }}
+          }} catch (error) {{
+            console.error("mdexplore MathJax script load failed:", src, error);
+          }}
+        }}
+        return false;
+      }})();
+      return window.__mdexploreMathJaxLoadPromise;
+    }};
+
+    window.__mdexploreLoadMermaidScript = () => {{
+      if (window.__mdexploreMermaidLoadPromise) {{
+        return window.__mdexploreMermaidLoadPromise;
+      }}
+      window.__mdexploreMermaidLoadPromise = (async () => {{
+        const sources = Array.isArray(window.__mdexploreMermaidSources) ? window.__mdexploreMermaidSources : [];
+        for (const src of sources) {{
+          try {{
+            await new Promise((resolve, reject) => {{
+              const script = document.createElement("script");
+              script.src = src;
+              script.defer = true;
+              script.onload = () => resolve(true);
+              script.onerror = () => reject(new Error(`Failed to load ${{src}}`));
+              document.head.appendChild(script);
+            }});
+            if (window.mermaid) {{
+              window.__mdexploreMermaidSource = src;
+              return true;
+            }}
+          }} catch (error) {{
+            console.error("mdexplore Mermaid script load failed:", src, error);
+          }}
+        }}
+        return false;
+      }})();
+      return window.__mdexploreMermaidLoadPromise;
+    }};
+
+    window.__mdexploreNormalizeMathText = () => {{
+      // markdown-it treats \\# as an escape and can strip the backslash before
+      // MathJax runs. Re-escape bare # inside $...$ / $$...$$ text so cardinality
+      // expressions like #{{...}} remain valid TeX.
+      const root = document.querySelector("main") || document.body;
+      if (!root) {{
+        return 0;
+      }}
+
+      const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "PRE", "CODE"]);
+
+      const escapeHashes = (mathText) => {{
+        let out = "";
+        for (let i = 0; i < mathText.length; i += 1) {{
+          const ch = mathText[i];
+          if (ch !== "#") {{
+            out += ch;
+            continue;
+          }}
+          const prev = i > 0 ? mathText[i - 1] : "";
+          const next = i + 1 < mathText.length ? mathText[i + 1] : "";
+          if (prev !== "\\\\" && !(next >= "0" && next <= "9")) {{
+            out += "\\\\#";
+          }} else {{
+            out += ch;
+          }}
+        }}
+        return out;
+      }};
+
+      const findClosingDouble = (text, start) => {{
+        for (let i = start; i + 1 < text.length; i += 1) {{
+          if (text[i] === "$" && text[i + 1] === "$" && (i === 0 || text[i - 1] !== "\\\\")) {{
+            return i;
+          }}
+        }}
+        return -1;
+      }};
+
+      const findClosingSingle = (text, start) => {{
+        for (let i = start; i < text.length; i += 1) {{
+          if (text[i] !== "$" || (i > 0 && text[i - 1] === "\\\\")) {{
+            continue;
+          }}
+          // Treat $$ as double-delimiter, not the end of an inline span.
+          if (i + 1 < text.length && text[i + 1] === "$") {{
+            continue;
+          }}
+          return i;
+        }}
+        return -1;
+      }};
+
+      const normalizeNodeText = (text) => {{
+        if (!text || text.indexOf("$") === -1 || text.indexOf("#") === -1) {{
+          return text;
+        }}
+        let out = "";
+        let i = 0;
+        while (i < text.length) {{
+          if (text[i] !== "$") {{
+            out += text[i];
+            i += 1;
+            continue;
+          }}
+
+          if (i + 1 < text.length && text[i + 1] === "$") {{
+            const end = findClosingDouble(text, i + 2);
+            if (end < 0) {{
+              out += text[i];
+              i += 1;
+              continue;
+            }}
+            const body = text.slice(i + 2, end);
+            out += "$$" + escapeHashes(body) + "$$";
+            i = end + 2;
+            continue;
+          }}
+
+          const end = findClosingSingle(text, i + 1);
+          if (end < 0) {{
+            out += text[i];
+            i += 1;
+            continue;
+          }}
+          const body = text.slice(i + 1, end);
+          out += "$" + escapeHashes(body) + "$";
+          i = end + 1;
+        }}
+        return out;
+      }};
+
+      let updated = 0;
+      const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        {{
+          acceptNode(node) {{
+            if (!node || !node.nodeValue || node.nodeValue.indexOf("$") === -1) {{
+              return NodeFilter.FILTER_REJECT;
+            }}
+            const parent = node.parentElement;
+            if (!parent || skipTags.has(parent.tagName)) {{
+              return NodeFilter.FILTER_REJECT;
+            }}
+            return NodeFilter.FILTER_ACCEPT;
+          }},
+        }},
+      );
+
+      const nodes = [];
+      while (walker.nextNode()) {{
+        nodes.push(walker.currentNode);
+      }}
+      for (const node of nodes) {{
+        const nextText = normalizeNodeText(node.nodeValue || "");
+        if (nextText !== node.nodeValue) {{
+          node.nodeValue = nextText;
+          updated += 1;
+        }}
+      }}
+      return updated;
+    }};
+
+    window.__mdexploreRunMermaid = async () => {{
+      if (window.__mdexploreMermaidReady || window.__mdexploreMermaidAttempted) {{
+        return window.__mdexploreMermaidReady;
+      }}
+      window.__mdexploreMermaidAttempted = true;
+      try {{
+        const loaded = await window.__mdexploreLoadMermaidScript();
+        if (!loaded || !window.mermaid) {{
+          throw new Error("Mermaid script failed to load from local/CDN sources");
+        }}
+        mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose' }});
+        await mermaid.run({{ querySelector: '.mermaid' }});
+        window.__mdexploreMermaidReady = true;
+      }} catch (error) {{
+        window.__mdexploreMermaidReady = false;
+        console.error("mdexplore Mermaid render failed:", error);
+      }}
+      return window.__mdexploreMermaidReady;
+    }};
+
+    window.__mdexploreTryTypesetMath = async () => {{
+      if (window.__mdexploreMathInFlight) {{
+        return window.__mdexploreMathReady;
+      }}
+      window.__mdexploreMathInFlight = true;
+      try {{
+        window.__mdexploreNormalizeMathText();
+        const loaded = await window.__mdexploreLoadMathJaxScript();
+        if (!loaded) {{
+          throw new Error("MathJax script failed to load from local/CDN sources");
+        }}
+        if (!(window.MathJax && MathJax.typesetPromise)) {{
+          throw new Error("MathJax runtime not available yet");
+        }}
+        if (MathJax.startup && MathJax.startup.promise) {{
+          await MathJax.startup.promise;
+        }}
+        await MathJax.typesetPromise();
+        window.__mdexploreMathReady = true;
+        window.__mdexploreMathError = "";
+      }} catch (error) {{
+        window.__mdexploreMathReady = false;
+        window.__mdexploreMathError = (error && error.message) ? error.message : String(error);
+        console.error("mdexplore MathJax render failed:", error);
+      }} finally {{
+        window.__mdexploreMathInFlight = false;
+      }}
+      return window.__mdexploreMathReady;
+    }};
+
+    window.__mdexploreScheduleMathRetries = () => {{
+      // External script load timing can lag; retry shortly before giving up.
+      for (const delayMs of [160, 420, 900, 1700]) {{
+        window.setTimeout(() => {{
+          if (!window.__mdexploreMathReady) {{
+            window.__mdexploreTryTypesetMath();
+          }}
+        }}, delayMs);
+      }}
+    }};
+
+    window.__mdexploreRunClientRenderers = async () => {{
+      // Keep Mermaid failures isolated so math rendering is never blocked.
+      if (!window.__mdexploreMermaidReady) {{
+        await window.__mdexploreRunMermaid();
+      }}
+      const mathReady = await window.__mdexploreTryTypesetMath();
+      if (!mathReady) {{
+        window.__mdexploreScheduleMathRetries();
+      }}
+    }};
+
+    window.__mdexploreLoadMathJaxScript();
+    window.__mdexploreLoadMermaidScript();
   </script>
-  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 </head>
 <body>
   <main>{body}</main>
   <script>
-    window.addEventListener('DOMContentLoaded', async () => {{
-      // Mermaid/MathJax run after markdown HTML is mounted.
-      if (window.mermaid) {{
-        mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose' }});
-        await mermaid.run({{ querySelector: '.mermaid' }});
-      }}
-      if (window.MathJax && MathJax.typesetPromise) {{
-        await MathJax.typesetPromise();
+    window.addEventListener('DOMContentLoaded', () => {{
+      // Start client-side renderers once content is mounted.
+      if (window.__mdexploreRunClientRenderers) {{
+        window.__mdexploreRunClientRenderers();
       }}
     }});
   </script>
@@ -911,6 +1261,11 @@ class MdExploreWindow(QMainWindow):
         self.tree.expanded.connect(self._on_tree_directory_expanded)
 
         self.preview = QWebEngineView()
+        # Preview pages are loaded as local HTML. Allow remote JS/CSS so CDN
+        # assets (MathJax/Mermaid) can load and render as expected.
+        preview_settings = self.preview.settings()
+        preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview.loadFinished.connect(self._on_preview_load_finished)
@@ -1080,6 +1435,11 @@ class MdExploreWindow(QMainWindow):
         current_key = self._current_preview_path_key()
         if current_key is None:
             return
+        # Kick client-side renderer startup now and a bit later to tolerate
+        # delayed external script availability (MathJax/Mermaid).
+        self._trigger_client_renderers_for(current_key)
+        QTimer.singleShot(450, lambda key=current_key: self._trigger_client_renderers_for(key))
+        QTimer.singleShot(1500, lambda key=current_key: self._trigger_client_renderers_for(key))
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
@@ -1100,6 +1460,21 @@ class MdExploreWindow(QMainWindow):
         else:
             self._preview_capture_enabled = True
             self._scroll_restore_block_until = 0.0
+
+    def _trigger_client_renderers_for(self, expected_key: str) -> None:
+        """Run in-page renderer helpers only if the same preview is still active."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        js = """
+(() => {
+  if (window.__mdexploreRunClientRenderers) {
+    window.__mdexploreRunClientRenderers();
+  } else if (window.__mdexploreTryTypesetMath) {
+    window.__mdexploreTryTypesetMath();
+  }
+})();
+"""
+        self.preview.page().runJavaScript(js)
 
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
