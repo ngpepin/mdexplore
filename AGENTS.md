@@ -63,12 +63,19 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   works (`QApplication.setDesktopFileName("mdexplore")` + desktop
   `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
-- `Refresh` button and `F5` both refresh the selected file preview.
+- `Refresh` button and `F5` both refresh the current directory tree view
+  (new files appear, deleted files disappear) without requiring app restart.
 - If the currently previewed markdown file changes on disk, preview should
   auto-refresh and report that via status bar message.
-- Search input uses label `Search:` and includes an explicit in-field `X`
+- Search input uses label `Search and highlight:` and includes an explicit in-field `X`
   clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.
+- Non-quoted search terms should be case-insensitive; quoted terms should be
+  case-sensitive.
+- `CLOSE(...)` should be supported in search queries and require all listed
+  terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
+- Function-style operators should accept both no-space and spaced forms before
+  `(` (for example `OR(...)` and `OR (...)`).
 - If search is active and directory scope changes, search should rerun against
   the new directory scope.
 - File highlight colors are assigned from tree context menu and persisted per directory.

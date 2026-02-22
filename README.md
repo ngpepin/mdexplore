@@ -15,13 +15,13 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - PlantUML diagrams (asynchronous local render with placeholders).
 - Top actions:
   - `^` moves root up one directory level.
-  - `Refresh` reloads the currently displayed markdown preview.
+  - `Refresh` rescans the current directory view to pick up new/deleted files.
   - `Quit` closes the app.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
-- `F5` refresh shortcut for the currently selected file (same behavior as `Refresh` button).
+- `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
 - Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
 - Right-click a Markdown file to assign a highlight color in the tree.
@@ -116,7 +116,7 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 ### Search and Match Highlighting
 
-- Use `Search:` for non-recursive matching in the current effective scope.
+- Use `Search and highlight:` for non-recursive matching in the current effective scope.
 - Matching files are shown in bold in the tree.
 - Press `Enter` in the search field to run search immediately (skip debounce).
 - Clicking the `X` in the search field clears search text and removes bolding.
@@ -124,6 +124,45 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
   reruns automatically for that directory.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
+- Non-quoted terms are case-insensitive.
+- Quoted terms are case-sensitive.
+- Function-style operators accept both no-space and spaced forms before `(`:
+  `CLOSE(...)`/`CLOSE (...)`, `OR(...)`/`OR (...)`, `AND(...)`/`AND (...)`,
+  and `NOT(...)`/`NOT (...)`.
+- `CLOSE(...)` requires 2+ terms and matches only when all terms appear within
+  50 words of each other in file content.
+
+Search examples:
+
+```text
+joe
+```
+
+Matches `joe`, `JOE`, `JoE`, etc. (filename or content).
+
+```text
+"Anne Smith"
+```
+
+Case-sensitive exact phrase match.
+
+```text
+OR (Joe, "Fred")
+```
+
+Matches files containing either `Joe` (any case) or exact-case `"Fred"`.
+
+```text
+CLOSE(Fred "Anne Smith" Joe)
+```
+
+Matches only if all listed terms occur within 50 words of each other.
+
+```text
+Joe "Anne Smith" NOT draft
+```
+
+Implicit `AND`: equivalent to `Joe AND "Anne Smith" AND NOT draft`.
 
 ## PlantUML Local Configuration
 

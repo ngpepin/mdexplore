@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+from bisect import bisect_right
 import html
 import hashlib
 import json
 import math
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 CONFIG_FILE_NAME = ".mdexplore.cfg"
+SEARCH_CLOSE_WORD_GAP = 50
 
 
 def _config_file_path() -> Path:
@@ -1284,7 +1285,7 @@ class MdExploreWindow(QMainWindow):
         self.up_btn.clicked.connect(self._go_up_directory)
 
         refresh_btn = QPushButton("Refresh")
-        refresh_btn.clicked.connect(self._refresh_current_preview)
+        refresh_btn.clicked.connect(self._refresh_directory_view)
 
         quit_btn = QPushButton("Quit")
         quit_btn.clicked.connect(self.close)
@@ -1316,7 +1317,7 @@ class MdExploreWindow(QMainWindow):
         match_label = QLabel("Search and highlight: ")
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
-        self.match_input.setPlaceholderText('words, "quoted phrases", AND/OR/NOT')
+        self.match_input.setPlaceholderText('words, "quoted phrases", AND/OR/NOT, CLOSE(...)')
         self.match_input.setMinimumWidth(220)
         self.match_clear_action = self.match_input.addAction(
             _build_clear_x_icon(),
@@ -1385,7 +1386,7 @@ class MdExploreWindow(QMainWindow):
         """Register window-level keyboard shortcuts."""
         refresh_action = QAction("Refresh", self)
         refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self._refresh_current_preview)
+        refresh_action.triggered.connect(self._refresh_directory_view)
         self.addAction(refresh_action)
 
     def _placeholder_html(self, message: str) -> str:
@@ -1499,6 +1500,106 @@ class MdExploreWindow(QMainWindow):
             return
         self._set_root_directory(parent)
 
+    def _expanded_directory_paths(self) -> list[str]:
+        """Capture currently expanded directory paths under the visible root."""
+        root_index = self.tree.rootIndex()
+        if not root_index.isValid():
+            return []
+
+        stack = [root_index]
+        expanded_paths: list[str] = []
+        seen: set[str] = set()
+
+        while stack:
+            index = stack.pop()
+            if not index.isValid():
+                continue
+
+            path_text = self.model.filePath(index)
+            path = Path(path_text)
+            try:
+                is_dir = path.is_dir()
+            except Exception:
+                is_dir = False
+            if not is_dir:
+                continue
+
+            if self.tree.isExpanded(index):
+                path_key = self._path_key(path)
+                if path_key not in seen:
+                    seen.add(path_key)
+                    expanded_paths.append(path_key)
+
+                # Ensure child indexes are available so nested expanded paths
+                # can be captured/restored.
+                if self.model.canFetchMore(index):
+                    self.model.fetchMore(index)
+                for row in range(self.model.rowCount(index)):
+                    child_index = self.model.index(row, 0, index)
+                    if child_index.isValid():
+                        stack.append(child_index)
+
+        return expanded_paths
+
+    def _restore_expanded_directory_paths(self, paths: list[str]) -> None:
+        """Restore expanded directories that still exist after a model refresh."""
+        for path_text in paths:
+            index = self.model.index(path_text)
+            if index.isValid():
+                self.tree.expand(index)
+
+    def _refresh_directory_view(self, _checked: bool = False) -> None:
+        """Refresh tree contents to detect newly created/deleted markdown files."""
+        selected_path: Path | None = None
+        current_index = self.tree.currentIndex()
+        if current_index.isValid():
+            try:
+                selected_path = Path(self.model.filePath(current_index)).resolve()
+            except Exception:
+                selected_path = Path(self.model.filePath(current_index))
+
+        expanded_paths = self._expanded_directory_paths()
+
+        # Force QFileSystemModel to re-scan root by toggling root path.
+        self.model.setRootPath("")
+        root_index = self.model.setRootPath(str(self.root))
+        self.tree.setRootIndex(root_index)
+
+        if expanded_paths:
+            self._restore_expanded_directory_paths(expanded_paths)
+
+        restored_selection = False
+        if selected_path is not None:
+            selected_index = self.model.index(str(selected_path))
+            if selected_index.isValid():
+                self.tree.setCurrentIndex(selected_index)
+                restored_selection = True
+
+        if self.current_file is not None:
+            try:
+                current_exists = self.current_file.is_file()
+            except Exception:
+                current_exists = False
+            if not current_exists:
+                self.current_file = None
+                self._clear_current_preview_signature()
+                self.path_label.setText("Select a markdown file")
+                self.preview.setHtml(
+                    self._placeholder_html("Select a markdown file to preview"),
+                    QUrl.fromLocalFile(f"{self.root}/"),
+                )
+                if not restored_selection:
+                    self.tree.clearSelection()
+                self.statusBar().showMessage("Directory view refreshed; preview file no longer exists", 4500)
+            else:
+                self.statusBar().showMessage("Directory view refreshed", 2500)
+        else:
+            self.statusBar().showMessage("Directory view refreshed", 2500)
+
+        self._update_window_title()
+        self._update_up_button_state()
+        self._rerun_active_search_for_scope()
+
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         """Persist current pane split after any manual divider movement."""
         self._capture_splitter_sizes_for_session()
@@ -1598,8 +1699,7 @@ class MdExploreWindow(QMainWindow):
             except Exception:
                 content = ""
             # Search over file name + body to support quick discovery.
-            haystack = f"{path.name}\n{content}".casefold()
-            if predicate(haystack):
+            if predicate(path.name, content):
                 matches.append(path)
 
         self.current_match_files = matches
@@ -1637,13 +1737,13 @@ class MdExploreWindow(QMainWindow):
             return []
         terms: list[str] = []
         seen: set[str] = set()
-        for token_type, token_value in self._tokenize_match_query(query):
+        for token_type, token_value, is_quoted in self._tokenize_match_query(query):
             if token_type != "TERM":
                 continue
             term = token_value.strip()
             if not term:
                 continue
-            key = term.casefold()
+            key = f"Q:{term}" if is_quoted else f"I:{term.casefold()}"
             if key in seen:
                 continue
             seen.add(key)
@@ -1809,125 +1909,348 @@ class MdExploreWindow(QMainWindow):
         return files
 
     def _compile_match_predicate(self, query: str):
-        """Compile basic boolean query with implicit AND and quoted terms."""
+        """Compile boolean query with implicit AND, quotes, and CLOSE(...)."""
         tokens = self._tokenize_match_query(query)
         if not tokens:
-            return lambda _haystack: True
+            return lambda _name, _content: True
 
-        # Insert implicit ANDs between adjacent terms/parentheses so users can
-        # type natural queries like: foo "bar baz" NOT qux
-        expanded_tokens: list[tuple[str, str]] = []
-        previous_type: str | None = None
-        for token_type, token_value in tokens:
-            if previous_type in {"TERM", "RPAREN"} and token_type in {"TERM", "LPAREN"}:
-                expanded_tokens.append(("OP", "AND"))
-            elif previous_type in {"TERM", "RPAREN"} and token_type == "OP" and token_value == "NOT":
-                expanded_tokens.append(("OP", "AND"))
-            expanded_tokens.append((token_type, token_value))
-            previous_type = token_type
+        class QueryParseError(Exception):
+            pass
 
-        precedence = {"OR": 1, "AND": 2, "NOT": 3}
-        output: list[tuple[str, str]] = []
-        operators: list[tuple[str, str]] = []
+        idx = 0
 
-        for token_type, token_value in expanded_tokens:
-            if token_type == "TERM":
-                output.append((token_type, token_value.casefold()))
-                continue
+        def peek(offset: int = 0) -> tuple[str, str, bool] | None:
+            token_index = idx + offset
+            if 0 <= token_index < len(tokens):
+                return tokens[token_index]
+            return None
 
-            if token_type == "OP":
-                # Shunting-yard conversion from infix -> postfix.
-                while operators and operators[-1][0] == "OP":
-                    top_op = operators[-1][1]
-                    current_prec = precedence[token_value]
-                    top_prec = precedence[top_op]
-                    right_associative = token_value == "NOT"
-                    if (not right_associative and current_prec <= top_prec) or (right_associative and current_prec < top_prec):
-                        output.append(operators.pop())
-                    else:
-                        break
-                operators.append((token_type, token_value))
-                continue
+        def token_starts_expression(token_index: int) -> bool:
+            if token_index < 0 or token_index >= len(tokens):
+                return False
+            token_type, token_value, _token_quoted = tokens[token_index]
+            if token_type in {"TERM", "LPAREN", "CLOSE"}:
+                return True
+            if token_type == "OP" and token_value == "NOT":
+                return True
+            if token_type == "OP" and token_value in {"AND", "OR"}:
+                next_token = tokens[token_index + 1] if token_index + 1 < len(tokens) else None
+                return bool(next_token and next_token[0] == "LPAREN")
+            return False
 
-            if token_type == "LPAREN":
-                operators.append((token_type, token_value))
-                continue
+        def consume(expected_type: str | None = None, expected_value: str | None = None) -> tuple[str, str, bool]:
+            nonlocal idx
+            token = peek()
+            if token is None:
+                raise QueryParseError("Unexpected end of query")
+            token_type, token_value, token_quoted = token
+            if expected_type is not None and token_type != expected_type:
+                raise QueryParseError(f"Expected {expected_type} but found {token_type}")
+            if expected_value is not None and token_value != expected_value:
+                raise QueryParseError(f"Expected {expected_value} but found {token_value}")
+            idx += 1
+            return token_type, token_value, token_quoted
 
-            if token_type == "RPAREN":
-                found_lparen = False
-                while operators:
-                    top = operators.pop()
-                    if top[0] == "LPAREN":
-                        found_lparen = True
-                        break
-                    output.append(top)
-                if not found_lparen:
-                    return self._compile_simple_match_predicate(tokens)
+        def parse_expression():
+            return parse_or()
 
-        while operators:
-            top = operators.pop()
-            if top[0] == "LPAREN":
-                return self._compile_simple_match_predicate(tokens)
-            output.append(top)
+        def parse_or():
+            node = parse_and()
+            while True:
+                token = peek()
+                if token is None or token[0] != "OP" or token[1] != "OR":
+                    break
+                consume("OP", "OR")
+                right = parse_and()
+                node = ("OR", node, right)
+            return node
 
-        def predicate(haystack: str) -> bool:
-            # Evaluate postfix expression against normalized haystack text.
-            stack: list[bool] = []
-            for token_type, token_value in output:
+        def parse_and():
+            node = parse_not()
+            while True:
+                token = peek()
+                if token is not None and token[0] == "OP" and token[1] == "AND":
+                    consume("OP", "AND")
+                    right = parse_not()
+                    node = ("AND", node, right)
+                    continue
+                # Implicit AND between adjacent expressions.
+                if token_starts_expression(idx):
+                    right = parse_not()
+                    node = ("AND", node, right)
+                    continue
+                break
+            return node
+
+        def parse_not():
+            token = peek()
+            if token is not None and token[0] == "OP" and token[1] == "NOT":
+                consume("OP", "NOT")
+                return ("NOT", parse_not())
+            return parse_primary()
+
+        def parse_logic_call(operator_name: str):
+            consume("OP", operator_name)
+            consume("LPAREN")
+            if peek() is not None and peek()[0] == "RPAREN":
+                raise QueryParseError(f"{operator_name}() requires at least one argument")
+            items = [parse_expression()]
+            while True:
+                token = peek()
+                if token is not None and token[0] == "COMMA":
+                    consume("COMMA")
+                    items.append(parse_expression())
+                    continue
+                break
+            consume("RPAREN")
+            if not items:
+                raise QueryParseError(f"{operator_name}() requires at least one argument")
+            combined = items[0]
+            for item in items[1:]:
+                combined = (operator_name, combined, item)
+            return combined
+
+        def parse_close_call():
+            consume("CLOSE", "CLOSE")
+            consume("LPAREN")
+            terms: list[tuple[str, bool]] = []
+            while True:
+                token = peek()
+                if token is None:
+                    raise QueryParseError("Unterminated CLOSE(...)")
+                token_type, token_value, token_quoted = token
+                if token_type == "RPAREN":
+                    break
+                if token_type == "COMMA":
+                    consume("COMMA")
+                    continue
                 if token_type == "TERM":
-                    stack.append(token_value in haystack)
+                    consume("TERM")
+                    cleaned = token_value.strip()
+                    if cleaned:
+                        terms.append((cleaned, token_quoted))
                     continue
+                raise QueryParseError("CLOSE(...) accepts terms only")
+            consume("RPAREN")
+            if len(terms) < 2:
+                raise QueryParseError("CLOSE(...) requires at least two terms")
+            return ("CLOSE", terms)
 
-                if token_type != "OP":
+        def parse_primary():
+            token = peek()
+            if token is None:
+                raise QueryParseError("Missing query operand")
+            token_type, token_value, token_quoted = token
+            if token_type == "TERM":
+                consume("TERM")
+                return ("TERM", token_value, token_quoted)
+            if token_type == "CLOSE":
+                return parse_close_call()
+            if token_type == "OP" and token_value in {"AND", "OR"} and peek(1) is not None and peek(1)[0] == "LPAREN":
+                return parse_logic_call(token_value)
+            if token_type == "LPAREN":
+                consume("LPAREN")
+                node = parse_expression()
+                consume("RPAREN")
+                return node
+            raise QueryParseError(f"Unexpected token: {token_type}")
+
+        def term_matches(
+            term: str,
+            is_quoted: bool,
+            file_name: str,
+            file_content: str,
+            file_name_folded: str,
+            file_content_folded: str,
+        ) -> bool:
+            if not term:
+                return False
+            if is_quoted:
+                return term in file_name or term in file_content
+            term_folded = term.casefold()
+            return term_folded in file_name_folded or term_folded in file_content_folded
+
+        def close_terms_match(terms: list[tuple[str, bool]], file_content: str) -> bool:
+            content = file_content or ""
+            word_matches = list(re.finditer(r"\S+", content))
+            if not word_matches:
+                return False
+            # CLOSE() uses whitespace-delimited token positions, not line indexes.
+            word_starts = [match.start() for match in word_matches]
+            content_folded = content.casefold()
+            occurrences: list[tuple[int, int]] = []
+            term_found = [False] * len(terms)
+
+            for term_index, (term_text, is_quoted) in enumerate(terms):
+                if not term_text:
                     return False
+                needle = term_text if is_quoted else term_text.casefold()
+                haystack = content if is_quoted else content_folded
+                search_start = 0
+                while True:
+                    char_index = haystack.find(needle, search_start)
+                    if char_index < 0:
+                        break
+                    word_index = bisect_right(word_starts, char_index) - 1
+                    if word_index >= 0:
+                        occurrences.append((word_index, term_index))
+                        term_found[term_index] = True
+                    search_start = char_index + 1
 
-                if token_value == "NOT":
-                    if not stack:
-                        return False
-                    stack.append(not stack.pop())
-                    continue
+            if not all(term_found) or not occurrences:
+                return False
 
-                if len(stack) < 2:
-                    return False
-                right = stack.pop()
-                left = stack.pop()
-                if token_value == "AND":
-                    stack.append(left and right)
-                elif token_value == "OR":
-                    stack.append(left or right)
-                else:
-                    return False
+            occurrences.sort(key=lambda item: item[0])
+            counts = [0] * len(terms)
+            have = 0
+            left = 0
 
-            return len(stack) == 1 and stack[0]
+            for right, (right_word, right_term_index) in enumerate(occurrences):
+                if counts[right_term_index] == 0:
+                    have += 1
+                counts[right_term_index] += 1
+
+                while have == len(terms) and left <= right:
+                    left_word, left_term_index = occurrences[left]
+                    if right_word - left_word <= SEARCH_CLOSE_WORD_GAP:
+                        return True
+                    counts[left_term_index] -= 1
+                    if counts[left_term_index] == 0:
+                        have -= 1
+                    left += 1
+
+            return False
+
+        def evaluate(node, file_name: str, file_content: str, file_name_folded: str, file_content_folded: str) -> bool:
+            node_type = node[0]
+            if node_type == "TERM":
+                _kind, term_text, is_quoted = node
+                return term_matches(term_text, bool(is_quoted), file_name, file_content, file_name_folded, file_content_folded)
+            if node_type == "CLOSE":
+                _kind, close_terms = node
+                return close_terms_match(close_terms, file_content)
+            if node_type == "NOT":
+                _kind, operand = node
+                return not evaluate(operand, file_name, file_content, file_name_folded, file_content_folded)
+            if node_type == "AND":
+                _kind, left_node, right_node = node
+                return evaluate(left_node, file_name, file_content, file_name_folded, file_content_folded) and evaluate(
+                    right_node,
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                )
+            if node_type == "OR":
+                _kind, left_node, right_node = node
+                return evaluate(left_node, file_name, file_content, file_name_folded, file_content_folded) or evaluate(
+                    right_node,
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                )
+            return False
+
+        try:
+            expression = parse_expression()
+            if idx != len(tokens):
+                raise QueryParseError("Unexpected trailing query tokens")
+        except QueryParseError:
+            return self._compile_simple_match_predicate(tokens)
+
+        def predicate(file_name: str, file_content: str) -> bool:
+            name_text = file_name or ""
+            content_text = file_content or ""
+            return evaluate(
+                expression,
+                name_text,
+                content_text,
+                name_text.casefold(),
+                content_text.casefold(),
+            )
 
         return predicate
 
-    def _compile_simple_match_predicate(self, tokens: list[tuple[str, str]]):
-        """Fallback matcher: all terms must appear in haystack."""
-        terms = [value.casefold() for token_type, value in tokens if token_type == "TERM"]
+    def _compile_simple_match_predicate(self, tokens: list[tuple[str, str, bool]]):
+        """Fallback matcher: all terms must appear in filename or content."""
+        terms = [(value.strip(), is_quoted) for token_type, value, is_quoted in tokens if token_type == "TERM" and value.strip()]
         if not terms:
-            return lambda _haystack: True
-        return lambda haystack: all(term in haystack for term in terms)
+            return lambda _file_name, _file_content: True
 
-    def _tokenize_match_query(self, query: str) -> list[tuple[str, str]]:
-        """Tokenize query supporting AND/OR/NOT, quotes, and parentheses."""
-        prepared = query.replace("(", " ( ").replace(")", " ) ")
-        try:
-            raw_tokens = shlex.split(prepared)
-        except ValueError:
-            raw_tokens = prepared.split()
+        def predicate(file_name: str, file_content: str) -> bool:
+            name_text = file_name or ""
+            content_text = file_content or ""
+            name_folded = name_text.casefold()
+            content_folded = content_text.casefold()
+            for term_text, is_quoted in terms:
+                if is_quoted:
+                    if term_text not in name_text and term_text not in content_text:
+                        return False
+                else:
+                    folded = term_text.casefold()
+                    if folded not in name_folded and folded not in content_folded:
+                        return False
+            return True
 
-        tokens: list[tuple[str, str]] = []
-        for token in raw_tokens:
-            upper = token.upper()
-            if token == "(":
-                tokens.append(("LPAREN", token))
-            elif token == ")":
-                tokens.append(("RPAREN", token))
-            elif upper in {"AND", "OR", "NOT"}:
-                tokens.append(("OP", upper))
+        return predicate
+
+    def _tokenize_match_query(self, query: str) -> list[tuple[str, str, bool]]:
+        """Tokenize query supporting AND/OR/NOT, CLOSE(...), quotes, and commas."""
+        tokens: list[tuple[str, str, bool]] = []
+        i = 0
+        length = len(query)
+
+        while i < length:
+            ch = query[i]
+            if ch.isspace():
+                i += 1
+                continue
+            if ch == "(":
+                tokens.append(("LPAREN", ch, False))
+                i += 1
+                continue
+            if ch == ")":
+                tokens.append(("RPAREN", ch, False))
+                i += 1
+                continue
+            if ch == ",":
+                tokens.append(("COMMA", ch, False))
+                i += 1
+                continue
+            if ch == '"':
+                i += 1
+                buffer: list[str] = []
+                while i < length:
+                    current = query[i]
+                    if current == "\\" and i + 1 < length:
+                        next_char = query[i + 1]
+                        if next_char in {'"', "\\"}:
+                            buffer.append(next_char)
+                            i += 2
+                            continue
+                    if current == '"':
+                        i += 1
+                        break
+                    buffer.append(current)
+                    i += 1
+                tokens.append(("TERM", "".join(buffer), True))
+                continue
+
+            start = i
+            while i < length and not query[i].isspace() and query[i] not in "(),":
+                i += 1
+            token_value = query[start:i]
+            if not token_value:
+                continue
+            upper = token_value.upper()
+            if upper in {"AND", "OR", "NOT"}:
+                tokens.append(("OP", upper, False))
+            elif upper == "CLOSE":
+                tokens.append(("CLOSE", "CLOSE", False))
             else:
-                tokens.append(("TERM", token))
+                tokens.append(("TERM", token_value, False))
+
         return tokens
 
     def _apply_match_highlight_color(self, color_value: str, color_name: str) -> None:
