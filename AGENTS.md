@@ -49,6 +49,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   location is preserved.
 - PlantUML progress should persist across file navigation so returning to a
   file shows completed diagrams without restarting work.
+- Preview scroll position should be remembered per markdown file for the
+  current application run.
 - `^` navigates one directory level up and re-roots the tree.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.

@@ -27,6 +27,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Top-right color buttons copy matching highlighted files to clipboard.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
+- Preview scroll position is remembered per markdown file for the current app session.
 - Right-click selected text in the preview pane to use:
   - `Copy Rendered Text` for plain rendered selection text.
   - `Copy Source Markdown` for markdown source content.

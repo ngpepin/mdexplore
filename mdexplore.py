@@ -587,6 +587,8 @@ class MarkdownRenderer:
         return f"@startuml\n{normalized}\n@enduml\n"
 
     def render_document(self, markdown_text: str, title: str, plantuml_resolver=None) -> str:
+        # `env` is passed through markdown-it and lets fence renderers call back
+        # into window-level async PlantUML orchestration when available.
         env = {}
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
@@ -711,6 +713,7 @@ class MarkdownRenderer:
   <main>{body}</main>
   <script>
     window.addEventListener('DOMContentLoaded', async () => {{
+      // Mermaid/MathJax run after markdown HTML is mounted.
       if (window.mermaid) {{
         mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose' }});
         await mermaid.run({{ querySelector: '.mermaid' }});
@@ -742,6 +745,7 @@ class PreviewRenderWorker(QRunnable):
 
     def run(self) -> None:
         try:
+            # Keep this fully self-contained so it is safe to run off-thread.
             resolved = self.path.resolve()
             stat = resolved.stat()
             markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
@@ -797,6 +801,8 @@ class PlantUmlRenderWorker(QRunnable):
         ]
 
         try:
+            # PlantUML is CPU-heavy and can block; run in worker threads and
+            # return compact status payloads via Qt signals.
             result = subprocess.run(
                 command,
                 input=self.prepared_code,
@@ -853,16 +859,26 @@ class MdExploreWindow(QMainWindow):
         self._active_render_workers: set[PreviewRenderWorker] = set()
         self._plantuml_pool = QThreadPool(self)
         self._plantuml_pool.setMaxThreadCount(2)
+        # Global, in-process result cache for PlantUML blocks keyed by hash of
+        # normalized source. This survives file navigation during this run.
         self._plantuml_results: dict[str, tuple[str, str]] = {}
+        # Track active and dependent docs so completed jobs can invalidate only
+        # affected cached HTML snapshots.
         self._plantuml_inflight: set[str] = set()
         self._plantuml_docs_by_hash: dict[str, set[str]] = {}
         self._plantuml_placeholders_by_doc: dict[str, dict[str, list[str]]] = {}
         self._active_plantuml_workers: set[PlantUmlRenderWorker] = set()
+        # Per-file session scroll memory (not persisted to disk).
+        self._preview_scroll_positions: dict[str, float] = {}
         self._match_input_text = ""
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
         self.match_timer.setInterval(1000)
         self.match_timer.timeout.connect(self._run_match_search)
+        self._scroll_capture_timer = QTimer(self)
+        self._scroll_capture_timer.setInterval(400)
+        self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
+        self._scroll_capture_timer.start()
         self._initial_split_applied = False
 
         self.setWindowTitle("mdexplore")
@@ -1031,6 +1047,7 @@ class MdExploreWindow(QMainWindow):
 
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
+        self._capture_current_preview_scroll()
         self.root = new_root.resolve()
         self.last_directory_selection = self.root
         self.current_file = None
@@ -1054,9 +1071,17 @@ class MdExploreWindow(QMainWindow):
         """Apply deferred in-preview highlighting after a page finishes loading."""
         if not ok:
             return
+        # PlantUML completions are patched in-place, but a full page load can
+        # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
+        has_saved_scroll = self._has_saved_scroll_for_current_preview()
         if self._pending_preview_search_terms:
-            self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=True)
+            # Search normally scrolls to first hit. If this file has a saved
+            # scroll position, preserve that location instead.
+            self._highlight_preview_search_terms(self._pending_preview_search_terms, scroll_to_first=not has_saved_scroll)
+        if has_saved_scroll:
+            # Small delay allows layout/MathJax/Mermaid updates to settle.
+            QTimer.singleShot(90, self._restore_current_preview_scroll)
 
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
@@ -1138,6 +1163,7 @@ class MdExploreWindow(QMainWindow):
                 content = path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 content = ""
+            # Search over file name + body to support quick discovery.
             haystack = f"{path.name}\n{content}".casefold()
             if predicate(haystack):
                 matches.append(path)
@@ -1195,6 +1221,7 @@ class MdExploreWindow(QMainWindow):
         """Remove in-preview search highlight spans from the current page."""
         js = """
 (() => {
+  // Highlight spans are synthetic; remove them to restore original text nodes.
   const root = document.querySelector("main") || document.body;
   if (!root) return 0;
   const marks = root.querySelectorAll('span[data-mdexplore-search-mark="1"]');
@@ -1207,6 +1234,7 @@ class MdExploreWindow(QMainWindow):
   return marks.length;
 })();
 """
+        # Mutates preview DOM to strip search marks; return value is not needed.
         self.preview.page().runJavaScript(js)
 
     def _highlight_preview_search_terms(self, terms: list[str], scroll_to_first: bool) -> None:
@@ -1220,6 +1248,7 @@ class MdExploreWindow(QMainWindow):
         scroll_json = "true" if scroll_to_first else "false"
         js = f"""
 (() => {{
+  // Rebuild highlight spans from plain text each pass so updates are idempotent.
   const terms = {terms_json};
   const shouldScroll = {scroll_json};
   const root = document.querySelector("main") || document.body;
@@ -1238,6 +1267,7 @@ class MdExploreWindow(QMainWindow):
     .filter((term) => term.length > 0);
   if (!escaped.length) return 0;
 
+  // One regex across all terms keeps traversal cost low for large documents.
   const regex = new RegExp(escaped.join("|"), "gi");
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
   const acceptedNodes = [];
@@ -1321,6 +1351,7 @@ class MdExploreWindow(QMainWindow):
   return matchCount;
 }})();
 """
+        # Mutates preview DOM by inserting mark spans (and optional scroll).
         self.preview.page().runJavaScript(js)
 
     def _list_markdown_files_non_recursive(self, directory: Path) -> list[Path]:
@@ -1349,6 +1380,8 @@ class MdExploreWindow(QMainWindow):
         if not tokens:
             return lambda _haystack: True
 
+        # Insert implicit ANDs between adjacent terms/parentheses so users can
+        # type natural queries like: foo "bar baz" NOT qux
         expanded_tokens: list[tuple[str, str]] = []
         previous_type: str | None = None
         for token_type, token_value in tokens:
@@ -1369,6 +1402,7 @@ class MdExploreWindow(QMainWindow):
                 continue
 
             if token_type == "OP":
+                # Shunting-yard conversion from infix -> postfix.
                 while operators and operators[-1][0] == "OP":
                     top_op = operators[-1][1]
                     current_prec = precedence[token_value]
@@ -1403,6 +1437,7 @@ class MdExploreWindow(QMainWindow):
             output.append(top)
 
         def predicate(haystack: str) -> bool:
+            # Evaluate postfix expression against normalized haystack text.
             stack: list[bool] = []
             for token_type, token_value in output:
                 if token_type == "TERM":
@@ -1578,6 +1613,7 @@ class MdExploreWindow(QMainWindow):
 
   const hasSelection = !!(sel && sel.toString && sel.toString().trim());
   const selectedText = hasSelection ? sel.toString() : "";
+  // Preferred path: map the active text selection to source line metadata.
   if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
     const range = sel.getRangeAt(0);
     const startInfo = lineInfo(range.startContainer);
@@ -1604,6 +1640,7 @@ class MdExploreWindow(QMainWindow):
 })();
 """
         js = js.replace("__CLICK_X__", str(click_x)).replace("__CLICK_Y__", str(click_y))
+        # Returns selection + line-range metadata used to build copy actions.
         self.preview.page().runJavaScript(
             js,
             lambda result: self._show_preview_context_menu_with_cached_selection(pos, result, selected_text_hint),
@@ -1969,6 +2006,60 @@ class MdExploreWindow(QMainWindow):
     def _doc_id_for_path(path_key: str) -> str:
         return hashlib.sha1(path_key.encode("utf-8", errors="replace")).hexdigest()[:12]
 
+    def _current_preview_path_key(self) -> str | None:
+        if self.current_file is None:
+            return None
+        try:
+            return str(self.current_file.resolve())
+        except Exception:
+            return str(self.current_file)
+
+    def _has_saved_scroll_for_current_preview(self) -> bool:
+        key = self._current_preview_path_key()
+        return key is not None and key in self._preview_scroll_positions
+
+    def _capture_current_preview_scroll(self) -> None:
+        """Capture current preview scroll position for the selected file."""
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return
+        js = """
+(() => {
+  // Use window/document fallbacks to support different engines/modes.
+  const y = window.scrollY ?? document.documentElement.scrollTop ?? document.body.scrollTop ?? 0;
+  return Number.isFinite(y) ? y : 0;
+})();
+"""
+
+        def on_result(value, expected_key=path_key):
+            # Store against the file that triggered this request, even if the
+            # user switched selection before JS finished.
+            if isinstance(value, (int, float)):
+                self._preview_scroll_positions[expected_key] = float(value)
+
+        # Returns current scroll Y for this preview page.
+        self.preview.page().runJavaScript(js, on_result)
+
+    def _restore_current_preview_scroll(self) -> None:
+        """Restore previously captured scroll position for the selected file."""
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return
+        scroll_y = self._preview_scroll_positions.get(path_key)
+        if scroll_y is None:
+            return
+        scroll_json = json.dumps(float(scroll_y))
+        js = f"""
+(() => {{
+  const y = {scroll_json};
+  // Apply twice (RAF + timeout) because late layout work can override scroll.
+  requestAnimationFrame(() => window.scrollTo(0, y));
+  setTimeout(() => window.scrollTo(0, y), 60);
+}})();
+"""
+        # Mutates page scroll position (no returned data consumed).
+        self.preview.page().runJavaScript(js)
+
     @staticmethod
     def _truncate_error_text(text: str, max_len: int = 1200) -> str:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -2008,6 +2099,7 @@ class MdExploreWindow(QMainWindow):
         if hash_key in self._plantuml_inflight:
             return
 
+        # Deduplicate renders: identical diagram source only renders once.
         self._plantuml_inflight.add(hash_key)
         self._plantuml_results[hash_key] = ("pending", "")
         worker = PlantUmlRenderWorker(
@@ -2033,6 +2125,8 @@ class MdExploreWindow(QMainWindow):
         final_status = "done" if status == "done" else "error"
         self._plantuml_results[hash_key] = (final_status, payload)
 
+        # Any cached document snapshot that references this diagram is stale
+        # until placeholders are replaced with the final result.
         for doc_key in self._plantuml_docs_by_hash.get(hash_key, set()):
             self.cache.pop(doc_key, None)
 
@@ -2064,11 +2158,13 @@ class MdExploreWindow(QMainWindow):
         ids_json = json.dumps(placeholder_ids)
         html_json = json.dumps(inner_html)
         class_json = json.dumps(class_name)
+        # Patch nodes in place to preserve scroll position and selection state.
         js = f"""
 (() => {{
   const ids = {ids_json};
   const inner = {html_json};
   const className = {class_json};
+  // Only touch known placeholder nodes so unrelated page state is untouched.
   for (const id of ids) {{
     const node = document.getElementById(id);
     if (!node) continue;
@@ -2078,6 +2174,7 @@ class MdExploreWindow(QMainWindow):
   }}
 }})();
 """
+        # Mutates only known PlantUML placeholder nodes in the active page.
         self.preview.page().runJavaScript(js)
 
     def _apply_all_ready_plantuml_to_current_preview(self) -> None:
@@ -2095,6 +2192,7 @@ class MdExploreWindow(QMainWindow):
     def _load_preview(self, path: Path) -> None:
         # Render markdown quickly with async PlantUML placeholders so the
         # document appears immediately while diagrams render in background.
+        self._capture_current_preview_scroll()
         self._cancel_pending_preview_render()
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
@@ -2135,6 +2233,8 @@ class MdExploreWindow(QMainWindow):
             placeholders_by_hash: dict[str, list[str]] = {}
 
             def plantuml_resolver(code: str, index: int, line_attrs: str) -> str:
+                # Stable hash key lets the same diagram result be reused across
+                # multiple files and repeated blocks.
                 prepared_code = self.renderer._prepare_plantuml_source(code)
                 hash_key = hashlib.sha1(prepared_code.encode("utf-8", errors="replace")).hexdigest()
                 placeholder_id = f"mdexplore-plantuml-{doc_id}-{index}"
