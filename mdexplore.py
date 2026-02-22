@@ -868,6 +868,7 @@ class MdExploreWindow(QMainWindow):
         self._initial_split_applied = False
         self._update_up_button_state()
         self._update_window_title()
+        self._rerun_active_search_for_scope()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
@@ -918,6 +919,13 @@ class MdExploreWindow(QMainWindow):
 
     def _run_match_search_now(self) -> None:
         """Run search immediately, bypassing debounce delay."""
+        self.match_timer.stop()
+        self._run_match_search()
+
+    def _rerun_active_search_for_scope(self) -> None:
+        """Re-run search immediately when scope changes and query is active."""
+        if not self.match_input.text().strip():
+            return
         self.match_timer.stop()
         self._run_match_search()
 
@@ -1339,9 +1347,12 @@ class MdExploreWindow(QMainWindow):
         path = Path(self.model.filePath(index))
         if not path.is_dir():
             return
+        was_selected = self.tree.currentIndex() == index
         self.tree.setCurrentIndex(index)
         self.last_directory_selection = path.resolve()
         self._update_window_title()
+        if was_selected:
+            self._rerun_active_search_for_scope()
 
     def _show_preview_context_menu(self, pos) -> None:
         """Extend the preview context menu with a markdown copy action."""
@@ -1721,6 +1732,7 @@ class MdExploreWindow(QMainWindow):
                 self.last_directory_selection = path.resolve()
             except Exception:
                 self.last_directory_selection = path
+            self._rerun_active_search_for_scope()
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return

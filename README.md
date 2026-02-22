@@ -114,6 +114,8 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Matching files are shown in bold in the tree.
 - Press `Enter` in the search field to run search immediately (skip debounce).
 - Clicking the `X` in the search field clears search text and removes bolding.
+- If search is active and you navigate to a different directory scope, search
+  reruns automatically for that directory.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
 

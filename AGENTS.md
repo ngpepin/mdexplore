@@ -53,6 +53,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Search input uses label `Search:` and includes an explicit in-field `X`
   clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.
+- If search is active and directory scope changes, search should rerun against
+  the new directory scope.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
