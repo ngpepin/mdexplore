@@ -139,6 +139,13 @@ configure_local_renderer_overrides() {
 
   if [[ -z "${MDEXPLORE_MATHJAX_JS:-}" ]]; then
     detected_path="$(resolve_local_script_path \
+      "${SCRIPT_DIR}/mathjax/es5/tex-svg.js" \
+      "${SCRIPT_DIR}/mathjax/tex-svg.js" \
+      "${SCRIPT_DIR}/assets/mathjax/es5/tex-svg.js" \
+      "${SCRIPT_DIR}/vendor/mathjax/es5/tex-svg.js" \
+      "/usr/share/javascript/mathjax/es5/tex-svg.js" \
+      "/usr/share/mathjax/es5/tex-svg.js" \
+      "/usr/share/nodejs/mathjax/es5/tex-svg.js" \
       "${SCRIPT_DIR}/mathjax/es5/tex-mml-chtml.js" \
       "${SCRIPT_DIR}/mathjax/tex-mml-chtml.js" \
       "${SCRIPT_DIR}/assets/mathjax/es5/tex-mml-chtml.js" \
@@ -257,6 +264,7 @@ import importlib
 
 required = [
     "markdown_it",
+    "mdit_py_plugins.dollarmath",
     "linkify_it",
     "PySide6.QtWebEngineWidgets",
     "pypdf",

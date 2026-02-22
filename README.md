@@ -212,22 +212,24 @@ Behavior details:
 
 Math rendering is local-first:
 
-- mdexplore first tries a local `tex-mml-chtml.js` bundle.
+- mdexplore first tries a local `tex-svg.js` bundle (best rendering quality).
+- If no local SVG bundle is found, it falls back to local `tex-mml-chtml.js`.
 - If no local bundle is found, it falls back to CDN.
 
 Local lookup order:
 
 1. `MDEXPLORE_MATHJAX_JS` (explicit file path)
-2. `mathjax/es5/tex-mml-chtml.js` under the repo
-3. `mathjax/tex-mml-chtml.js` under the repo
-4. `assets/mathjax/es5/tex-mml-chtml.js` under the repo
-5. `vendor/mathjax/es5/tex-mml-chtml.js` under the repo
-6. System paths such as `/usr/share/javascript/mathjax/es5/tex-mml-chtml.js`
+2. `mathjax/es5/tex-svg.js` under the repo
+3. `mathjax/tex-svg.js` under the repo
+4. `assets/mathjax/es5/tex-svg.js` under the repo
+5. `vendor/mathjax/es5/tex-svg.js` under the repo
+6. System paths such as `/usr/share/javascript/mathjax/es5/tex-svg.js`
+7. Local CHTML bundle paths (`tex-mml-chtml.js`) as fallback
 
 Example override:
 
 ```bash
-MDEXPLORE_MATHJAX_JS=/absolute/path/to/tex-mml-chtml.js /path/to/mdexplore/mdexplore.sh
+MDEXPLORE_MATHJAX_JS=/absolute/path/to/tex-svg.js /path/to/mdexplore/mdexplore.sh
 ```
 
 ## Mermaid Local-First Configuration

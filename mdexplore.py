@@ -22,6 +22,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from markdown_it import MarkdownIt
+from mdit_py_plugins.dollarmath import dollarmath_plugin
 from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineCore import QWebEngineSettings
@@ -552,9 +553,25 @@ class MarkdownRenderer:
             "commonmark",
             {"html": True, "linkify": True, "typographer": True},
         ).enable("table").enable("strikethrough")
+        # Parse $...$ / $$...$$ as dedicated math tokens before markdown
+        # emphasis/underscore rules run, preventing TeX corruption.
+        self._md.use(dollarmath_plugin)
 
         default_fence = self._md.renderer.rules["fence"]
         default_render_token = self._md.renderer.renderToken
+
+        def custom_math_inline(tokens, idx, options, env):
+            token = tokens[idx]
+            # Keep TeX content raw for MathJax, only HTML-escape unsafe chars.
+            return f"${html.escape(token.content)}$"
+
+        def custom_math_block(tokens, idx, options, env):
+            token = tokens[idx]
+            line_attrs = ""
+            if token.map and len(token.map) == 2:
+                line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
+            math_body = (token.content or "").strip("\n")
+            return f'<div class="mdexplore-math-block"{line_attrs}>$$\n{html.escape(math_body)}\n$$</div>\n'
 
         def custom_fence(tokens, idx, options, env):
             # Intercept known diagram fences and delegate the rest to the
@@ -609,10 +626,12 @@ class MarkdownRenderer:
             return default_render_token(tokens, idx, options, env)
 
         self._md.renderer.rules["fence"] = custom_fence
+        self._md.renderer.rules["math_inline"] = custom_math_inline
+        self._md.renderer.rules["math_block"] = custom_math_block
         self._md.renderer.renderToken = custom_render_token
 
     def _resolve_local_mathjax_script(self) -> Path | None:
-        """Locate a local MathJax bundle to use before CDN fallback."""
+        """Locate a local MathJax bundle, preferring SVG output quality."""
         env_value = os.environ.get("MDEXPLORE_MATHJAX_JS", "").strip()
         candidates: list[Path] = []
         if env_value:
@@ -621,6 +640,13 @@ class MarkdownRenderer:
         app_dir = Path(__file__).resolve().parent
         candidates.extend(
             [
+                app_dir / "mathjax" / "es5" / "tex-svg.js",
+                app_dir / "mathjax" / "tex-svg.js",
+                app_dir / "assets" / "mathjax" / "es5" / "tex-svg.js",
+                app_dir / "vendor" / "mathjax" / "es5" / "tex-svg.js",
+                Path("/usr/share/javascript/mathjax/es5/tex-svg.js"),
+                Path("/usr/share/mathjax/es5/tex-svg.js"),
+                Path("/usr/share/nodejs/mathjax/es5/tex-svg.js"),
                 app_dir / "mathjax" / "es5" / "tex-mml-chtml.js",
                 app_dir / "mathjax" / "tex-mml-chtml.js",
                 app_dir / "assets" / "mathjax" / "es5" / "tex-mml-chtml.js",
@@ -647,6 +673,8 @@ class MarkdownRenderer:
                 sources.append(self._mathjax_local_script.as_uri())
             except Exception:
                 pass
+        # Prefer SVG output (closer to Obsidian quality), keep CHTML as fallback.
+        sources.append("https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js")
         sources.append("https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js")
         # Keep order while dropping duplicates.
         return list(dict.fromkeys(sources))
@@ -902,6 +930,20 @@ class MarkdownRenderer:
       font-style: italic;
       opacity: 0.9;
     }}
+    mjx-container[display="true"] {{
+      margin: 0.9em 0 1.05em 0 !important;
+    }}
+    mjx-container[jax="SVG"] {{
+      font-size: 1.07em;
+    }}
+    mjx-container[jax="SVG"] > svg {{
+      max-width: 100%;
+      height: auto;
+      overflow: visible;
+    }}
+    mjx-container[jax="SVG"][display="false"] {{
+      vertical-align: -0.08em;
+    }}
   </style>
   <script>
     window.MathJax = {{
@@ -911,6 +953,14 @@ class MarkdownRenderer:
       tex: {{
         inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
         displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
+      }},
+      svg: {{
+        fontCache: "global",
+        scale: 1.05
+      }},
+      chtml: {{
+        scale: 1.05,
+        matchFontHeight: false
       }},
       options: {{
         skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
@@ -3668,6 +3718,20 @@ class MdExploreWindow(QMainWindow):
     style.id = "__mdexplore_pdf_math_style";
     style.textContent = `
 @media print {
+  mjx-container[jax="SVG"] {
+    font-size: 1.08em !important;
+    text-rendering: geometricPrecision;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  mjx-container[jax="SVG"] > svg {
+    overflow: visible;
+    shape-rendering: geometricPrecision;
+    text-rendering: geometricPrecision;
+  }
+  mjx-container[jax="SVG"][display="true"] {
+    margin: 0.9em 0 1.05em 0 !important;
+  }
   mjx-container[jax="CHTML"] {
     font-family: "STIX Two Math", "STIXGeneral", "Cambria Math", "Noto Sans Math", "Latin Modern Math", serif !important;
     font-kerning: normal !important;
