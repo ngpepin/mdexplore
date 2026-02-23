@@ -11,6 +11,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Right-pane rendered preview with math and diagram support.
 - `^`, `Refresh`, `PDF`, `Quit`, and `Edit` actions.
 - Top-right copy-by-color controls for clipboard file operations.
+- A pin button before copy-by-color controls to copy the currently previewed file.
 
 ## Repository Map
 
@@ -44,6 +45,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - `mdexplore.py [PATH]`
 - Tree shows directories and `.md` files only.
 - Selecting a Markdown file updates preview quickly.
+- GitHub/Obsidian-style markdown callouts (`> [!TYPE]`) should render as styled
+  callout boxes in preview and PDF output.
 - Navigating to a previously cached file must still stat-check mtime/size;
   if changed, it must re-render instead of showing stale cached HTML.
 - PlantUML rendering jobs must run off the UI thread to keep the window responsive.
@@ -96,6 +99,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Copy/Clear scope resolves in this order: selected directory, then most
   recently selected/expanded directory, then current root.
 - Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
+- The pin copy action should copy exactly the currently previewed markdown file
+  using the same clipboard MIME compatibility guarantees.
 - Preview context menu should keep standard actions and add
   `Copy Rendered Text` and `Copy Source Markdown` when there is a text
   selection.
@@ -125,6 +130,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.
+- Callout syntax is parsed from blockquotes using `[!TYPE]` markers and rendered
+  as non-collapsible callout containers.
 - PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`),
   defaulting to `vendor/plantuml/plantuml.jar` unless `PLANTUML_JAR` is set.
 - PlantUML failures should render inline as:

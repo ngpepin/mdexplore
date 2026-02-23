@@ -13,6 +13,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - TeX/LaTeX math via MathJax.
   - Mermaid diagrams.
   - PlantUML diagrams (asynchronous local render with placeholders).
+  - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
   - `^` moves root up one directory level.
   - `Refresh` rescans the current directory view to pick up new/deleted files.
@@ -30,6 +31,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
 - Top-right color buttons copy matching highlighted files to clipboard.
+- A pin button before the copy-color buttons copies the currently previewed markdown file.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
 - Preview scroll position is remembered per markdown file for the current app session.
@@ -112,6 +114,8 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - If a directory is not writable, color persistence fails quietly by design.
 - Use the top-right "Copy to clipboard:" color buttons to copy files
   with a given highlight color.
+- Use the pin button (first button after `Copy to clipboard:`) to copy
+  the currently previewed markdown file.
 - Right-click a directory to access recursive `Clear All` for that subtree.
 - Copy/Clear operations are recursive and use scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
@@ -126,6 +130,21 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
   and an uncluttered footer band.
 - Footer number font size is matched to the document's dominant scaled body text size.
 - Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
+
+### Markdown Callouts
+
+- mdexplore supports GitHub/Obsidian-style callouts written as blockquotes.
+- Supported types: `NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION` (case-insensitive).
+- `INFO` is accepted and styled as a `NOTE` callout.
+- Custom titles are supported: `> [!WARNING] Custom title`.
+- `+`/`-` markers are accepted in syntax, but callouts are rendered as non-collapsible boxes.
+
+Example:
+
+```markdown
+> [!NOTE]
+> This is a note callout with **markdown** content.
+```
 
 ### Search and Match Highlighting
 

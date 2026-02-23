@@ -23,7 +23,7 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
-from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -845,6 +845,16 @@ class MarkdownRenderer:
       --code-bg: #e5e7eb;
       --border: #d1d5db;
       --link: #0b57d0;
+      --callout-note-border: #2563eb;
+      --callout-note-bg: rgba(37, 99, 235, 0.12);
+      --callout-tip-border: #16a34a;
+      --callout-tip-bg: rgba(22, 163, 74, 0.12);
+      --callout-important-border: #7c3aed;
+      --callout-important-bg: rgba(124, 58, 237, 0.12);
+      --callout-warning-border: #d97706;
+      --callout-warning-bg: rgba(217, 119, 6, 0.14);
+      --callout-caution-border: #dc2626;
+      --callout-caution-bg: rgba(220, 38, 38, 0.12);
     }}
     @media (prefers-color-scheme: dark) {{
       :root {{
@@ -853,6 +863,16 @@ class MarkdownRenderer:
         --code-bg: #1f2937;
         --border: #374151;
         --link: #8ab4f8;
+        --callout-note-border: #60a5fa;
+        --callout-note-bg: rgba(96, 165, 250, 0.16);
+        --callout-tip-border: #4ade80;
+        --callout-tip-bg: rgba(74, 222, 128, 0.16);
+        --callout-important-border: #a78bfa;
+        --callout-important-bg: rgba(167, 139, 250, 0.18);
+        --callout-warning-border: #fbbf24;
+        --callout-warning-bg: rgba(251, 191, 36, 0.2);
+        --callout-caution-border: #f87171;
+        --callout-caution-bg: rgba(248, 113, 113, 0.18);
       }}
     }}
     html, body {{
@@ -929,6 +949,68 @@ class MarkdownRenderer:
       border-radius: 6px;
       font-style: italic;
       opacity: 0.9;
+    }}
+    .mdexplore-callout {{
+      margin: 0.9rem 0;
+      padding: 0.72rem 0.9rem 0.78rem 0.95rem;
+      border-left: 0.32rem solid var(--callout-note-border);
+      background: var(--callout-note-bg);
+      border-radius: 0.45rem;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }}
+    .mdexplore-callout-title {{
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0 0 0.38rem 0;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }}
+    .mdexplore-callout-icon {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.05rem;
+      height: 1.05rem;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      font-size: 0.73rem;
+      line-height: 1;
+      font-family: "Noto Sans", "DejaVu Sans", sans-serif;
+      font-weight: 700;
+      flex: 0 0 auto;
+    }}
+    .mdexplore-callout-content > :first-child {{
+      margin-top: 0;
+    }}
+    .mdexplore-callout-content > :last-child {{
+      margin-bottom: 0;
+    }}
+    .mdexplore-callout-note {{
+      border-left-color: var(--callout-note-border);
+      background: var(--callout-note-bg);
+    }}
+    .mdexplore-callout-tip {{
+      border-left-color: var(--callout-tip-border);
+      background: var(--callout-tip-bg);
+    }}
+    .mdexplore-callout-important {{
+      border-left-color: var(--callout-important-border);
+      background: var(--callout-important-bg);
+    }}
+    .mdexplore-callout-warning {{
+      border-left-color: var(--callout-warning-border);
+      background: var(--callout-warning-bg);
+    }}
+    .mdexplore-callout-caution {{
+      border-left-color: var(--callout-caution-border);
+      background: var(--callout-caution-bg);
+    }}
+    @media print {{
+      .mdexplore-callout {{
+        border-left-width: 4px;
+      }}
     }}
     mjx-container[display="true"] {{
       margin: 0.9em 0 1.05em 0 !important;
@@ -1033,6 +1115,158 @@ class MarkdownRenderer:
         return false;
       }})();
       return window.__mdexploreMermaidLoadPromise;
+    }};
+
+    window.__mdexploreTransformCallouts = () => {{
+      const root = document.querySelector("main") || document.body;
+      if (!root) {{
+        return 0;
+      }}
+      const quotes = Array.from(root.querySelectorAll("blockquote"));
+      if (!quotes.length) {{
+        return 0;
+      }}
+
+      const titleByType = {{
+        note: "Note",
+        info: "Info",
+        tip: "Tip",
+        important: "Important",
+        warning: "Warning",
+        caution: "Caution",
+      }};
+      const iconByStyleType = {{
+        note: "i",
+        tip: "+",
+        important: "!",
+        warning: "!",
+        caution: "!",
+      }};
+      const aliasByType = {{
+        info: "note",
+      }};
+
+      const markerLineRegex = /^\\s*\\[!([A-Za-z0-9_-]+)\\]\\s*([+-])?(?:\\s+(.*))?\\s*$/;
+      let transformed = 0;
+
+      for (const quote of quotes) {{
+        const firstBlock = quote.firstElementChild;
+        if (!firstBlock) {{
+          continue;
+        }}
+        const firstLine = ((firstBlock.textContent || "").split(/\\r?\\n/, 1)[0] || "").trim();
+        const markerMatch = firstLine.match(markerLineRegex);
+        if (!markerMatch) {{
+          continue;
+        }}
+
+        const rawType = (markerMatch[1] || "note").trim().toLowerCase();
+        const customTitle = (markerMatch[3] || "").trim();
+        const normalizedType = aliasByType[rawType] || rawType;
+        const styleType = {{
+          note: "note",
+          tip: "tip",
+          important: "important",
+          warning: "warning",
+          caution: "caution",
+        }}[normalizedType] || "note";
+        const titleText =
+          customTitle ||
+          titleByType[rawType] ||
+          titleByType[normalizedType] ||
+          (rawType ? rawType.charAt(0).toUpperCase() + rawType.slice(1) : "Note");
+
+        // Remove only the first marker line from leading text nodes while
+        // preserving nested inline markup in the callout body.
+        const firstBlockText = firstBlock.textContent || "";
+        let charsToRemove = 0;
+        const firstLineBoundary = firstBlockText.match(/^\\s*[^\\r\\n]*/);
+        if (firstLineBoundary) {{
+          charsToRemove = firstLineBoundary[0].length;
+        }}
+        const newlineBoundary = firstBlockText.slice(charsToRemove).match(/^\\r?\\n/);
+        if (newlineBoundary) {{
+          charsToRemove += newlineBoundary[0].length;
+        }}
+
+        if (charsToRemove > 0) {{
+          const textWalker = document.createTreeWalker(firstBlock, NodeFilter.SHOW_TEXT);
+          const textNodes = [];
+          while (textWalker.nextNode()) {{
+            textNodes.push(textWalker.currentNode);
+          }}
+          for (const node of textNodes) {{
+            if (charsToRemove <= 0) {{
+              break;
+            }}
+            const nodeText = node.nodeValue || "";
+            if (nodeText.length <= charsToRemove) {{
+              charsToRemove -= nodeText.length;
+              node.nodeValue = "";
+            }} else {{
+              node.nodeValue = nodeText.slice(charsToRemove);
+              charsToRemove = 0;
+            }}
+          }}
+        }}
+
+        // Drop leading blank text nodes and <br> left behind by marker stripping.
+        while (firstBlock.firstChild && firstBlock.firstChild.nodeType === Node.TEXT_NODE) {{
+          const value = firstBlock.firstChild.nodeValue || "";
+          if (!value.trim()) {{
+            firstBlock.removeChild(firstBlock.firstChild);
+            continue;
+          }}
+          break;
+        }}
+        while (firstBlock.firstChild && firstBlock.firstChild.nodeType === Node.ELEMENT_NODE) {{
+          const element = firstBlock.firstChild;
+          if (element.tagName === "BR") {{
+            firstBlock.removeChild(element);
+            continue;
+          }}
+          break;
+        }}
+
+        const hasBodyText = ((firstBlock.textContent || "").trim().length > 0) || firstBlock.children.length > 0;
+        if (!hasBodyText) {{
+          firstBlock.remove();
+        }}
+
+        const callout = document.createElement("div");
+        callout.className = "mdexplore-callout mdexplore-callout-" + styleType;
+        callout.setAttribute("data-callout", rawType);
+        for (const attrName of ["data-md-line-start", "data-md-line-end"]) {{
+          if (quote.hasAttribute(attrName)) {{
+            callout.setAttribute(attrName, quote.getAttribute(attrName) || "");
+          }}
+        }}
+
+        const header = document.createElement("div");
+        header.className = "mdexplore-callout-title";
+        const icon = document.createElement("span");
+        icon.className = "mdexplore-callout-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = iconByStyleType[styleType] || "i";
+        const label = document.createElement("span");
+        label.className = "mdexplore-callout-title-text";
+        label.textContent = titleText;
+        header.appendChild(icon);
+        header.appendChild(label);
+
+        const body = document.createElement("div");
+        body.className = "mdexplore-callout-content";
+        while (quote.firstChild) {{
+          body.appendChild(quote.firstChild);
+        }}
+
+        callout.appendChild(header);
+        callout.appendChild(body);
+        quote.replaceWith(callout);
+        transformed += 1;
+      }}
+
+      return transformed;
     }};
 
     window.__mdexploreNormalizeMathText = () => {{
@@ -1221,6 +1455,9 @@ class MarkdownRenderer:
     }};
 
     window.__mdexploreRunClientRenderers = async () => {{
+      if (window.__mdexploreTransformCallouts) {{
+        window.__mdexploreTransformCallouts();
+      }}
       // Keep Mermaid failures isolated so math rendering is never blocked.
       if (!window.__mdexploreMermaidReady) {{
         await window.__mdexploreRunMermaid();
@@ -1452,7 +1689,7 @@ class MdExploreWindow(QMainWindow):
         self.setWindowTitle("mdexplore")
         self.setWindowIcon(app_icon)
         # Give the top control bar a bit more horizontal/vertical room by default.
-        self.resize(1450, 920)
+        self.resize(1540, 980)
 
         # Use a custom QFileSystemModel so highlight colors render directly
         # in the tree and persist beside files in each directory.
@@ -1512,6 +1749,21 @@ class MdExploreWindow(QMainWindow):
         copy_buttons_layout.setContentsMargins(0, 0, 0, 0)
         copy_buttons_layout.setSpacing(4)
         copy_buttons_layout.addWidget(copy_label)
+
+        copy_current_btn = QPushButton("")
+        copy_current_btn.setFixedSize(18, 18)
+        copy_current_btn.setToolTip("Copy currently previewed markdown file")
+        copy_current_btn.setStyleSheet("border: 1px solid #4b5563; border-radius: 3px; padding: 0px;")
+        pin_icon_path = Path(__file__).resolve().parent / "pin.png"
+        if pin_icon_path.is_file():
+            pin_icon = QIcon(str(pin_icon_path))
+            copy_current_btn.setIcon(pin_icon)
+            copy_current_btn.setIconSize(QSize(16, 16))
+        else:
+            copy_current_btn.setText("P")
+        copy_current_btn.clicked.connect(self._copy_current_preview_file_to_clipboard)
+        copy_buttons_layout.addWidget(copy_current_btn)
+
         for color_name, color_value in self.HIGHLIGHT_COLORS:
             color_btn = QPushButton("")
             color_btn.setFixedSize(18, 18)
@@ -3265,14 +3517,24 @@ class MdExploreWindow(QMainWindow):
             4500,
         )
 
-    def _copy_highlighted_files_to_clipboard(self, color_value: str, color_name: str) -> None:
-        """Copy highlighted file paths for a color to the system clipboard."""
-        scope = self._highlight_scope_directory()
-        matches = self.model.collect_files_with_color(scope, color_value)
+    def _copy_files_to_clipboard(self, files: list[Path]) -> int:
+        """Copy file paths to clipboard with file-manager compatible MIME payloads."""
+        normalized: list[Path] = []
+        seen: set[str] = set()
+        for path in files:
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(resolved)
+
         clipboard = QApplication.clipboard()
         mime_data = QMimeData()
-
-        urls = [QUrl.fromLocalFile(str(path)) for path in matches]
+        urls = [QUrl.fromLocalFile(str(path)) for path in normalized]
         mime_data.setUrls(urls)
 
         # Nemo/Nautilus paste support: this custom format marks clipboard data
@@ -3282,10 +3544,36 @@ class MdExploreWindow(QMainWindow):
             mime_data.setData("x-special/gnome-copied-files", gnome_payload.encode("utf-8"))
 
         # Keep plain text for editors/terminals.
-        mime_data.setText("\n".join(str(path) for path in matches))
+        mime_data.setText("\n".join(str(path) for path in normalized))
         clipboard.setMimeData(mime_data)
+        return len(normalized)
+
+    def _copy_current_preview_file_to_clipboard(self) -> None:
+        """Copy the currently previewed markdown file path to clipboard."""
+        if self.current_file is None:
+            self.statusBar().showMessage("No previewed markdown file to copy", 3000)
+            return
+
+        try:
+            target = self.current_file.resolve()
+        except Exception:
+            target = self.current_file
+
+        if not target.is_file():
+            self.statusBar().showMessage("Previewed file is unavailable", 3000)
+            return
+
+        copied = self._copy_files_to_clipboard([target])
+        if copied:
+            self.statusBar().showMessage(f"Copied previewed file to clipboard: {target.name}", 4000)
+
+    def _copy_highlighted_files_to_clipboard(self, color_value: str, color_name: str) -> None:
+        """Copy highlighted file paths for a color to the system clipboard."""
+        scope = self._highlight_scope_directory()
+        matches = self.model.collect_files_with_color(scope, color_value)
+        copied = self._copy_files_to_clipboard(matches)
         self.statusBar().showMessage(
-            f"Copied {len(matches)} {color_name.lower()} highlighted file(s) from {scope}",
+            f"Copied {copied} {color_name.lower()} highlighted file(s) from {scope}",
             4000,
         )
 
