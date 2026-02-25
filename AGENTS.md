@@ -9,7 +9,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Left-pane directory tree rooted at a target folder.
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
-- `^`, `Refresh`, `PDF`, `Quit`, and `Edit` actions.
+- `^`, `Refresh`, `PDF`, `Add View`, and `Edit` actions.
 - Top-right copy-by-color controls for clipboard file operations.
 - A pin button before copy-by-color controls to copy the currently previewed file.
 
@@ -67,6 +67,21 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   works (`QApplication.setDesktopFileName("mdexplore")` + desktop
   `StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `code`.
+- `Add View` creates another tabbed view of the same current document, starting
+  from the current top-visible line/scroll position.
+- View tabs show top-visible source line numbers, are closeable, and capped at
+  8 tabs per document.
+- View tabs include a left-side mini bargraph indicating each view's position in
+  the current document.
+- View tabs should keep a stable soft-pastel color sequence based on open order.
+- View tabs are draggable/reorderable; moving tabs must not change their assigned
+  color.
+- When assigning a new tab color and wrapping the palette, skip any color already
+  used by open tabs.
+- Per-document tabs should persist for the app run: switching to another markdown
+  file and back must restore prior tabs, their order, and the previously selected
+  tab.
+- The tab strip should remain hidden when there is only one view.
 - `Refresh` button and `F5` both refresh the current directory tree view
   (new files appear, deleted files disappear) without requiring app restart.
 - `PDF` exports the currently previewed markdown rendering to
@@ -127,6 +142,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Markdown parser is `markdown-it-py`.
 - Mermaid and MathJax are rendered client-side in web view.
 - Mermaid loading order is local-first, then CDN fallback.
+- Mermaid rendering should use a dark-theme-friendly high-contrast palette when
+  preview background is dark.
+- PDF export should temporarily switch Mermaid to a light-background-friendly
+  palette, then restore preview palette after export.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.

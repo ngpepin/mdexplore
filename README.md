@@ -11,14 +11,14 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Supports:
   - CommonMark + tables + strikethrough.
   - TeX/LaTeX math via MathJax.
-  - Mermaid diagrams.
+  - Mermaid diagrams with improved dark-theme contrast.
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
   - `^` moves root up one directory level.
   - `Refresh` rescans the current directory view to pick up new/deleted files.
   - `PDF` exports the current preview to `<filename>.pdf` with centered page numbering (`N of M`).
-  - `Quit` closes the app.
+  - `Add View` creates another tabbed view of the same document at the current top visible line.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
@@ -122,14 +122,29 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 ### PDF Export
 
-- Click `PDF` (between `Refresh` and `Quit`) to export the currently previewed file.
+- Click `PDF` (between `Refresh` and `Add View`) to export the currently previewed file.
 - Output path is the previewed file path with `.pdf` extension in the same directory.
 - Export is based on the active rendered preview (markdown + math + Mermaid + PlantUML state).
 - Export waits briefly for math/diagram/font readiness to reduce rendering artifacts.
+- During PDF export, Mermaid is temporarily re-rendered with a light-page palette for readability.
 - Export auto-scales page content into a print-style layout with top/side margins
   and an uncluttered footer band.
 - Footer number font size is matched to the document's dominant scaled body text size.
 - Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
+
+### Multiple Views
+
+- Click `Add View` to create another tab for the same currently previewed document.
+- New tabs inherit the current view's top visible line/scroll position.
+- Tab labels show the current top-most visible source line number for that tab.
+- Tabs show a small left-side position bargraph indicating where that view sits within the document.
+- Tabs use a fixed soft-pastel color sequence based on the order each view was opened.
+- Tabs can be dragged to reorder without changing each tab's assigned color.
+- When a new view is added and the palette wraps, mdexplore skips any color already used by open tabs.
+- If you switch to another markdown file and later return in the same app run, that file's tabs restore with their prior order and selected tab.
+- The tab strip is hidden when only one view exists.
+- Tabs are closeable with `X`; at least one tab is always kept open.
+- Maximum views per document: `8`.
 
 ### Markdown Callouts
 

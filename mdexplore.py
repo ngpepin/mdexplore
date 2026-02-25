@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
+    QTabBar,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -918,6 +920,10 @@ class MarkdownRenderer:
       border: 1px solid var(--border);
       padding: 0.4rem 0.6rem;
     }}
+    .mermaid svg {{
+      max-width: 100%;
+      height: auto;
+    }}
     img.plantuml {{
       display: block;
       max-width: 100%;
@@ -1058,6 +1064,9 @@ class MarkdownRenderer:
     window.__mdexploreMermaidSources = {mermaid_sources_json};
     window.__mdexploreMermaidLoadPromise = null;
     window.__mdexploreMermaidAttempted = false;
+    window.__mdexploreMermaidPaletteMode = "auto";
+    window.__mdexploreMermaidRenderPromise = null;
+    window.__mdexploreMermaidRenderMode = "";
 
     window.__mdexploreLoadMathJaxScript = () => {{
       if (window.__mdexploreMathJaxLoadPromise) {{
@@ -1115,6 +1124,130 @@ class MarkdownRenderer:
         return false;
       }})();
       return window.__mdexploreMermaidLoadPromise;
+    }};
+
+    window.__mdexploreParseCssRgb = (colorText) => {{
+      const text = String(colorText || "").trim();
+      const match = text.match(/^rgba?\\(([^)]+)\\)$/i);
+      if (!match) {{
+        return null;
+      }}
+      const parts = match[1].split(",").map((part) => Number.parseFloat(part.trim()));
+      if (parts.length < 3 || parts.some((value) => Number.isNaN(value))) {{
+        return null;
+      }}
+      return [parts[0], parts[1], parts[2]];
+    }};
+
+    window.__mdexploreIsDarkBackground = () => {{
+      try {{
+        const body = document.body || document.documentElement;
+        if (!body) {{
+          return true;
+        }}
+        const bg = getComputedStyle(body).backgroundColor || "";
+        const rgb = window.__mdexploreParseCssRgb(bg);
+        if (rgb) {{
+          const [r, g, b] = rgb.map((value) => Math.max(0, Math.min(255, value)) / 255);
+          const luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+          return luminance < 0.56;
+        }}
+      }} catch (_error) {{
+        // Fall through to media query fallback.
+      }}
+      return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    }};
+
+    window.__mdexploreMermaidInitConfig = (mode = "auto") => {{
+      const usePdfMode = String(mode || "").toLowerCase() === "pdf";
+      const dark = !usePdfMode && window.__mdexploreIsDarkBackground();
+      const shared = {{
+        startOnLoad: false,
+        securityLevel: "loose",
+        fontFamily: "Noto Sans, DejaVu Sans, sans-serif",
+        flowchart: {{ htmlLabels: true, useMaxWidth: true }},
+        sequence: {{ useMaxWidth: true }},
+        gantt: {{ useMaxWidth: true }},
+      }};
+
+      if (dark) {{
+        return {{
+          ...shared,
+          theme: "base",
+          darkMode: true,
+          themeVariables: {{
+            background: "#0f172a",
+            primaryColor: "#1e293b",
+            primaryBorderColor: "#93c5fd",
+            primaryTextColor: "#e5e7eb",
+            secondaryColor: "#172554",
+            secondaryBorderColor: "#93c5fd",
+            secondaryTextColor: "#e5e7eb",
+            tertiaryColor: "#111827",
+            tertiaryBorderColor: "#94a3b8",
+            tertiaryTextColor: "#e5e7eb",
+            lineColor: "#d1d5db",
+            textColor: "#e5e7eb",
+            mainBkg: "#1e293b",
+            nodeBkg: "#1e293b",
+            clusterBkg: "#1f2937",
+            clusterBorder: "#94a3b8",
+            edgeLabelBackground: "#0f172a",
+            titleColor: "#e5e7eb",
+            actorBkg: "#1e293b",
+            actorBorder: "#93c5fd",
+            actorTextColor: "#e5e7eb",
+            actorLineColor: "#d1d5db",
+            signalColor: "#d1d5db",
+            noteBkgColor: "#1f2937",
+            noteTextColor: "#e5e7eb",
+            noteBorderColor: "#93c5fd",
+            labelTextColor: "#e5e7eb",
+            cScale0: "#60a5fa",
+            cScale1: "#93c5fd",
+            cScale2: "#bfdbfe",
+            cScale3: "#e2e8f0",
+            cScale4: "#cbd5e1",
+            cScale5: "#94a3b8",
+            cScale6: "#64748b",
+            cScale7: "#475569",
+            cScale8: "#334155",
+            cScale9: "#1f2937",
+          }},
+        }};
+      }}
+
+      return {{
+        ...shared,
+        theme: "base",
+        darkMode: false,
+        themeVariables: {{
+          background: "#f8fafc",
+          primaryColor: "#ffffff",
+          primaryBorderColor: "#1f2937",
+          primaryTextColor: "#111827",
+          secondaryColor: "#f1f5f9",
+          secondaryBorderColor: "#334155",
+          secondaryTextColor: "#111827",
+          tertiaryColor: "#e2e8f0",
+          tertiaryBorderColor: "#334155",
+          tertiaryTextColor: "#111827",
+          lineColor: "#1f2937",
+          textColor: "#111827",
+          edgeLabelBackground: "#f8fafc",
+          noteBkgColor: "#eef2ff",
+          noteTextColor: "#111827",
+          noteBorderColor: "#334155",
+          actorBkg: "#ffffff",
+          actorBorder: "#1f2937",
+          actorTextColor: "#111827",
+          actorLineColor: "#1f2937",
+          signalColor: "#1f2937",
+          clusterBkg: "#f1f5f9",
+          clusterBorder: "#334155",
+          labelTextColor: "#111827",
+        }},
+      }};
     }};
 
     window.__mdexploreTransformCallouts = () => {{
@@ -1393,24 +1526,72 @@ class MarkdownRenderer:
       return updated;
     }};
 
-    window.__mdexploreRunMermaid = async () => {{
-      if (window.__mdexploreMermaidReady || window.__mdexploreMermaidAttempted) {{
+    window.__mdexploreRunMermaidWithMode = async (mode = "auto", force = false) => {{
+      const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      if (
+        !force &&
+        window.__mdexploreMermaidReady &&
+        window.__mdexploreMermaidPaletteMode === normalizedMode
+      ) {{
         return window.__mdexploreMermaidReady;
       }}
-      window.__mdexploreMermaidAttempted = true;
-      try {{
-        const loaded = await window.__mdexploreLoadMermaidScript();
-        if (!loaded || !window.mermaid) {{
-          throw new Error("Mermaid script failed to load from local/CDN sources");
+      if (window.__mdexploreMermaidRenderPromise) {{
+        if (window.__mdexploreMermaidRenderMode === normalizedMode) {{
+          return await window.__mdexploreMermaidRenderPromise;
         }}
-        mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose' }});
-        await mermaid.run({{ querySelector: '.mermaid' }});
-        window.__mdexploreMermaidReady = true;
-      }} catch (error) {{
-        window.__mdexploreMermaidReady = false;
-        console.error("mdexplore Mermaid render failed:", error);
+        try {{
+          await window.__mdexploreMermaidRenderPromise;
+        }} catch (_error) {{
+          // Re-render attempt below with requested mode.
+        }}
       }}
-      return window.__mdexploreMermaidReady;
+      window.__mdexploreMermaidAttempted = true;
+      window.__mdexploreMermaidRenderMode = normalizedMode;
+      window.__mdexploreMermaidRenderPromise = (async () => {{
+        try {{
+          const loaded = await window.__mdexploreLoadMermaidScript();
+          if (!loaded || !window.mermaid) {{
+            throw new Error("Mermaid script failed to load from local/CDN sources");
+          }}
+          const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
+          for (const block of mermaidBlocks) {{
+            if (!(block instanceof HTMLElement)) {{
+              continue;
+            }}
+            const existingSource = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
+            if (!existingSource) {{
+              const rawSource = (block.textContent || "").trim();
+              if (rawSource) {{
+                block.dataset.mdexploreMermaidSource = rawSource;
+              }}
+            }}
+            const sourceText = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
+            if (!sourceText) {{
+              continue;
+            }}
+            block.removeAttribute("data-processed");
+            block.textContent = sourceText;
+          }}
+          const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
+          mermaid.initialize(mermaidConfig);
+          await mermaid.run({{ querySelector: '.mermaid' }});
+          window.__mdexploreMermaidReady = true;
+          window.__mdexploreMermaidPaletteMode = normalizedMode;
+        }} catch (error) {{
+          window.__mdexploreMermaidReady = false;
+          window.__mdexploreMermaidPaletteMode = normalizedMode;
+          console.error("mdexplore Mermaid render failed:", error);
+        }} finally {{
+          window.__mdexploreMermaidRenderPromise = null;
+          window.__mdexploreMermaidRenderMode = "";
+        }}
+        return window.__mdexploreMermaidReady;
+      }})();
+      return await window.__mdexploreMermaidRenderPromise;
+    }};
+
+    window.__mdexploreRunMermaid = async () => {{
+      return window.__mdexploreRunMermaidWithMode("auto", false);
     }};
 
     window.__mdexploreTryTypesetMath = async () => {{
@@ -1454,13 +1635,20 @@ class MarkdownRenderer:
       }}
     }};
 
-    window.__mdexploreRunClientRenderers = async () => {{
+    window.__mdexploreRunClientRenderers = async (options = null) => {{
       if (window.__mdexploreTransformCallouts) {{
         window.__mdexploreTransformCallouts();
       }}
+      const mermaidMode =
+        options && typeof options === "object" && String(options.mermaidMode || "").toLowerCase() === "pdf"
+          ? "pdf"
+          : "auto";
       // Keep Mermaid failures isolated so math rendering is never blocked.
-      if (!window.__mdexploreMermaidReady) {{
-        await window.__mdexploreRunMermaid();
+      if (
+        !window.__mdexploreMermaidReady ||
+        window.__mdexploreMermaidPaletteMode !== mermaidMode
+      ) {{
+        await window.__mdexploreRunMermaidWithMode(mermaidMode, false);
       }}
       const mathReady = await window.__mdexploreTryTypesetMath();
       if (!mathReady) {{
@@ -1616,7 +1804,329 @@ class PdfExportWorker(QRunnable):
             self.signals.finished.emit(str(self.output_path), str(exc))
 
 
+class ViewTabBar(QTabBar):
+    """Custom tab bar that paints dark-theme-friendly pastel tab backgrounds."""
+
+    PASTEL_SEQUENCE = [
+        "#8fb8ff",
+        "#9fd8c9",
+        "#d7b8ff",
+        "#f6c89f",
+        "#f4b8c9",
+        "#c8d8a0",
+        "#b5d5f4",
+        "#e8c6a7",
+    ]
+    WIDTH_TEMPLATE_TEXT = "999999"
+    WIDTH_SIDE_PADDING = 10
+    POSITION_BAR_WIDTH = 26
+    POSITION_BAR_HEIGHT = 8
+    POSITION_BAR_TEXT_GAP = 7
+    POSITION_BAR_SEGMENTS = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_candidate_index = -1
+        self._drag_start_pos = None
+        self._dragging_index = -1
+        self._dragging_tab_x = 0
+        self._dragging_tab_offset_x = 0
+
+    @staticmethod
+    def _event_pos(event):
+        """Return event position as QPoint across Qt6 API variants."""
+        try:
+            return event.position().toPoint()
+        except Exception:
+            return event.pos()
+
+    def _is_close_button_hit(self, tab_index: int, pos) -> bool:
+        """Detect whether a pointer position targets a tab close button."""
+        button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
+        return bool(button is not None and button.isVisible() and button.geometry().contains(pos))
+
+    def _set_all_close_buttons_visible(self, visible: bool) -> None:
+        """Show/hide close buttons while custom drag ghost is active."""
+        for index in range(self.count()):
+            button = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+            if button is not None:
+                button.setVisible(visible)
+
+    def _begin_tab_drag(self, tab_index: int, pos) -> None:
+        """Start custom full-tab drag ghost for smoother visual feedback."""
+        if tab_index < 0 or tab_index >= self.count():
+            return
+        rect = self.tabRect(tab_index)
+        if not rect.isValid():
+            return
+
+        self._dragging_index = tab_index
+        self._dragging_tab_offset_x = max(0, min(rect.width() - 1, pos.x() - rect.x()))
+        self._dragging_tab_x = rect.x()
+        self._set_all_close_buttons_visible(False)
+        self.update()
+
+    def _target_index_for_x(self, center_x: int) -> int:
+        """Map cursor X position to closest insertion tab index."""
+        if self.count() <= 0:
+            return -1
+        for index in range(self.count()):
+            if center_x <= self.tabRect(index).center().x():
+                return index
+        return self.count() - 1
+
+    def _update_tab_drag(self, pos) -> None:
+        """Move drag ghost and reorder tabs as cursor crosses boundaries."""
+        if self._dragging_index < 0:
+            return
+        self._dragging_tab_x = pos.x() - self._dragging_tab_offset_x
+        target_index = self._target_index_for_x(pos.x())
+        if target_index >= 0 and target_index != self._dragging_index:
+            self.moveTab(self._dragging_index, target_index)
+            self._dragging_index = target_index
+        self.update()
+
+    def _end_tab_drag(self) -> None:
+        """Finish drag mode and restore normal close button visibility."""
+        self._drag_candidate_index = -1
+        self._drag_start_pos = None
+        self._dragging_index = -1
+        self._dragging_tab_x = 0
+        self._dragging_tab_offset_x = 0
+        self._set_all_close_buttons_visible(True)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """Record potential drag start while preserving regular tab behavior."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = self._event_pos(event)
+            tab_index = self.tabAt(pos)
+            if tab_index >= 0 and not self._is_close_button_hit(tab_index, pos):
+                self._drag_candidate_index = tab_index
+                self._drag_start_pos = pos
+            else:
+                self._drag_candidate_index = -1
+                self._drag_start_pos = None
+        else:
+            self._drag_candidate_index = -1
+            self._drag_start_pos = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        """Drive custom tab drag animation and reorder behavior."""
+        if (
+            self._drag_candidate_index >= 0
+            and self._drag_start_pos is not None
+            and (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            pos = self._event_pos(event)
+            if self._dragging_index < 0:
+                if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                    self._begin_tab_drag(self._drag_candidate_index, pos)
+            if self._dragging_index >= 0:
+                self._update_tab_drag(pos)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        """End custom drag mode on release and continue normal processing."""
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging_index >= 0:
+            self._end_tab_drag()
+            super().mouseReleaseEvent(event)
+            return
+        self._drag_candidate_index = -1
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _color_slot_for_index(self, tab_index: int) -> int:
+        """Resolve palette slot from tab metadata, with sequence fallback."""
+        palette_size = len(self.PASTEL_SEQUENCE)
+        data = self.tabData(tab_index)
+        if isinstance(data, dict):
+            raw_slot = data.get("color_slot")
+            try:
+                slot = int(raw_slot)
+            except Exception:
+                slot = -1
+            if 0 <= slot < palette_size:
+                return slot
+        sequence = self._sequence_for_index(tab_index)
+        return (max(1, sequence) - 1) % palette_size
+
+    def _sequence_for_index(self, tab_index: int) -> int:
+        """Extract open-sequence index from tab data with backward compatibility."""
+        data = self.tabData(tab_index)
+        if isinstance(data, dict):
+            raw = data.get("sequence")
+            if isinstance(raw, int) and raw > 0:
+                return raw
+        if isinstance(data, int) and data > 0:
+            return data
+        return tab_index + 1
+
+    def _base_color_for_index(self, tab_index: int) -> QColor:
+        """Return base color for a tab from the configured pastel sequence."""
+        color_slot = self._color_slot_for_index(tab_index)
+        color_hex = self.PASTEL_SEQUENCE[color_slot]
+        return QColor(color_hex)
+
+    def _paint_single_tab(self, painter: QPainter, tab_index: int, rect, *, selected: bool, force_opaque: bool) -> None:
+        """Paint one tab using shared logic for static and drag-ghost rendering."""
+        base = self._base_color_for_index(tab_index)
+        fill = QColor(base)
+        if selected:
+            fill = fill.lighter(107)
+            if force_opaque:
+                fill.setAlpha(255)
+            else:
+                fill.setAlpha(236)
+            border = QColor(fill).darker(130)
+        else:
+            if force_opaque:
+                fill.setAlpha(244)
+            else:
+                fill.setAlpha(172)
+            border = QColor(fill).darker(155)
+
+        painter.setPen(QPen(border, 1.1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, 6.0, 6.0)
+
+        # Draw a compact segmented bargraph at the left to indicate each
+        # tab's approximate position within the current document.
+        bar_x = rect.left() + self.WIDTH_SIDE_PADDING - 1
+        bar_y = rect.center().y() - (self.POSITION_BAR_HEIGHT // 2)
+        bar_w = self.POSITION_BAR_WIDTH
+        bar_h = self.POSITION_BAR_HEIGHT
+        track_fill = QColor("#1f2937" if selected else "#182233")
+        if force_opaque:
+            track_fill.setAlpha(236 if selected else 214)
+        else:
+            track_fill.setAlpha(188 if selected else 152)
+        track_border = QColor("#314156")
+        painter.setPen(QPen(track_border, 0.9))
+        painter.setBrush(track_fill)
+        painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 2.2, 2.2)
+
+        inner_x = bar_x + 1
+        inner_y = bar_y + 1
+        inner_w = max(1, bar_w - 2)
+        inner_h = max(1, bar_h - 2)
+        segments = self.POSITION_BAR_SEGMENTS
+        segment_gap = 1
+        segment_w = max(1, (inner_w - ((segments - 1) * segment_gap)) // segments)
+        used_w = (segment_w * segments) + ((segments - 1) * segment_gap)
+        start_x = inner_x + max(0, (inner_w - used_w) // 2)
+        progress = self._progress_for_index(tab_index)
+        filled_segments = int(round(progress * segments))
+        if progress > 0.0 and filled_segments <= 0:
+            filled_segments = 1
+        filled_segments = max(0, min(segments, filled_segments))
+        segment_active = QColor(base).darker(116 if selected else 128)
+        segment_inactive = QColor("#425066")
+        if force_opaque:
+            segment_inactive.setAlpha(148 if selected else 126)
+        else:
+            segment_inactive.setAlpha(115 if selected else 92)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for segment_index in range(segments):
+            segment_x = start_x + (segment_index * (segment_w + segment_gap))
+            segment_color = segment_active if segment_index < filled_segments else segment_inactive
+            painter.setBrush(segment_color)
+            painter.drawRect(segment_x, inner_y, segment_w, inner_h)
+
+        text_left = bar_x + bar_w + self.POSITION_BAR_TEXT_GAP
+        text_rect = rect.adjusted(text_left - rect.left(), 0, -9, 0)
+        close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
+        if close_button is not None and close_button.isVisible():
+            text_rect.setRight(min(text_rect.right(), close_button.geometry().left() - 4))
+
+        text_color = QColor("#0b1220" if selected else "#1b2436")
+        if not self.isTabEnabled(tab_index):
+            text_color.setAlpha(130)
+        painter.setPen(text_color)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.tabText(tab_index))
+
+    def _progress_for_index(self, tab_index: int) -> float:
+        """Read normalized document-position progress (0..1) from tab metadata."""
+        data = self.tabData(tab_index)
+        if isinstance(data, dict):
+            raw = data.get("progress")
+            try:
+                value = float(raw)
+            except Exception:
+                value = 0.0
+            if math.isfinite(value):
+                return max(0.0, min(1.0, value))
+        return 0.0
+
+    def _constant_tab_width(self) -> int:
+        """Compute a stable tab width sized for six digits plus close button."""
+        text_width = self.fontMetrics().horizontalAdvance(self.WIDTH_TEMPLATE_TEXT)
+        close_width = 0
+        if self.tabsClosable():
+            close_width = self.style().pixelMetric(QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self) + 8
+        return (
+            text_width
+            + (self.WIDTH_SIDE_PADDING * 2)
+            + self.POSITION_BAR_WIDTH
+            + self.POSITION_BAR_TEXT_GAP
+            + close_width
+        )
+
+    def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
+        """Return fixed-width tab sizing so all view tabs align uniformly."""
+        base = super().tabSizeHint(index)
+        return QSize(self._constant_tab_width(), base.height())
+
+    def minimumTabSizeHint(self, index: int) -> QSize:  # noqa: N802
+        """Enforce same fixed width as minimum to prevent style shrink."""
+        base = super().minimumTabSizeHint(index)
+        return QSize(self._constant_tab_width(), base.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Draw rounded pastel tabs while preserving built-in tab close buttons."""
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        for tab_index in range(self.count()):
+            if self._dragging_index >= 0 and tab_index == self._dragging_index:
+                # Draw active dragged tab as a floating ghost after static tabs.
+                continue
+            rect = self.tabRect(tab_index).adjusted(2, 2, -2, -1)
+            if rect.width() <= 2 or rect.height() <= 2:
+                continue
+
+            selected = tab_index == self.currentIndex()
+            self._paint_single_tab(painter, tab_index, rect, selected=selected, force_opaque=False)
+
+        if self._dragging_index >= 0 and self.count() > 0:
+            current_rect = self.tabRect(max(0, min(self._dragging_index, self.count() - 1)))
+            ghost_rect = current_rect.adjusted(2, 2, -2, -1)
+            if ghost_rect.width() <= 2 or ghost_rect.height() <= 2:
+                painter.end()
+                return
+            draw_y = max(2, current_rect.y() + 2)
+            draw_x = int(self._dragging_tab_x + 2)
+            max_x = max(2, self.width() - ghost_rect.width() - 2)
+            draw_x = max(2, min(max_x, draw_x))
+            ghost_rect.moveLeft(draw_x)
+            ghost_rect.moveTop(draw_y)
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(5, 10, 18, 108))
+            painter.drawRoundedRect(ghost_rect.adjusted(1, 1, 3, 3), 6.0, 6.0)
+            selected = self._dragging_index == self.currentIndex()
+            self._paint_single_tab(painter, self._dragging_index, ghost_rect, selected=selected, force_opaque=True)
+            painter.restore()
+
+        painter.end()
+
+
 class MdExploreWindow(QMainWindow):
+    MAX_DOCUMENT_VIEWS = 8
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -1664,6 +2174,17 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_signature: tuple[int, int] | None = None
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
+        self._view_states: dict[int, dict[str, float | int]] = {}
+        self._active_view_id: int | None = None
+        self._next_view_id = 1
+        self._next_view_sequence = 1
+        self._next_tab_color_index = 0
+        # In-memory per-document tab/view sessions for this app run only.
+        self._document_view_sessions: dict[str, dict] = {}
+        self._document_line_counts: dict[str, int] = {}
+        self._current_document_total_lines = 1
+        self._view_line_probe_pending = False
+        self._last_view_line_probe_at = 0.0
         self._match_input_text = ""
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
@@ -1725,6 +2246,19 @@ class MdExploreWindow(QMainWindow):
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview.loadFinished.connect(self._on_preview_load_finished)
 
+        self.view_tabs = ViewTabBar()
+        self.view_tabs.setDocumentMode(True)
+        self.view_tabs.setMovable(False)
+        self.view_tabs.setDrawBase(False)
+        self.view_tabs.setExpanding(False)
+        self.view_tabs.setUsesScrollButtons(False)
+        self.view_tabs.setTabsClosable(True)
+        self.view_tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
+        self.view_tabs.tabCloseRequested.connect(self._on_view_tab_close_requested)
+        self.view_tabs.setVisible(False)
+        self._reset_document_views()
+
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
 
@@ -1734,8 +2268,8 @@ class MdExploreWindow(QMainWindow):
         self.pdf_btn = QPushButton("PDF")
         self.pdf_btn.clicked.connect(self._export_current_preview_pdf)
 
-        quit_btn = QPushButton("Quit")
-        quit_btn.clicked.connect(self.close)
+        self.add_view_btn = QPushButton("Add View")
+        self.add_view_btn.clicked.connect(self._add_document_view)
 
         edit_btn = QPushButton("Edit")
         edit_btn.clicked.connect(self._edit_current_file)
@@ -1814,7 +2348,7 @@ class MdExploreWindow(QMainWindow):
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
         top_bar.addWidget(self.pdf_btn)
-        top_bar.addWidget(quit_btn)
+        top_bar.addWidget(self.add_view_btn)
         top_bar.addWidget(edit_btn)
         top_bar.addWidget(self.path_label, 1)
         top_bar.addWidget(copy_buttons_widget, 0, Qt.AlignmentFlag.AlignRight)
@@ -1825,9 +2359,16 @@ class MdExploreWindow(QMainWindow):
         top_bar_widget.setLayout(top_bar)
         top_bar_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+        preview_layout.addWidget(self.view_tabs)
+        preview_layout.addWidget(self.preview, 1)
+
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tree)
-        self.splitter.addWidget(self.preview)
+        self.splitter.addWidget(preview_container)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 3)
@@ -1852,6 +2393,563 @@ class MdExploreWindow(QMainWindow):
         refresh_action.setShortcut("F5")
         refresh_action.triggered.connect(self._refresh_directory_view)
         self.addAction(refresh_action)
+
+    @staticmethod
+    def _view_tab_label_for_line(line_number: int) -> str:
+        """Return compact tab text for a view anchored near a source line."""
+        return str(max(1, int(line_number)))
+
+    @staticmethod
+    def _count_markdown_lines(markdown_text: str) -> int:
+        """Return total source lines, treating empty content as one line."""
+        return max(1, markdown_text.count("\n") + 1)
+
+    @staticmethod
+    def _line_progress(line_number: int, total_lines: int) -> float:
+        """Convert top visible line number into normalized 0..1 document progress."""
+        line_value = max(1, int(line_number))
+        total_value = max(1, int(total_lines))
+        if total_value <= 1:
+            return 0.0
+        return max(0.0, min(1.0, (line_value - 1) / (total_value - 1)))
+
+    def _tab_view_id(self, tab_index: int) -> int | None:
+        """Resolve a tab index into an internal view id."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return None
+        try:
+            value = self.view_tabs.tabData(tab_index)
+            if value is None:
+                return None
+            if isinstance(value, dict):
+                raw = value.get("view_id")
+                if raw is None:
+                    return None
+                return int(raw)
+            return int(value)
+        except Exception:
+            return None
+
+    def _used_tab_color_slots(self) -> set[int]:
+        """Collect palette slots currently assigned to open tabs."""
+        used: set[int] = set()
+        palette_size = len(ViewTabBar.PASTEL_SEQUENCE)
+        for index in range(self.view_tabs.count()):
+            data = self.view_tabs.tabData(index)
+            if not isinstance(data, dict):
+                continue
+            raw_slot = data.get("color_slot")
+            try:
+                slot = int(raw_slot)
+            except Exception:
+                continue
+            if 0 <= slot < palette_size:
+                used.add(slot)
+        return used
+
+    def _allocate_next_tab_color_slot(self) -> int:
+        """Pick next palette slot in rotation, skipping slots already in use."""
+        palette_size = len(ViewTabBar.PASTEL_SEQUENCE)
+        if palette_size <= 0:
+            return 0
+        used = self._used_tab_color_slots()
+        start = self._next_tab_color_index % palette_size
+
+        if len(used) < palette_size:
+            for offset in range(palette_size):
+                slot = (start + offset) % palette_size
+                if slot in used:
+                    continue
+                self._next_tab_color_index = (slot + 1) % palette_size
+                return slot
+
+        # Fallback when every slot is occupied (should not happen with max views == palette size).
+        slot = start
+        self._next_tab_color_index = (slot + 1) % palette_size
+        return slot
+
+    def _current_view_state(self) -> dict[str, float | int] | None:
+        """Return active view state dictionary when available."""
+        if self._active_view_id is None:
+            return None
+        return self._view_states.get(self._active_view_id)
+
+    def _save_document_view_session(self, path_key: str | None = None) -> None:
+        """Snapshot current tab/view state for one document path key."""
+        if path_key is None:
+            path_key = self._current_preview_path_key()
+        if not path_key:
+            return
+
+        self._capture_current_preview_scroll(force=True)
+
+        sanitized_states: dict[int, dict[str, float | int]] = {}
+        for raw_view_id, raw_state in self._view_states.items():
+            try:
+                view_id = int(raw_view_id)
+            except Exception:
+                continue
+            if not isinstance(raw_state, dict):
+                continue
+            try:
+                scroll_y = float(raw_state.get("scroll_y", 0.0))
+            except Exception:
+                scroll_y = 0.0
+            if not math.isfinite(scroll_y):
+                scroll_y = 0.0
+            try:
+                top_line = max(1, int(raw_state.get("top_line", 1)))
+            except Exception:
+                top_line = 1
+            sanitized_states[view_id] = {"scroll_y": scroll_y, "top_line": top_line}
+
+        palette_size = max(1, len(ViewTabBar.PASTEL_SEQUENCE))
+        tabs: list[dict[str, int]] = []
+        max_sequence = 0
+        max_view_id = 0
+        for index in range(self.view_tabs.count()):
+            view_id = self._tab_view_id(index)
+            if view_id is None:
+                continue
+            data = self.view_tabs.tabData(index)
+            sequence = index + 1
+            color_slot = (sequence - 1) % palette_size
+            if isinstance(data, dict):
+                raw_sequence = data.get("sequence")
+                raw_color_slot = data.get("color_slot")
+                try:
+                    sequence = max(1, int(raw_sequence))
+                except Exception:
+                    sequence = index + 1
+                try:
+                    color_slot = int(raw_color_slot)
+                except Exception:
+                    color_slot = (sequence - 1) % palette_size
+            if color_slot < 0 or color_slot >= palette_size:
+                color_slot = (sequence - 1) % palette_size
+            state = sanitized_states.get(view_id)
+            if state is None:
+                state = {"scroll_y": 0.0, "top_line": 1}
+                sanitized_states[view_id] = state
+            tabs.append({"view_id": view_id, "sequence": sequence, "color_slot": color_slot})
+            max_sequence = max(max_sequence, sequence)
+            max_view_id = max(max_view_id, view_id)
+
+        active_view_id = self._active_view_id
+        if active_view_id is None or all(entry["view_id"] != active_view_id for entry in tabs):
+            current_index = self.view_tabs.currentIndex()
+            active_view_id = self._tab_view_id(current_index)
+        if active_view_id is None and tabs:
+            active_view_id = tabs[0]["view_id"]
+
+        next_view_id = max(self._next_view_id, max_view_id + 1)
+        next_sequence = max(self._next_view_sequence, max_sequence + 1)
+        try:
+            next_color_index = int(self._next_tab_color_index) % palette_size
+        except Exception:
+            next_color_index = 0
+
+        self._document_view_sessions[path_key] = {
+            "view_states": sanitized_states,
+            "tabs": tabs,
+            "active_view_id": active_view_id,
+            "next_view_id": next_view_id,
+            "next_view_sequence": next_sequence,
+            "next_tab_color_index": next_color_index,
+        }
+
+    def _restore_document_view_session(self, path_key: str) -> bool:
+        """Restore tab/view state for one document if a session snapshot exists."""
+        session = self._document_view_sessions.get(path_key)
+        if not isinstance(session, dict):
+            return False
+
+        raw_states = session.get("view_states")
+        raw_tabs = session.get("tabs")
+        if not isinstance(raw_states, dict) or not isinstance(raw_tabs, list):
+            return False
+
+        view_states: dict[int, dict[str, float | int]] = {}
+        for raw_view_id, raw_state in raw_states.items():
+            try:
+                view_id = int(raw_view_id)
+            except Exception:
+                continue
+            if not isinstance(raw_state, dict):
+                continue
+            try:
+                scroll_y = float(raw_state.get("scroll_y", 0.0))
+            except Exception:
+                scroll_y = 0.0
+            if not math.isfinite(scroll_y):
+                scroll_y = 0.0
+            try:
+                top_line = max(1, int(raw_state.get("top_line", 1)))
+            except Exception:
+                top_line = 1
+            view_states[view_id] = {"scroll_y": scroll_y, "top_line": top_line}
+
+        palette_size = max(1, len(ViewTabBar.PASTEL_SEQUENCE))
+        normalized_tabs: list[dict[str, int]] = []
+        seen_view_ids: set[int] = set()
+        max_sequence = 0
+        max_view_id = 0
+        for entry in raw_tabs:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                view_id = int(entry.get("view_id"))
+            except Exception:
+                continue
+            if view_id in seen_view_ids:
+                continue
+            seen_view_ids.add(view_id)
+            if view_id not in view_states:
+                view_states[view_id] = {"scroll_y": 0.0, "top_line": 1}
+            try:
+                sequence = max(1, int(entry.get("sequence", len(normalized_tabs) + 1)))
+            except Exception:
+                sequence = len(normalized_tabs) + 1
+            try:
+                color_slot = int(entry.get("color_slot", (sequence - 1) % palette_size))
+            except Exception:
+                color_slot = (sequence - 1) % palette_size
+            if color_slot < 0 or color_slot >= palette_size:
+                color_slot = (sequence - 1) % palette_size
+            normalized_tabs.append({"view_id": view_id, "sequence": sequence, "color_slot": color_slot})
+            max_sequence = max(max_sequence, sequence)
+            max_view_id = max(max_view_id, view_id)
+
+        if not normalized_tabs:
+            return False
+
+        blocked = self.view_tabs.blockSignals(True)
+        while self.view_tabs.count() > 0:
+            self.view_tabs.removeTab(0)
+        self._view_states = view_states
+
+        total_lines = max(1, int(self._current_document_total_lines))
+        for tab_entry in normalized_tabs:
+            view_id = tab_entry["view_id"]
+            state = self._view_states.get(view_id, {"scroll_y": 0.0, "top_line": 1})
+            try:
+                top_line = max(1, int(state.get("top_line", 1)))
+            except Exception:
+                top_line = 1
+            progress = self._line_progress(top_line, total_lines)
+            index = self.view_tabs.addTab(self._view_tab_label_for_line(top_line))
+            self.view_tabs.setTabData(
+                index,
+                {
+                    "view_id": view_id,
+                    "sequence": tab_entry["sequence"],
+                    "color_slot": tab_entry["color_slot"],
+                    "progress": progress,
+                },
+            )
+            self.view_tabs.setTabToolTip(index, f"Top visible line: {top_line} / {total_lines}")
+
+        try:
+            wanted_active = int(session.get("active_view_id"))
+        except Exception:
+            wanted_active = normalized_tabs[0]["view_id"]
+        if all(entry["view_id"] != wanted_active for entry in normalized_tabs):
+            wanted_active = normalized_tabs[0]["view_id"]
+
+        active_index = 0
+        for index in range(self.view_tabs.count()):
+            if self._tab_view_id(index) == wanted_active:
+                active_index = index
+                break
+        self.view_tabs.setCurrentIndex(active_index)
+        self._active_view_id = self._tab_view_id(active_index)
+
+        try:
+            next_view_id = int(session.get("next_view_id", max_view_id + 1))
+        except Exception:
+            next_view_id = max_view_id + 1
+        try:
+            next_sequence = int(session.get("next_view_sequence", max_sequence + 1))
+        except Exception:
+            next_sequence = max_sequence + 1
+        try:
+            next_color_index = int(session.get("next_tab_color_index", 0))
+        except Exception:
+            next_color_index = 0
+
+        self._next_view_id = max(next_view_id, max_view_id + 1)
+        self._next_view_sequence = max(next_sequence, max_sequence + 1)
+        self._next_tab_color_index = next_color_index % palette_size
+        self.view_tabs.blockSignals(blocked)
+        self._sync_all_view_tab_progress()
+        self._update_view_tabs_visibility()
+        self._update_add_view_button_state()
+        return True
+
+    def _set_view_tab_line(self, view_id: int, line_number: int) -> None:
+        """Update one tab label/tooltip to match its top visible line."""
+        line_value = max(1, int(line_number))
+        label = self._view_tab_label_for_line(line_value)
+        total_lines = max(1, int(self._current_document_total_lines))
+        progress = self._line_progress(line_value, total_lines)
+        for index in range(self.view_tabs.count()):
+            if self._tab_view_id(index) != view_id:
+                continue
+            if self.view_tabs.tabText(index) != label:
+                self.view_tabs.setTabText(index, label)
+            data = self.view_tabs.tabData(index)
+            if isinstance(data, dict):
+                updated_data = dict(data)
+                updated_data["progress"] = progress
+                self.view_tabs.setTabData(index, updated_data)
+            self.view_tabs.setTabToolTip(index, f"Top visible line: {line_value} / {total_lines}")
+            self.view_tabs.update(self.view_tabs.tabRect(index))
+            break
+
+    def _sync_all_view_tab_progress(self) -> None:
+        """Refresh per-tab progress metadata against current document line count."""
+        total_lines = max(1, int(self._current_document_total_lines))
+        for index in range(self.view_tabs.count()):
+            view_id = self._tab_view_id(index)
+            if view_id is None:
+                continue
+            state = self._view_states.get(view_id)
+            if state is None:
+                line_value = 1
+            else:
+                try:
+                    line_value = max(1, int(state.get("top_line", 1)))
+                except Exception:
+                    line_value = 1
+            progress = self._line_progress(line_value, total_lines)
+            data = self.view_tabs.tabData(index)
+            if isinstance(data, dict):
+                updated_data = dict(data)
+                updated_data["progress"] = progress
+                self.view_tabs.setTabData(index, updated_data)
+            self.view_tabs.setTabToolTip(index, f"Top visible line: {line_value} / {total_lines}")
+        self.view_tabs.update()
+
+    def _current_preview_scroll_key(self) -> str | None:
+        """Return scroll cache key for current file + active view."""
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return None
+        view_id = self._active_view_id
+        if view_id is None:
+            return path_key
+        return f"{path_key}::view:{view_id}"
+
+    def _update_add_view_button_state(self) -> None:
+        """Enable Add View only when a file is open and tab budget remains."""
+        if not hasattr(self, "add_view_btn"):
+            return
+        can_add = self.current_file is not None and self.view_tabs.count() < self.MAX_DOCUMENT_VIEWS
+        self.add_view_btn.setEnabled(can_add)
+
+    def _update_view_tabs_visibility(self) -> None:
+        """Show tab strip only when there are multiple views for an open file."""
+        if not hasattr(self, "view_tabs"):
+            return
+        self.view_tabs.setVisible(self.current_file is not None and self.view_tabs.count() > 1)
+
+    def _create_document_view(self, scroll_y: float, top_line: int, *, make_current: bool) -> int:
+        """Create a new view tab/state entry and optionally activate it."""
+        view_id = self._next_view_id
+        self._next_view_id += 1
+        sequence = self._next_view_sequence
+        self._next_view_sequence += 1
+        color_slot = self._allocate_next_tab_color_slot()
+        try:
+            safe_scroll = float(scroll_y)
+        except Exception:
+            safe_scroll = 0.0
+        if not math.isfinite(safe_scroll):
+            safe_scroll = 0.0
+        safe_line = max(1, int(top_line))
+        self._view_states[view_id] = {"scroll_y": safe_scroll, "top_line": safe_line}
+        total_lines = max(1, int(self._current_document_total_lines))
+        progress = self._line_progress(safe_line, total_lines)
+
+        tab_index = self.view_tabs.addTab(self._view_tab_label_for_line(safe_line))
+        self.view_tabs.setTabData(
+            tab_index,
+            {"view_id": view_id, "sequence": sequence, "color_slot": color_slot, "progress": progress},
+        )
+        self.view_tabs.setTabToolTip(tab_index, f"Top visible line: {safe_line} / {total_lines}")
+
+        if make_current:
+            blocked = self.view_tabs.blockSignals(True)
+            self.view_tabs.setCurrentIndex(tab_index)
+            self.view_tabs.blockSignals(blocked)
+            self._active_view_id = view_id
+
+        return view_id
+
+    def _reset_document_views(self, initial_scroll: float = 0.0, initial_line: int = 1) -> None:
+        """Reset per-document view tabs back to a single base view."""
+        self._view_states.clear()
+        self._active_view_id = None
+        self._next_view_id = 1
+        self._next_view_sequence = 1
+        self._next_tab_color_index = 0
+        self._view_line_probe_pending = False
+        self._last_view_line_probe_at = 0.0
+
+        blocked = self.view_tabs.blockSignals(True)
+        while self.view_tabs.count() > 0:
+            self.view_tabs.removeTab(0)
+        self.view_tabs.blockSignals(blocked)
+        self._create_document_view(initial_scroll, initial_line, make_current=True)
+        self._update_view_tabs_visibility()
+        self._update_add_view_button_state()
+
+    def _add_document_view(self) -> None:
+        """Create another view tab for the current document at current top line."""
+        if self.current_file is None:
+            self.statusBar().showMessage("Open a markdown file before adding a view", 3000)
+            return
+        if self.view_tabs.count() >= self.MAX_DOCUMENT_VIEWS:
+            self.statusBar().showMessage(f"Maximum of {self.MAX_DOCUMENT_VIEWS} views reached", 3500)
+            return
+
+        self._capture_current_preview_scroll(force=True)
+        current_state = self._current_view_state() or {"scroll_y": 0.0, "top_line": 1}
+        scroll_y = float(current_state.get("scroll_y", 0.0))
+        top_line = int(current_state.get("top_line", 1))
+        new_view_id = self._create_document_view(scroll_y, top_line, make_current=False)
+
+        for index in range(self.view_tabs.count()):
+            if self._tab_view_id(index) != new_view_id:
+                continue
+            self.view_tabs.setCurrentIndex(index)
+            break
+
+        self._update_view_tabs_visibility()
+        self._update_add_view_button_state()
+        self.statusBar().showMessage(
+            f"Added view {self.view_tabs.count()} of {self.MAX_DOCUMENT_VIEWS} at line {top_line}",
+            3000,
+        )
+
+    def _on_view_tab_close_requested(self, tab_index: int) -> None:
+        """Close one saved view tab while keeping at least one active view."""
+        if self.view_tabs.count() <= 1:
+            self.statusBar().showMessage("At least one view must remain open", 2500)
+            return
+
+        view_id = self._tab_view_id(tab_index)
+        if view_id is None:
+            return
+
+        self._capture_current_preview_scroll(force=True)
+        self._view_states.pop(view_id, None)
+        path_key = self._current_preview_path_key()
+        if path_key is not None:
+            self._preview_scroll_positions.pop(f"{path_key}::view:{view_id}", None)
+
+        self.view_tabs.removeTab(tab_index)
+        if self._active_view_id == view_id:
+            self._active_view_id = self._tab_view_id(self.view_tabs.currentIndex())
+
+        self._update_view_tabs_visibility()
+        self._update_add_view_button_state()
+
+    def _on_view_tab_changed(self, tab_index: int) -> None:
+        """Switch active view and restore its own saved scroll position."""
+        new_view_id = self._tab_view_id(tab_index)
+        if new_view_id is None:
+            return
+
+        previous_view_id = self._active_view_id
+        if previous_view_id is not None and previous_view_id != new_view_id:
+            self._capture_current_preview_scroll(force=True)
+        self._active_view_id = new_view_id
+
+        if self.current_file is None:
+            self._update_add_view_button_state()
+            return
+
+        self._preview_capture_enabled = False
+        self._scroll_restore_block_until = time.monotonic() + 0.9
+        expected_key = self._current_preview_path_key()
+        if expected_key is None:
+            return
+
+        QTimer.singleShot(0, lambda key=expected_key: self._restore_current_preview_scroll(key))
+        QTimer.singleShot(180, lambda key=expected_key: self._restore_current_preview_scroll(key))
+        QTimer.singleShot(520, lambda key=expected_key: self._restore_current_preview_scroll(key))
+        QTimer.singleShot(900, lambda key=expected_key: self._enable_preview_scroll_capture_for(key))
+        self._request_active_view_top_line_update(force=True)
+        self._update_add_view_button_state()
+
+    def _request_active_view_top_line_update(self, force: bool = False) -> None:
+        """Probe top-most visible source line and update active tab label."""
+        if self.current_file is None or self._active_view_id is None:
+            return
+        now = time.monotonic()
+        if not force:
+            if self._view_line_probe_pending:
+                return
+            if now - self._last_view_line_probe_at < 0.35:
+                return
+
+        expected_key = self._current_preview_path_key()
+        expected_view_id = self._active_view_id
+        if expected_key is None:
+            return
+
+        self._view_line_probe_pending = True
+        self._last_view_line_probe_at = now
+        js = """
+(() => {
+  const probeX = Math.max(14, Math.floor(window.innerWidth * 0.42));
+  const probeYs = [10, 20, 34, 50, 72, 96];
+  for (const y of probeYs) {
+    const el = document.elementFromPoint(probeX, y);
+    if (!el) continue;
+    const tagged = el.closest('[data-md-line-start]');
+    if (!tagged) continue;
+    const value = parseInt(tagged.getAttribute('data-md-line-start') || "", 10);
+    if (!Number.isNaN(value)) return value + 1;
+  }
+  const taggedNodes = document.querySelectorAll('[data-md-line-start]');
+  for (const node of taggedNodes) {
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom < 0) continue;
+    const value = parseInt(node.getAttribute('data-md-line-start') || "", 10);
+    if (!Number.isNaN(value)) return value + 1;
+  }
+  return 1;
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, key=expected_key, view_id=expected_view_id: self._on_active_view_line_probe_result(
+                key,
+                view_id,
+                result,
+            ),
+        )
+
+    def _on_active_view_line_probe_result(self, expected_key: str, expected_view_id: int, result) -> None:
+        """Apply top-line probe result to active view tab when still current."""
+        self._view_line_probe_pending = False
+        if self._current_preview_path_key() != expected_key:
+            return
+        if self._active_view_id != expected_view_id:
+            return
+
+        try:
+            line_number = max(1, int(result))
+        except Exception:
+            line_number = 1
+
+        state = self._view_states.get(expected_view_id)
+        if state is None:
+            return
+        state["top_line"] = line_number
+        self._set_view_tab_line(expected_view_id, line_number)
 
     def _placeholder_html(self, message: str) -> str:
         """Render an empty-state page in the preview pane."""
@@ -1953,11 +3051,14 @@ class MdExploreWindow(QMainWindow):
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self._capture_current_preview_scroll(force=True)
+        self._save_document_view_session()
         self._capture_splitter_sizes_for_session()
         self.root = new_root.resolve()
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         self.last_directory_selection = self.root
         self.current_file = None
+        self._current_document_total_lines = 1
+        self._reset_document_views()
         self._clear_current_preview_signature()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
@@ -1976,6 +3077,7 @@ class MdExploreWindow(QMainWindow):
         self._update_window_title()
         self._cancel_pending_preview_render()
         self._rerun_active_search_for_scope()
+        self._update_add_view_button_state()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
@@ -2015,6 +3117,7 @@ class MdExploreWindow(QMainWindow):
         else:
             self._preview_capture_enabled = True
             self._scroll_restore_block_until = 0.0
+        self._request_active_view_top_line_update(force=True)
         self._show_preview_progress_status()
 
     def _trigger_client_renderers_for(self, expected_key: str) -> None:
@@ -2125,6 +3228,7 @@ class MdExploreWindow(QMainWindow):
                 current_exists = False
             if not current_exists:
                 self.current_file = None
+                self._reset_document_views()
                 self._clear_current_preview_signature()
                 self.path_label.setText("Select a markdown file")
                 self.preview.setHtml(
@@ -2141,6 +3245,7 @@ class MdExploreWindow(QMainWindow):
 
         self._update_window_title()
         self._update_up_button_state()
+        self._update_add_view_button_state()
         self._rerun_active_search_for_scope()
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
@@ -3689,13 +4794,19 @@ class MdExploreWindow(QMainWindow):
         self._refresh_current_preview(reason="file changed on disk")
 
     def _has_saved_scroll_for_current_preview(self) -> bool:
-        key = self._current_preview_path_key()
-        return key is not None and key in self._preview_scroll_positions
+        key = self._current_preview_scroll_key()
+        if key is None:
+            return False
+        if key in self._preview_scroll_positions:
+            return True
+        # Backward compatibility with pre-view-tab scroll cache entries.
+        path_key = self._current_preview_path_key()
+        return bool(path_key and path_key in self._preview_scroll_positions)
 
     def _capture_current_preview_scroll(self, force: bool = False) -> None:
         """Capture current preview scroll position for the selected file."""
-        path_key = self._current_preview_path_key()
-        if path_key is None:
+        scroll_key = self._current_preview_scroll_key()
+        if scroll_key is None:
             return
         if not force:
             if not self._preview_capture_enabled:
@@ -3710,7 +4821,11 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             return
         if math.isfinite(y):
-            self._preview_scroll_positions[path_key] = y
+            self._preview_scroll_positions[scroll_key] = y
+            state = self._current_view_state()
+            if state is not None:
+                state["scroll_y"] = y
+            self._request_active_view_top_line_update(force=force)
 
     def _enable_preview_scroll_capture_for(self, expected_key: str) -> None:
         """Re-enable periodic scroll capture for the currently displayed file."""
@@ -3719,6 +4834,7 @@ class MdExploreWindow(QMainWindow):
         self._preview_capture_enabled = True
         self._scroll_restore_block_until = 0.0
         self._capture_current_preview_scroll(force=True)
+        self._request_active_view_top_line_update(force=True)
 
     def _restore_current_preview_scroll(self, expected_key: str | None = None) -> None:
         """Restore previously captured scroll position for the selected file."""
@@ -3727,7 +4843,18 @@ class MdExploreWindow(QMainWindow):
             return
         if expected_key is not None and path_key != expected_key:
             return
-        scroll_y = self._preview_scroll_positions.get(path_key)
+        scroll_key = self._current_preview_scroll_key()
+        scroll_y = self._preview_scroll_positions.get(scroll_key) if scroll_key is not None else None
+        if scroll_y is None:
+            state = self._current_view_state()
+            if state is not None:
+                try:
+                    scroll_y = float(state.get("scroll_y", 0.0))
+                except Exception:
+                    scroll_y = 0.0
+        if scroll_y is None:
+            # Backward compatibility with pre-view-tab scroll cache entries.
+            scroll_y = self._preview_scroll_positions.get(path_key)
         if scroll_y is None:
             return
         scroll_json = json.dumps(float(scroll_y))
@@ -3741,6 +4868,7 @@ class MdExploreWindow(QMainWindow):
 """
         # Mutates page scroll position (no returned data consumed).
         self.preview.page().runJavaScript(js)
+        self._request_active_view_top_line_update(force=True)
 
     @staticmethod
     def _truncate_error_text(text: str, max_len: int = 1200) -> str:
@@ -3879,16 +5007,28 @@ class MdExploreWindow(QMainWindow):
     def _load_preview(self, path: Path) -> None:
         # Render markdown quickly with async PlantUML placeholders so the
         # document appears immediately while diagrams render in background.
+        previous_path_key = self._current_preview_path_key()
+        next_path_key = self._path_key(path)
         self._capture_current_preview_scroll(force=True)
+        if previous_path_key is not None and previous_path_key != next_path_key:
+            self._save_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
+        if previous_path_key != next_path_key:
+            restored = self._restore_document_view_session(next_path_key)
+            if not restored:
+                self._reset_document_views(initial_scroll=0.0, initial_line=1)
         should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
         self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
         self._pending_preview_search_close_groups = self._current_close_term_groups() if should_highlight_search else []
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
+        self._current_document_total_lines = max(1, int(self._document_line_counts.get(next_path_key, 1)))
+        self._sync_all_view_tab_progress()
+        self._update_view_tabs_visibility()
+        self._update_add_view_button_state()
         try:
             rel = path.relative_to(self.root)
             self.path_label.setText(str(rel))
@@ -3913,6 +5053,10 @@ class MdExploreWindow(QMainWindow):
 
             self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
             markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+            total_lines = self._count_markdown_lines(markdown_text)
+            self._document_line_counts[cache_key] = total_lines
+            self._current_document_total_lines = total_lines
+            self._sync_all_view_tab_progress()
             doc_id = self._doc_id_for_path(cache_key)
 
             # Remove stale dependency links for this document before rebuilding.
@@ -3997,7 +5141,7 @@ class MdExploreWindow(QMainWindow):
         self._prepare_preview_for_pdf_export(output_path, attempt=0)
 
     def _prepare_preview_for_pdf_export(self, output_path: Path, attempt: int) -> None:
-        """Wait for math/fonts readiness and inject print math style before export."""
+        """Wait for math/Mermaid/fonts readiness and inject print style before export."""
         js = """
 (() => {
   // Print-only math tuning to avoid cramped/squished glyph appearance in PDF.
@@ -4037,13 +5181,15 @@ class MdExploreWindow(QMainWindow):
   }
 
   if (window.__mdexploreRunClientRenderers) {
-    window.__mdexploreRunClientRenderers();
+    window.__mdexploreRunClientRenderers({ mermaidMode: "pdf" });
   }
 
   const hasMath = !!document.querySelector("mjx-container, .MathJax");
   const hasMermaid = !!document.querySelector(".mermaid");
   const mathReady = !hasMath || !!window.__mdexploreMathReady;
-  const mermaidReady = !hasMermaid || !!window.__mdexploreMermaidReady;
+  const mermaidReady =
+    !hasMermaid ||
+    (!!window.__mdexploreMermaidReady && String(window.__mdexploreMermaidPaletteMode || "") === "pdf");
   const fontsReady = !document.fonts || document.fonts.status === "loaded";
 
   return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid };
@@ -4070,7 +5216,7 @@ class MdExploreWindow(QMainWindow):
 
         if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
             if attempt == 0:
-                self.statusBar().showMessage("Waiting for math/fonts before PDF export...")
+                self.statusBar().showMessage("Waiting for math/Mermaid/fonts before PDF export...")
             QTimer.singleShot(
                 PDF_EXPORT_PRECHECK_INTERVAL_MS,
                 lambda target=output_path, tries=attempt + 1: self._prepare_preview_for_pdf_export(target, tries),
@@ -4093,9 +5239,27 @@ class MdExploreWindow(QMainWindow):
             )
         except Exception as exc:
             self._set_pdf_export_busy(False)
+            self._restore_preview_mermaid_palette()
             error_text = self._truncate_error_text(str(exc), 500)
             QMessageBox.critical(self, "PDF export failed", f"Could not start PDF rendering:\n{error_text}")
             self.statusBar().showMessage(f"PDF export failed: {error_text}", 5000)
+
+    def _restore_preview_mermaid_palette(self) -> None:
+        """Switch Mermaid back to preview palette after PDF export attempts."""
+        js = """
+(() => {
+  if (window.__mdexploreRunClientRenderers) {
+    window.__mdexploreRunClientRenderers({ mermaidMode: "auto" });
+    return true;
+  }
+  if (window.__mdexploreRunMermaidWithMode) {
+    window.__mdexploreRunMermaidWithMode("auto", false);
+    return true;
+  }
+  return false;
+})();
+"""
+        self.preview.page().runJavaScript(js)
 
     def _on_pdf_render_ready(self, output_path: Path, pdf_data) -> None:
         """Receive raw PDF bytes from WebEngine and start footer stamping."""
@@ -4106,6 +5270,7 @@ class MdExploreWindow(QMainWindow):
 
         if not raw_pdf:
             self._set_pdf_export_busy(False)
+            self._restore_preview_mermaid_palette()
             message = "Qt WebEngine returned an empty PDF payload"
             QMessageBox.critical(self, "PDF export failed", message)
             self.statusBar().showMessage(f"PDF export failed: {message}", 5000)
@@ -4127,6 +5292,7 @@ class MdExploreWindow(QMainWindow):
         """Finalize async PDF export and report result."""
         self._active_pdf_workers.discard(worker)
         self._set_pdf_export_busy(False)
+        self._restore_preview_mermaid_palette()
 
         if error_text:
             short_error = self._truncate_error_text(error_text, 500)
