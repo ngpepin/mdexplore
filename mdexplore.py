@@ -940,6 +940,32 @@ class MarkdownRenderer:
       max-width: 100%;
       height: auto;
     }}
+    @media screen and (prefers-color-scheme: dark) {{
+      .mermaid g.row-rect-even > path:first-child {{
+        fill: #2b3f5f !important;
+      }}
+      .mermaid g.row-rect-odd > path:first-child {{
+        fill: #223754 !important;
+      }}
+      .mermaid g.row-rect-even > path,
+      .mermaid g.row-rect-odd > path {{
+        stroke: #93c5fd !important;
+      }}
+      .mermaid g.label.name .nodeLabel,
+      .mermaid g.label.attribute-type .nodeLabel,
+      .mermaid g.label.attribute-name .nodeLabel,
+      .mermaid g.label.attribute-keys .nodeLabel,
+      .mermaid g.label.attribute-comment .nodeLabel,
+      .mermaid g.label.name text,
+      .mermaid g.label.attribute-type text,
+      .mermaid g.label.attribute-name text,
+      .mermaid g.label.attribute-keys text,
+      .mermaid g.label.attribute-comment text {{
+        color: #e5e7eb !important;
+        fill: #e5e7eb !important;
+        opacity: 1 !important;
+      }}
+    }}
     .mermaid-pending {{
       margin: 0.8rem 0;
       padding: 0.55rem 0.7rem;
@@ -1238,6 +1264,8 @@ class MarkdownRenderer:
             noteBkgColor: "#1f2937",
             noteTextColor: "#e5e7eb",
             noteBorderColor: "#93c5fd",
+            attributeBackgroundColorOdd: "#2b3f5f",
+            attributeBackgroundColorEven: "#223754",
             labelTextColor: "#e5e7eb",
             cScale0: "#60a5fa",
             cScale1: "#93c5fd",
@@ -1286,7 +1314,123 @@ class MarkdownRenderer:
       }};
     }};
 
-    window.__mdexploreApplyCachedMermaidSvg = async (entries) => {{
+    window.__mdexploreDetectMermaidKind = (sourceText) => {{
+      const text = String(sourceText || "");
+      if (/^\\s*erDiagram\\b/im.test(text)) {{
+        return "er";
+      }}
+      return "";
+    }};
+
+    window.__mdexploreApplyMermaidPostStyles = (block, mode = "auto") => {{
+      if (!(block instanceof HTMLElement)) {{
+        return;
+      }}
+      const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      if (normalizedMode === "pdf") {{
+        return;
+      }}
+      if (!window.__mdexploreIsDarkBackground()) {{
+        return;
+      }}
+
+      const svg = block.querySelector("svg");
+      if (!(svg instanceof SVGElement)) {{
+        return;
+      }}
+      const kind = String((block.dataset && block.dataset.mdexploreMermaidKind) || "").toLowerCase();
+      const looksLikeEr =
+        kind === "er" ||
+        !!svg.querySelector(".entityBox, .relationshipLine, .relationshipLabelBox");
+      if (!looksLikeEr) {{
+        return;
+      }}
+
+      const hardenErRowsAndLabels = () => {{
+        const evenRowFill = "#2b3f5f";
+        const oddRowFill = "#223754";
+        const strokeColor = "#93c5fd";
+        const rowLabelColor = "#e5e7eb";
+
+        const evenRowPaths = svg.querySelectorAll("g.row-rect-even > path:first-child");
+        for (const pathNode of evenRowPaths) {{
+          if (!(pathNode instanceof SVGElement)) {{
+            continue;
+          }}
+          pathNode.setAttribute("fill", evenRowFill);
+          pathNode.style.fill = evenRowFill;
+          pathNode.setAttribute("stroke", strokeColor);
+          pathNode.style.stroke = strokeColor;
+        }}
+
+        const oddRowPaths = svg.querySelectorAll("g.row-rect-odd > path:first-child");
+        for (const pathNode of oddRowPaths) {{
+          if (!(pathNode instanceof SVGElement)) {{
+            continue;
+          }}
+          pathNode.setAttribute("fill", oddRowFill);
+          pathNode.style.fill = oddRowFill;
+          pathNode.setAttribute("stroke", strokeColor);
+          pathNode.style.stroke = strokeColor;
+        }}
+
+        const rowBorderPaths = svg.querySelectorAll("g.row-rect-even > path, g.row-rect-odd > path");
+        for (const pathNode of rowBorderPaths) {{
+          if (!(pathNode instanceof SVGElement)) {{
+            continue;
+          }}
+          pathNode.setAttribute("stroke", strokeColor);
+          pathNode.style.stroke = strokeColor;
+        }}
+
+        const erLabelSelectors = [
+          "g.label.name span.nodeLabel",
+          "g.label.attribute-type span.nodeLabel",
+          "g.label.attribute-name span.nodeLabel",
+          "g.label.attribute-keys span.nodeLabel",
+          "g.label.attribute-comment span.nodeLabel",
+        ];
+        for (const selector of erLabelSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const labelNode of nodes) {{
+            if (!(labelNode instanceof HTMLElement)) {{
+              continue;
+            }}
+            labelNode.style.color = rowLabelColor;
+            labelNode.style.fill = rowLabelColor;
+            labelNode.style.opacity = "1";
+          }}
+        }}
+
+        const erTextSelectors = [
+          "g.label.name text",
+          "g.label.attribute-type text",
+          "g.label.attribute-name text",
+          "g.label.attribute-keys text",
+          "g.label.attribute-comment text",
+          "g.label.name tspan",
+          "g.label.attribute-type tspan",
+          "g.label.attribute-name tspan",
+          "g.label.attribute-keys tspan",
+          "g.label.attribute-comment tspan",
+        ];
+        for (const selector of erTextSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const textNode of nodes) {{
+            if (!(textNode instanceof SVGElement)) {{
+              continue;
+            }}
+            textNode.setAttribute("fill", rowLabelColor);
+            textNode.style.fill = rowLabelColor;
+            textNode.style.opacity = "1";
+          }}
+        }}
+      }};
+
+      hardenErRowsAndLabels();
+    }};
+
+    window.__mdexploreApplyCachedMermaidSvg = async (entries, mode = "auto") => {{
       if (!Array.isArray(entries) || entries.length === 0) {{
         return 0;
       }}
@@ -1312,6 +1456,7 @@ class MarkdownRenderer:
           block.classList.remove("mermaid-pending");
           block.classList.add("mermaid-ready");
           block.innerHTML = svgText;
+          window.__mdexploreApplyMermaidPostStyles(block, mode);
         }}
         if (index < entries.length) {{
           await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -1652,6 +1797,12 @@ class MarkdownRenderer:
             if (!sourceText) {{
               continue;
             }}
+            const mermaidKind = window.__mdexploreDetectMermaidKind(sourceText);
+            if (mermaidKind) {{
+              block.dataset.mdexploreMermaidKind = mermaidKind;
+            }} else if (block.dataset && block.dataset.mdexploreMermaidKind) {{
+              delete block.dataset.mdexploreMermaidKind;
+            }}
             if (!force && hashKey && typeof modeCache[hashKey] === "string" && modeCache[hashKey].indexOf("<svg") >= 0) {{
               block.removeAttribute("data-mdexplore-mermaid-render");
               block.classList.remove("mermaid-ready", "mermaid-error");
@@ -1666,7 +1817,7 @@ class MarkdownRenderer:
             block.textContent = sourceText;
             hasRenderTargets = true;
           }}
-          const cachedHydratePromise = window.__mdexploreApplyCachedMermaidSvg(cachedHydrateTargets);
+          const cachedHydratePromise = window.__mdexploreApplyCachedMermaidSvg(cachedHydrateTargets, normalizedMode);
           if (hasRenderTargets) {{
             const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
             mermaid.initialize(mermaidConfig);
@@ -1681,6 +1832,7 @@ class MarkdownRenderer:
               block.removeAttribute("data-mdexplore-mermaid-render");
               block.classList.remove("mermaid-pending");
               block.classList.add("mermaid-ready");
+              window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
               const hashKey = (block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
               if (!hashKey) {{
                 continue;
