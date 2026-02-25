@@ -2686,9 +2686,9 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay.setStyleSheet(
             """
             QLabel#mdexplore-restore-overlay {
-                background-color: rgba(15, 23, 42, 238);
-                color: #e2e8f0;
-                border: 1px solid #334155;
+                background-color: rgba(147, 197, 253, 238);
+                color: #000000;
+                border: 1px solid #60a5fa;
                 border-radius: 10px;
                 padding: 10px 14px;
                 font-weight: 600;
