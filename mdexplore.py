@@ -50,6 +50,14 @@ CONFIG_FILE_NAME = ".mdexplore.cfg"
 SEARCH_CLOSE_WORD_GAP = 50
 PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 20
 PDF_EXPORT_PRECHECK_INTERVAL_MS = 140
+MERMAID_CACHE_JSON_TOKEN = "__MDEXPLORE_MERMAID_CACHE_JSON__"
+MERMAID_SVG_CACHE_MAX_ENTRIES = 256
+MERMAID_SVG_MAX_CHARS = 250_000
+PLANTUML_RESTORE_BATCH_SIZE = 2
+MERMAID_CACHE_RESTORE_BATCH_SIZE = 2
+RESTORE_OVERLAY_TIMEOUT_SECONDS = 25.0
+RESTORE_OVERLAY_SHOW_DELAY_MS = 350
+RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 3.5
 
 
 def _config_file_path() -> Path:
@@ -586,9 +594,11 @@ class MarkdownRenderer:
                 line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
 
             if info == "mermaid":
+                prepared_source = self._prepare_mermaid_source(code)
+                mermaid_hash = hashlib.sha1(prepared_source.encode("utf-8", errors="replace")).hexdigest()
                 return (
                     f'<div class="mdexplore-fence"{line_attrs}>'
-                    f'<div class="mermaid">\n{html.escape(code)}\n</div>'
+                    f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}">\n{html.escape(code)}\n</div>'
                     "</div>\n"
                 )
 
@@ -822,6 +832,11 @@ class MarkdownRenderer:
         # Support shorthand fenced blocks that omit @startuml/@enduml.
         return f"@startuml\n{normalized}\n@enduml\n"
 
+    @staticmethod
+    def _prepare_mermaid_source(code: str) -> str:
+        """Normalize Mermaid source for stable hashing/caching."""
+        return code.replace("\r\n", "\n").strip("\n")
+
     def render_document(self, markdown_text: str, title: str, plantuml_resolver=None) -> str:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
@@ -831,6 +846,7 @@ class MarkdownRenderer:
             env["plantuml_index"] = 0
         body = self._md.render(markdown_text, env)
         escaped_title = html.escape(title)
+        mermaid_cache_token = MERMAID_CACHE_JSON_TOKEN
         mathjax_sources_json = json.dumps(self._mathjax_script_sources())
         mermaid_sources_json = json.dumps(self._mermaid_script_sources())
         return f"""<!doctype html>
@@ -923,6 +939,14 @@ class MarkdownRenderer:
     .mermaid svg {{
       max-width: 100%;
       height: auto;
+    }}
+    .mermaid-pending {{
+      margin: 0.8rem 0;
+      padding: 0.55rem 0.7rem;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      font-style: italic;
+      opacity: 0.9;
     }}
     img.plantuml {{
       display: block;
@@ -1067,6 +1091,18 @@ class MarkdownRenderer:
     window.__mdexploreMermaidPaletteMode = "auto";
     window.__mdexploreMermaidRenderPromise = null;
     window.__mdexploreMermaidRenderMode = "";
+    window.__mdexploreMermaidSvgCacheByMode = (() => {{
+      try {{
+        const seedText = {json.dumps(mermaid_cache_token)};
+        const parsed = JSON.parse(seedText);
+        if (parsed && typeof parsed === "object") {{
+          return parsed;
+        }}
+      }} catch (_error) {{
+        // Seed parsing is best-effort.
+      }}
+      return {{}};
+    }})();
 
     window.__mdexploreLoadMathJaxScript = () => {{
       if (window.__mdexploreMathJaxLoadPromise) {{
@@ -1248,6 +1284,40 @@ class MarkdownRenderer:
           labelTextColor: "#111827",
         }},
       }};
+    }};
+
+    window.__mdexploreApplyCachedMermaidSvg = async (entries) => {{
+      if (!Array.isArray(entries) || entries.length === 0) {{
+        return 0;
+      }}
+      const batchSize = Math.max(1, {MERMAID_CACHE_RESTORE_BATCH_SIZE});
+      let index = 0;
+      while (index < entries.length) {{
+        const end = Math.min(entries.length, index + batchSize);
+        for (; index < end; index += 1) {{
+          const item = entries[index];
+          if (!item || !(item.block instanceof HTMLElement)) {{
+            continue;
+          }}
+          const svgText = typeof item.svg === "string" ? item.svg : "";
+          const block = item.block;
+          if (svgText.indexOf("<svg") < 0) {{
+            block.classList.remove("mermaid-pending");
+            block.classList.add("mermaid-error");
+            block.textContent = "Mermaid render failed: cached SVG missing";
+            continue;
+          }}
+          block.removeAttribute("data-processed");
+          block.removeAttribute("data-mdexplore-mermaid-render");
+          block.classList.remove("mermaid-pending");
+          block.classList.add("mermaid-ready");
+          block.innerHTML = svgText;
+        }}
+        if (index < entries.length) {{
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }}
+      }}
+      return entries.length;
     }};
 
     window.__mdexploreTransformCallouts = () => {{
@@ -1553,11 +1623,24 @@ class MarkdownRenderer:
           if (!loaded || !window.mermaid) {{
             throw new Error("Mermaid script failed to load from local/CDN sources");
           }}
+          if (!window.__mdexploreMermaidSvgCacheByMode || typeof window.__mdexploreMermaidSvgCacheByMode !== "object") {{
+            window.__mdexploreMermaidSvgCacheByMode = {{}};
+          }}
+          if (
+            !window.__mdexploreMermaidSvgCacheByMode[normalizedMode] ||
+            typeof window.__mdexploreMermaidSvgCacheByMode[normalizedMode] !== "object"
+          ) {{
+            window.__mdexploreMermaidSvgCacheByMode[normalizedMode] = {{}};
+          }}
+          const modeCache = window.__mdexploreMermaidSvgCacheByMode[normalizedMode];
           const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
+          let hasRenderTargets = false;
+          const cachedHydrateTargets = [];
           for (const block of mermaidBlocks) {{
             if (!(block instanceof HTMLElement)) {{
               continue;
             }}
+            const hashKey = (block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
             const existingSource = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
             if (!existingSource) {{
               const rawSource = (block.textContent || "").trim();
@@ -1569,12 +1652,53 @@ class MarkdownRenderer:
             if (!sourceText) {{
               continue;
             }}
+            if (!force && hashKey && typeof modeCache[hashKey] === "string" && modeCache[hashKey].indexOf("<svg") >= 0) {{
+              block.removeAttribute("data-mdexplore-mermaid-render");
+              block.classList.remove("mermaid-ready", "mermaid-error");
+              block.classList.add("mermaid-pending");
+              block.textContent = "Mermaid rendering...";
+              cachedHydrateTargets.push({{ block, svg: modeCache[hashKey] }});
+              continue;
+            }}
             block.removeAttribute("data-processed");
+            block.classList.remove("mermaid-ready", "mermaid-error", "mermaid-pending");
+            block.setAttribute("data-mdexplore-mermaid-render", "1");
             block.textContent = sourceText;
+            hasRenderTargets = true;
           }}
-          const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
-          mermaid.initialize(mermaidConfig);
-          await mermaid.run({{ querySelector: '.mermaid' }});
+          const cachedHydratePromise = window.__mdexploreApplyCachedMermaidSvg(cachedHydrateTargets);
+          if (hasRenderTargets) {{
+            const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
+            mermaid.initialize(mermaidConfig);
+            await mermaid.run({{ querySelector: '.mermaid[data-mdexplore-mermaid-render="1"]' }});
+            for (const block of mermaidBlocks) {{
+              if (!(block instanceof HTMLElement)) {{
+                continue;
+              }}
+              if (block.getAttribute("data-mdexplore-mermaid-render") !== "1") {{
+                continue;
+              }}
+              block.removeAttribute("data-mdexplore-mermaid-render");
+              block.classList.remove("mermaid-pending");
+              block.classList.add("mermaid-ready");
+              const hashKey = (block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
+              if (!hashKey) {{
+                continue;
+              }}
+              const svgNode = block.querySelector("svg");
+              if (!svgNode || typeof svgNode.outerHTML !== "string") {{
+                continue;
+              }}
+              modeCache[hashKey] = svgNode.outerHTML;
+            }}
+          }}
+          await cachedHydratePromise;
+          if (!hasRenderTargets && cachedHydrateTargets.length === 0) {{
+            window.__mdexploreMermaidReady = true;
+            window.__mdexploreMermaidPaletteMode = normalizedMode;
+            return true;
+          }}
+          window.__mdexploreMermaidSvgCacheByMode[normalizedMode] = modeCache;
           window.__mdexploreMermaidReady = true;
           window.__mdexploreMermaidPaletteMode = normalizedMode;
         }} catch (error) {{
@@ -2152,7 +2276,9 @@ class MdExploreWindow(QMainWindow):
         self._render_request_id = 0
         self._active_render_workers: set[PreviewRenderWorker] = set()
         self._plantuml_pool = QThreadPool(self)
-        self._plantuml_pool.setMaxThreadCount(2)
+        # Let independent PlantUML blocks render concurrently; keep a modest
+        # upper bound to avoid CPU saturation on large documents.
+        self._plantuml_pool.setMaxThreadCount(max(2, min(6, os.cpu_count() or 2)))
         self._pdf_pool = QThreadPool(self)
         self._pdf_pool.setMaxThreadCount(1)
         self._active_pdf_workers: set[PdfExportWorker] = set()
@@ -2179,6 +2305,7 @@ class MdExploreWindow(QMainWindow):
         self._next_view_id = 1
         self._next_view_sequence = 1
         self._next_tab_color_index = 0
+        self._mermaid_svg_cache_by_mode: dict[str, dict[str, str]] = {"auto": {}, "pdf": {}}
         # In-memory per-document tab/view sessions for this app run only.
         self._document_view_sessions: dict[str, dict] = {}
         self._document_line_counts: dict[str, int] = {}
@@ -2203,6 +2330,23 @@ class MdExploreWindow(QMainWindow):
         self._file_change_watch_timer.setInterval(1200)
         self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
         self._file_change_watch_timer.start()
+        # Centered overlay for long-running preview restore operations.
+        self._restore_overlay_expected_key: str | None = None
+        self._restore_overlay_needs_math = False
+        self._restore_overlay_needs_mermaid = False
+        self._restore_overlay_needs_plantuml = False
+        self._restore_overlay_deadline = 0.0
+        self._restore_overlay_probe_inflight = False
+        self._restore_overlay_probe_started_at = 0.0
+        self._restore_overlay_pending_show = False
+        self._restore_overlay_shown_at = 0.0
+        self._restore_overlay_poll_timer = QTimer(self)
+        self._restore_overlay_poll_timer.setInterval(170)
+        self._restore_overlay_poll_timer.timeout.connect(self._check_restore_overlay_progress)
+        self._restore_overlay_show_timer = QTimer(self)
+        self._restore_overlay_show_timer.setSingleShot(True)
+        self._restore_overlay_show_timer.setInterval(RESTORE_OVERLAY_SHOW_DELAY_MS)
+        self._restore_overlay_show_timer.timeout.connect(self._show_restore_overlay_now)
         # Keep user-adjusted tree/preview pane widths for this app run.
         self._session_splitter_sizes: list[int] | None = None
         self._initial_split_applied = False
@@ -2380,6 +2524,27 @@ class MdExploreWindow(QMainWindow):
         layout.addWidget(self.splitter, 1)
 
         self.setCentralWidget(central)
+        self._restore_overlay = QLabel(
+            "One moment please...",
+            self,
+        )
+        self._restore_overlay.setObjectName("mdexplore-restore-overlay")
+        self._restore_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._restore_overlay.setWordWrap(True)
+        self._restore_overlay.setStyleSheet(
+            """
+            QLabel#mdexplore-restore-overlay {
+                background-color: rgba(15, 23, 42, 238);
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 10px;
+                padding: 10px 14px;
+                font-weight: 600;
+            }
+            """
+        )
+        self._restore_overlay.hide()
+        self._position_restore_overlay()
         self.statusBar().showMessage(self._default_status_text)
         # Root is initialized after widgets exist so view/model indexes are valid.
         self._set_root_directory(self.root)
@@ -2393,6 +2558,206 @@ class MdExploreWindow(QMainWindow):
         refresh_action.setShortcut("F5")
         refresh_action.triggered.connect(self._refresh_directory_view)
         self.addAction(refresh_action)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Keep centered overlays aligned when the main window is resized."""
+        super().resizeEvent(event)
+        self._position_restore_overlay()
+
+    def _position_restore_overlay(self) -> None:
+        """Center the restore popup label within the visible window area."""
+        if not hasattr(self, "_restore_overlay"):
+            return
+        available_width = max(320, self.width() - 80)
+        target_width = min(760, available_width)
+        self._restore_overlay.setFixedWidth(target_width)
+        self._restore_overlay.adjustSize()
+        x = max(20, (self.width() - self._restore_overlay.width()) // 2)
+        y = max(20, (self.height() - self._restore_overlay.height()) // 2)
+        self._restore_overlay.move(x, y)
+
+    @staticmethod
+    def _detect_special_features_from_markdown(markdown_text: str) -> tuple[bool, bool, bool]:
+        """Return (has_math, has_mermaid, has_plantuml) from raw markdown."""
+        text = markdown_text or ""
+        has_mermaid = bool(re.search(r"(?im)^\s*```+\s*mermaid\b", text))
+        has_plantuml = bool(re.search(r"(?im)^\s*```+\s*(?:plantuml|puml|uml)\b", text))
+        has_math = bool(
+            re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", text)
+            or re.search(r"(?<!\\)\$(?!\$)(?:[^$\n]|\\\$){1,400}?(?<!\\)\$", text)
+        )
+        return has_math, has_mermaid, has_plantuml
+
+    @staticmethod
+    def _detect_special_features_from_html(html_doc: str) -> tuple[bool, bool, bool]:
+        """Return (has_math, has_mermaid, has_plantuml) from rendered HTML."""
+        text = html_doc or ""
+        has_mermaid = 'class="mermaid"' in text
+        has_plantuml = ("plantuml-async" in text) or ('class="plantuml"' in text)
+        has_math = (
+            "mdexplore-math-block" in text
+            or bool(re.search(r"(?<!\\)\$(?!\$)(?:[^$\n]|\\\$){1,400}?(?<!\\)\$", text))
+            or bool(re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", text))
+        )
+        return has_math, has_mermaid, has_plantuml
+
+    def _detect_special_features_for_path(
+        self,
+        path: Path,
+        *,
+        cached_html: str | None = None,
+    ) -> tuple[bool, bool, bool]:
+        """Detect rich-render features from source markdown, with HTML fallback."""
+        try:
+            markdown_text = path.read_text(encoding="utf-8", errors="replace")
+            return self._detect_special_features_from_markdown(markdown_text)
+        except Exception:
+            if cached_html is not None:
+                return self._detect_special_features_from_html(cached_html)
+            return (False, False, False)
+
+    def _begin_restore_overlay_monitor(
+        self,
+        expected_key: str,
+        *,
+        needs_math: bool,
+        needs_mermaid: bool,
+        needs_plantuml: bool,
+        phase: str,
+    ) -> None:
+        """Start delayed restore popup and readiness polling for rich previews."""
+        if phase.strip().lower() != "restoring":
+            # Requested behavior: do not show restore popup for fresh renders.
+            self._stop_restore_overlay_monitor()
+            return
+        if not (needs_math or needs_mermaid or needs_plantuml):
+            self._stop_restore_overlay_monitor()
+            return
+
+        self._restore_overlay_expected_key = expected_key
+        self._restore_overlay_needs_math = bool(needs_math)
+        self._restore_overlay_needs_mermaid = bool(needs_mermaid)
+        self._restore_overlay_needs_plantuml = bool(needs_plantuml)
+        self._restore_overlay_deadline = time.monotonic() + RESTORE_OVERLAY_TIMEOUT_SECONDS
+        self._restore_overlay_probe_inflight = False
+        self._restore_overlay_probe_started_at = 0.0
+        self._restore_overlay_pending_show = True
+        self._restore_overlay_shown_at = 0.0
+        self._restore_overlay.setText("One moment please... restoring math/diagrams")
+        self._position_restore_overlay()
+        self._restore_overlay_show_timer.start(RESTORE_OVERLAY_SHOW_DELAY_MS)
+        self._restore_overlay_poll_timer.start()
+        self._check_restore_overlay_progress()
+
+    def _show_restore_overlay_now(self) -> None:
+        """Show centered popup after delay if work is still in-flight."""
+        if not self._restore_overlay_pending_show:
+            return
+        expected_key = self._restore_overlay_expected_key
+        if not expected_key or self._current_preview_path_key() != expected_key:
+            return
+        self._position_restore_overlay()
+        self._restore_overlay_shown_at = time.monotonic()
+        self._restore_overlay.raise_()
+        self._restore_overlay.show()
+
+    def _stop_restore_overlay_monitor(self) -> None:
+        """Stop restore polling and hide the centered progress popup."""
+        self._restore_overlay_expected_key = None
+        self._restore_overlay_needs_math = False
+        self._restore_overlay_needs_mermaid = False
+        self._restore_overlay_needs_plantuml = False
+        self._restore_overlay_deadline = 0.0
+        self._restore_overlay_probe_inflight = False
+        self._restore_overlay_probe_started_at = 0.0
+        self._restore_overlay_pending_show = False
+        self._restore_overlay_shown_at = 0.0
+        self._restore_overlay_show_timer.stop()
+        self._restore_overlay_poll_timer.stop()
+        if hasattr(self, "_restore_overlay"):
+            self._restore_overlay.hide()
+
+    def _check_restore_overlay_progress(self) -> None:
+        """Poll current preview restore readiness and dismiss popup when ready."""
+        expected_key = self._restore_overlay_expected_key
+        if not expected_key:
+            self._stop_restore_overlay_monitor()
+            return
+        if self._current_preview_path_key() != expected_key:
+            self._stop_restore_overlay_monitor()
+            return
+        if time.monotonic() >= self._restore_overlay_deadline:
+            self._stop_restore_overlay_monitor()
+            return
+        if self._restore_overlay_shown_at > 0.0:
+            if (time.monotonic() - self._restore_overlay_shown_at) >= RESTORE_OVERLAY_MAX_VISIBLE_SECONDS:
+                self._stop_restore_overlay_monitor()
+                return
+
+        plantuml_ready = True
+        if self._restore_overlay_needs_plantuml:
+            progress = self._preview_plantuml_progress()
+            pending = bool(progress and progress[1] > 0)
+            plantuml_ready = not pending
+
+        needs_js_probe = self._restore_overlay_needs_math or self._restore_overlay_needs_mermaid
+        if not needs_js_probe:
+            if plantuml_ready:
+                self._stop_restore_overlay_monitor()
+            return
+        if self._restore_overlay_probe_inflight:
+            if (time.monotonic() - self._restore_overlay_probe_started_at) < 1.8:
+                return
+            # A prior JS callback can be dropped during rapid page switches.
+            # Clear stale in-flight state and re-issue probe.
+            self._restore_overlay_probe_inflight = False
+            self._restore_overlay_probe_started_at = 0.0
+
+        self._restore_overlay_probe_inflight = True
+        self._restore_overlay_probe_started_at = time.monotonic()
+        js = """
+(() => {
+  const hasMathNodes = !!document.querySelector(".mdexplore-math-block, mjx-container, .MathJax");
+  const hasMermaidNodes = !!document.querySelector(".mermaid");
+  return {
+    hasMathNodes,
+    hasMermaidNodes,
+    mathReady: !hasMathNodes || !!window.__mdexploreMathReady,
+    mermaidReady: !hasMermaidNodes || !!window.__mdexploreMermaidReady
+  };
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, key=expected_key, plantuml_ok=plantuml_ready: self._on_restore_overlay_probe_result(
+                key,
+                plantuml_ok,
+                result,
+            ),
+        )
+
+    def _on_restore_overlay_probe_result(self, expected_key: str, plantuml_ready: bool, result) -> None:
+        """Handle JS readiness probe for math/mermaid restore completion."""
+        self._restore_overlay_probe_inflight = False
+        self._restore_overlay_probe_started_at = 0.0
+        if self._restore_overlay_expected_key != expected_key:
+            return
+        if self._current_preview_path_key() != expected_key:
+            self._stop_restore_overlay_monitor()
+            return
+        if time.monotonic() >= self._restore_overlay_deadline:
+            self._stop_restore_overlay_monitor()
+            return
+
+        math_ready = True
+        mermaid_ready = True
+        if self._restore_overlay_needs_math:
+            math_ready = bool(isinstance(result, dict) and result.get("mathReady"))
+        if self._restore_overlay_needs_mermaid:
+            mermaid_ready = bool(isinstance(result, dict) and result.get("mermaidReady"))
+
+        if math_ready and mermaid_ready and plantuml_ready:
+            self._stop_restore_overlay_monitor()
 
     @staticmethod
     def _view_tab_label_for_line(line_number: int) -> str:
@@ -2557,6 +2922,69 @@ class MdExploreWindow(QMainWindow):
             "next_view_sequence": next_sequence,
             "next_tab_color_index": next_color_index,
         }
+
+    def _serialized_mermaid_cache_json(self) -> str:
+        """Serialize in-memory Mermaid SVG cache for template injection."""
+        try:
+            return json.dumps(self._mermaid_svg_cache_by_mode, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    def _inject_mermaid_cache_seed(self, html_doc: str) -> str:
+        """Inject current Mermaid cache payload into HTML template seed token."""
+        token_literal = json.dumps(MERMAID_CACHE_JSON_TOKEN)
+        cache_literal = json.dumps(self._serialized_mermaid_cache_json())
+        if token_literal not in html_doc:
+            return html_doc
+        return html_doc.replace(token_literal, cache_literal, 1)
+
+    def _schedule_mermaid_cache_harvest_for(self, expected_key: str) -> None:
+        """Collect Mermaid SVG cache snapshots after client rendering settles."""
+        for delay_ms in (380, 980, 2100):
+            QTimer.singleShot(delay_ms, lambda key=expected_key: self._harvest_mermaid_cache_for(key))
+
+    def _harvest_mermaid_cache_for(self, expected_key: str) -> None:
+        """Fetch Mermaid SVG cache snapshot from active preview page."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        js = """
+(() => {
+  const cache = window.__mdexploreMermaidSvgCacheByMode;
+  if (!cache || typeof cache !== "object") {
+    return {};
+  }
+  return cache;
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, key=expected_key: self._on_mermaid_cache_snapshot(key, result),
+        )
+
+    def _on_mermaid_cache_snapshot(self, expected_key: str, result) -> None:
+        """Merge Mermaid SVG cache snapshot from JS into Python process cache."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        if not isinstance(result, dict):
+            return
+        for mode_name in ("auto", "pdf"):
+            mode_payload = result.get(mode_name)
+            if not isinstance(mode_payload, dict):
+                continue
+            target = self._mermaid_svg_cache_by_mode.setdefault(mode_name, {})
+            for raw_hash, raw_svg in mode_payload.items():
+                if not isinstance(raw_hash, str) or not isinstance(raw_svg, str):
+                    continue
+                hash_key = raw_hash.strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", hash_key):
+                    continue
+                if "<svg" not in raw_svg.casefold():
+                    continue
+                if len(raw_svg) > MERMAID_SVG_MAX_CHARS:
+                    continue
+                target[hash_key] = raw_svg
+            while len(target) > MERMAID_SVG_CACHE_MAX_ENTRIES:
+                target.pop(next(iter(target)))
 
     def _restore_document_view_session(self, path_key: str) -> bool:
         """Restore tab/view state for one document if a session snapshot exists."""
@@ -3050,6 +3478,7 @@ class MdExploreWindow(QMainWindow):
 
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
+        self._stop_restore_overlay_monitor()
         self._capture_current_preview_scroll(force=True)
         self._save_document_view_session()
         self._capture_splitter_sizes_for_session()
@@ -3083,10 +3512,12 @@ class MdExploreWindow(QMainWindow):
     def _on_preview_load_finished(self, ok: bool) -> None:
         """Apply deferred in-preview highlighting after a page finishes loading."""
         if not ok:
+            self._stop_restore_overlay_monitor()
             self.statusBar().showMessage("Preview load failed", 5000)
             return
         current_key = self._current_preview_path_key()
         if current_key is None:
+            self._stop_restore_overlay_monitor()
             return
         # Kick client-side renderer startup now and a bit later to tolerate
         # delayed external script availability (MathJax/Mermaid).
@@ -3096,6 +3527,7 @@ class MdExploreWindow(QMainWindow):
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
+        self._schedule_mermaid_cache_harvest_for(current_key)
         has_saved_scroll = self._has_saved_scroll_for_current_preview()
         if self._pending_preview_search_terms:
             # Search normally scrolls to first hit. If this file has a saved
@@ -3119,6 +3551,7 @@ class MdExploreWindow(QMainWindow):
             self._scroll_restore_block_until = 0.0
         self._request_active_view_top_line_update(force=True)
         self._show_preview_progress_status()
+        self._check_restore_overlay_progress()
 
     def _trigger_client_renderers_for(self, expected_key: str) -> None:
         """Run in-page renderer helpers only if the same preview is still active."""
@@ -3195,6 +3628,7 @@ class MdExploreWindow(QMainWindow):
 
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         """Refresh tree contents to detect newly created/deleted markdown files."""
+        self._stop_restore_overlay_monitor()
         self.statusBar().showMessage("Refreshing directory view...")
         selected_path: Path | None = None
         current_index = self.tree.currentIndex()
@@ -3228,6 +3662,7 @@ class MdExploreWindow(QMainWindow):
                 current_exists = False
             if not current_exists:
                 self.current_file = None
+                self._stop_restore_overlay_monitor()
                 self._reset_document_views()
                 self._clear_current_preview_signature()
                 self.path_label.setText("Select a markdown file")
@@ -4600,6 +5035,7 @@ class MdExploreWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._stop_restore_overlay_monitor()
         self._persist_effective_root()
         super().closeEvent(event)
 
@@ -4683,6 +5119,9 @@ class MdExploreWindow(QMainWindow):
         )
 
     def _on_tree_selection_changed(self, current, _previous) -> None:
+        # Any selection transition means the user is leaving the previous
+        # document/scope, so immediately clear restore UI state.
+        self._stop_restore_overlay_monitor()
         path = Path(self.model.filePath(current))
         self._update_window_title()
         if path.is_dir():
@@ -4739,7 +5178,7 @@ class MdExploreWindow(QMainWindow):
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
-        self.preview.setHtml(html_doc, base_url)
+        self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc), base_url)
 
     @staticmethod
     def _doc_id_for_path(path_key: str) -> str:
@@ -4946,6 +5385,7 @@ class MdExploreWindow(QMainWindow):
             current_placeholders = self._plantuml_placeholders_by_doc.get(current_key, {})
             if hash_key in current_placeholders:
                 self._show_preview_progress_status()
+                self._check_restore_overlay_progress()
 
     def _apply_plantuml_result_to_current_preview(self, hash_key: str) -> None:
         if self.current_file is None:
@@ -5001,12 +5441,32 @@ class MdExploreWindow(QMainWindow):
             current_key = str(self.current_file)
 
         placeholders_by_hash = self._plantuml_placeholders_by_doc.get(current_key, {})
+        ready_hashes: list[str] = []
         for hash_key in placeholders_by_hash:
-            self._apply_plantuml_result_to_current_preview(hash_key)
+            status, _payload = self._plantuml_results.get(hash_key, ("pending", ""))
+            if status in {"done", "error"}:
+                ready_hashes.append(hash_key)
+
+        if not ready_hashes:
+            return
+
+        batch_size = max(1, int(PLANTUML_RESTORE_BATCH_SIZE))
+
+        def apply_batch(start_index: int) -> None:
+            if self._current_preview_path_key() != current_key:
+                return
+            end_index = min(len(ready_hashes), start_index + batch_size)
+            for hash_key in ready_hashes[start_index:end_index]:
+                self._apply_plantuml_result_to_current_preview(hash_key)
+            if end_index < len(ready_hashes):
+                QTimer.singleShot(0, lambda next_index=end_index: apply_batch(next_index))
+
+        apply_batch(0)
 
     def _load_preview(self, path: Path) -> None:
         # Render markdown quickly with async PlantUML placeholders so the
         # document appears immediately while diagrams render in background.
+        self._stop_restore_overlay_monitor()
         previous_path_key = self._current_preview_path_key()
         next_path_key = self._path_key(path)
         self._capture_current_preview_scroll(force=True)
@@ -5025,6 +5485,9 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
+        # Explicitly clear any stale overlay at document entry before
+        # considering whether the new document needs one.
+        self._stop_restore_overlay_monitor()
         self._current_document_total_lines = max(1, int(self._document_line_counts.get(next_path_key, 1)))
         self._sync_all_view_tab_progress()
         self._update_view_tabs_visibility()
@@ -5047,8 +5510,19 @@ class MdExploreWindow(QMainWindow):
             self._set_current_preview_signature(cache_key, int(stat.st_mtime_ns), int(stat.st_size))
             cached = self.cache.get(cache_key)
             if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+                has_math, has_mermaid, has_plantuml = self._detect_special_features_for_path(
+                    resolved,
+                    cached_html=cached[2],
+                )
+                self._begin_restore_overlay_monitor(
+                    cache_key,
+                    needs_math=has_math,
+                    needs_mermaid=has_mermaid,
+                    needs_plantuml=has_plantuml,
+                    phase="restoring",
+                )
                 self.statusBar().showMessage(f"Using cached preview: {resolved.name}...")
-                self.preview.setHtml(cached[2], base_url)
+                self.preview.setHtml(self._inject_mermaid_cache_seed(cached[2]), base_url)
                 return
 
             self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
@@ -5081,18 +5555,20 @@ class MdExploreWindow(QMainWindow):
                 self._plantuml_docs_by_hash.setdefault(hash_key, set()).add(cache_key)
 
                 status, payload = self._plantuml_results.get(hash_key, ("pending", ""))
-                if status in {"done", "error"}:
-                    return self._plantuml_block_html(placeholder_id, line_attrs, status, payload)
-
-                self._ensure_plantuml_render_started(hash_key, prepared_code)
+                if status not in {"done", "error"}:
+                    self._ensure_plantuml_render_started(hash_key, prepared_code)
+                # Always emit a lightweight placeholder first so file restores
+                # are immediate; ready/error SVG payloads are patched in after
+                # the page mounts.
                 return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "")
 
             html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
             self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
-            self.preview.setHtml(html_doc, base_url)
+            self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc), base_url)
         except Exception as exc:
+            self._stop_restore_overlay_monitor()
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
             self.preview.setHtml(
                 self._placeholder_html(f"Could not render preview for {path.name}: {exc}"),
@@ -5150,6 +5626,63 @@ class MdExploreWindow(QMainWindow):
     style.id = "__mdexplore_pdf_math_style";
     style.textContent = `
 @media print {
+  @page {
+    size: portrait;
+  }
+  @page mdexploreLandscape {
+    size: landscape;
+  }
+  .mdexplore-print-heading-anchor {
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .mdexplore-print-heading-landscape {
+    page: mdexploreLandscape;
+  }
+  .mdexplore-fence.mdexplore-print-with-heading {
+    break-before: avoid-page;
+    page-break-before: avoid;
+  }
+  .mdexplore-fence.mdexplore-print-keep {
+    break-inside: avoid-page !important;
+    page-break-inside: avoid !important;
+  }
+  .mdexplore-fence.mdexplore-print-landscape-page {
+    page: mdexploreLandscape;
+    break-before: page;
+    page-break-before: always;
+    break-after: page;
+    page-break-after: always;
+  }
+  .mdexplore-fence.mdexplore-print-landscape-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+  .mdexplore-fence.mdexplore-print-keep .mermaid,
+  .mdexplore-fence.mdexplore-print-keep img.plantuml,
+  .mdexplore-fence.mdexplore-print-keep .mermaid svg {
+    break-inside: avoid-page !important;
+    page-break-inside: avoid !important;
+  }
+  .mdexplore-fence.mdexplore-print-allow-break {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+  .mdexplore-fence img.plantuml,
+  .mdexplore-fence .mermaid svg {
+    display: block;
+    max-width: 100% !important;
+    height: auto !important;
+  }
+  .mdexplore-fence.mdexplore-print-keep img.plantuml,
+  .mdexplore-fence.mdexplore-print-keep .mermaid svg {
+    max-height: var(--mdexplore-print-diagram-max-height, 86vh) !important;
+    object-fit: contain;
+  }
+  .mdexplore-fence.mdexplore-print-allow-break img.plantuml,
+  .mdexplore-fence.mdexplore-print-allow-break .mermaid svg {
+    max-height: none !important;
+  }
   mjx-container[jax="SVG"] {
     font-size: 1.08em !important;
     text-rendering: geometricPrecision;
@@ -5184,6 +5717,207 @@ class MdExploreWindow(QMainWindow):
     window.__mdexploreRunClientRenderers({ mermaidMode: "pdf" });
   }
 
+  const markDiagramPrintLayout = () => {
+    const HEADING_TO_DIAGRAM_GAP_PX = 16;
+    const MIN_KEEP_SHRINK_RATIO = 0.72;
+    const viewportWidth =
+      window.innerWidth ||
+      document.documentElement.clientWidth ||
+      1400;
+    const viewportHeight =
+      window.innerHeight ||
+      document.documentElement.clientHeight ||
+      1100;
+    const printableWidthPortrait = Math.max(320, viewportWidth - 120);
+    const printableHeightPortrait = Math.max(320, viewportHeight - 170);
+    const longestEdge = Math.max(viewportWidth, viewportHeight);
+    const shortestEdge = Math.max(420, Math.min(viewportWidth, viewportHeight));
+    const printableWidthLandscape = Math.max(printableWidthPortrait, longestEdge - 120);
+    const printableHeightLandscape = Math.max(260, shortestEdge - 170);
+    let diagramCount = 0;
+    let keepCount = 0;
+    let allowBreakCount = 0;
+    let landscapeCount = 0;
+
+    const isSpacerElement = (element) => {
+      if (!(element instanceof HTMLElement)) {
+        return false;
+      }
+      if (element.tagName === "BR") {
+        return true;
+      }
+      if (element.tagName === "P") {
+        const text = String(element.textContent || "").trim();
+        if (text.length > 0) {
+          return false;
+        }
+        const nonBreakChildren = Array.from(element.children).filter(
+          (child) => !(child instanceof HTMLBRElement),
+        );
+        return nonBreakChildren.length === 0;
+      }
+      return false;
+    };
+
+    const previousMeaningfulElement = (start) => {
+      let node = start.previousSibling;
+      while (node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (String(node.textContent || "").trim().length === 0) {
+            node = node.previousSibling;
+            continue;
+          }
+          return null;
+        }
+        if (node.nodeType === Node.COMMENT_NODE) {
+          node = node.previousSibling;
+          continue;
+        }
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const element = node;
+          if (isSpacerElement(element)) {
+            node = node.previousSibling;
+            continue;
+          }
+          return element instanceof HTMLElement ? element : null;
+        }
+        node = node.previousSibling;
+      }
+      return null;
+    };
+
+    const headingBeforeFence = (fence) => {
+      const candidate = previousMeaningfulElement(fence);
+      if (!(candidate instanceof HTMLElement)) {
+        return null;
+      }
+      return /^H[1-6]$/.test(candidate.tagName) ? candidate : null;
+    };
+
+    const parseLength = (value) => {
+      if (!value) return 0;
+      const parsed = Number.parseFloat(String(value));
+      return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+    };
+
+    const intrinsicDiagramWidth = (fence, measuredWidth) => {
+      const svg = fence.querySelector("svg");
+      if (svg instanceof SVGElement) {
+        const viewBox = String(svg.getAttribute("viewBox") || "").trim();
+        if (viewBox) {
+          const parts = viewBox.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+          if (parts.length === 4 && parts.every((num) => Number.isFinite(num))) {
+            const width = Math.abs(parts[2]);
+            if (width > 0) {
+              return width;
+            }
+          }
+        }
+        const svgWidth = parseLength(svg.getAttribute("width"));
+        if (svgWidth > 0) {
+          return svgWidth;
+        }
+      }
+
+      const plantImg = fence.querySelector("img.plantuml");
+      if (plantImg instanceof HTMLImageElement) {
+        if (Number.isFinite(plantImg.naturalWidth) && plantImg.naturalWidth > 0) {
+          return Number(plantImg.naturalWidth);
+        }
+        const imgWidth = parseLength(plantImg.getAttribute("width"));
+        if (imgWidth > 0) {
+          return imgWidth;
+        }
+      }
+
+      return measuredWidth;
+    };
+
+    for (const heading of Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))) {
+      if (heading instanceof HTMLElement) {
+        heading.classList.remove("mdexplore-print-heading-anchor", "mdexplore-print-heading-landscape");
+      }
+    }
+
+    const fences = Array.from(document.querySelectorAll(".mdexplore-fence"));
+    for (const fence of fences) {
+      if (!(fence instanceof HTMLElement)) {
+        continue;
+      }
+      const hasPlantUml = !!fence.querySelector("img.plantuml");
+      const hasMermaid = !!fence.querySelector(".mermaid");
+      if (!hasPlantUml && !hasMermaid) {
+        continue;
+      }
+      diagramCount += 1;
+      fence.classList.remove(
+        "mdexplore-print-keep",
+        "mdexplore-print-allow-break",
+        "mdexplore-print-landscape-page",
+        "mdexplore-print-with-heading",
+      );
+      fence.style.removeProperty("--mdexplore-print-diagram-max-height");
+      const rect = fence.getBoundingClientRect();
+      const measuredWidth = Math.max(1, rect.width || 0, fence.scrollWidth || 0);
+      const measuredHeight = Math.max(1, rect.height || 0, fence.scrollHeight || 0);
+      const intrinsicWidth = intrinsicDiagramWidth(fence, measuredWidth);
+      const heading = headingBeforeFence(fence);
+      const headingHeight =
+        heading instanceof HTMLElement
+          ? Math.max(0, heading.getBoundingClientRect().height || heading.scrollHeight || 0)
+          : 0;
+      const needsLandscapePage =
+        intrinsicWidth > printableWidthPortrait * 1.02 &&
+        intrinsicWidth <= printableWidthLandscape * 1.02;
+
+      if (heading instanceof HTMLElement) {
+        heading.classList.add("mdexplore-print-heading-anchor");
+        fence.classList.add("mdexplore-print-with-heading");
+      }
+
+      // Per-diagram fallback: move only the current diagram to a dedicated
+      // landscape page if it does not fit portrait width but can fit landscape width.
+      if (needsLandscapePage) {
+        fence.classList.add("mdexplore-print-landscape-page");
+        if (heading instanceof HTMLElement) {
+          heading.classList.add("mdexplore-print-heading-landscape");
+        }
+        landscapeCount += 1;
+      }
+
+      const printableHeight = needsLandscapePage ? printableHeightLandscape : printableHeightPortrait;
+      const availableDiagramHeight = Math.max(
+        180,
+        printableHeight - (headingHeight > 0 ? headingHeight + HEADING_TO_DIAGRAM_GAP_PX : 0),
+      );
+      let keepDiagram = true;
+      if (measuredHeight > availableDiagramHeight) {
+        const shrinkRatio = availableDiagramHeight / measuredHeight;
+        if (shrinkRatio >= MIN_KEEP_SHRINK_RATIO) {
+          fence.style.setProperty("--mdexplore-print-diagram-max-height", `${Math.floor(availableDiagramHeight)}px`);
+        } else {
+          keepDiagram = false;
+        }
+      }
+
+      if (keepDiagram) {
+        fence.classList.add("mdexplore-print-keep");
+        keepCount += 1;
+      } else {
+        // Very tall diagrams remain breakable only when unavoidable.
+        fence.classList.add("mdexplore-print-allow-break");
+        allowBreakCount += 1;
+        fence.classList.remove("mdexplore-print-with-heading");
+        if (heading instanceof HTMLElement) {
+          heading.classList.remove("mdexplore-print-heading-anchor", "mdexplore-print-heading-landscape");
+        }
+      }
+    }
+    return { diagramCount, keepCount, allowBreakCount, landscapeCount };
+  };
+
+  const diagramLayout = markDiagramPrintLayout();
+
   const hasMath = !!document.querySelector("mjx-container, .MathJax");
   const hasMermaid = !!document.querySelector(".mermaid");
   const mathReady = !hasMath || !!window.__mdexploreMathReady;
@@ -5192,7 +5926,7 @@ class MdExploreWindow(QMainWindow):
     (!!window.__mdexploreMermaidReady && String(window.__mdexploreMermaidPaletteMode || "") === "pdf");
   const fontsReady = !document.fonts || document.fonts.status === "loaded";
 
-  return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid };
+  return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid, diagramLayout };
 })();
 """
         self.preview.page().runJavaScript(

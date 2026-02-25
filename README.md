@@ -22,6 +22,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
+- Mermaid SVGs are cached in-memory per app run to avoid re-rendering when returning to previously viewed files.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.

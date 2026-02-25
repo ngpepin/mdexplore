@@ -144,6 +144,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Mermaid loading order is local-first, then CDN fallback.
 - Mermaid rendering should use a dark-theme-friendly high-contrast palette when
   preview background is dark.
+- Mermaid SVG render results should be cached in-memory (by diagram hash and
+  render mode) for the current app run so revisiting documents avoids rerender.
 - PDF export should temporarily switch Mermaid to a light-background-friendly
   palette, then restore preview palette after export.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
