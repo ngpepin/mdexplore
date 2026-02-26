@@ -51,13 +51,14 @@ SEARCH_CLOSE_WORD_GAP = 50
 PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 20
 PDF_EXPORT_PRECHECK_INTERVAL_MS = 140
 MERMAID_CACHE_JSON_TOKEN = "__MDEXPLORE_MERMAID_CACHE_JSON__"
+DIAGRAM_VIEW_STATE_JSON_TOKEN = "__MDEXPLORE_DIAGRAM_VIEW_STATE_JSON__"
 MERMAID_SVG_CACHE_MAX_ENTRIES = 256
 MERMAID_SVG_MAX_CHARS = 250_000
 PLANTUML_RESTORE_BATCH_SIZE = 2
 MERMAID_CACHE_RESTORE_BATCH_SIZE = 2
 RESTORE_OVERLAY_TIMEOUT_SECONDS = 25.0
 RESTORE_OVERLAY_SHOW_DELAY_MS = 350
-RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 3.5
+RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 2.0
 
 
 def _config_file_path() -> Path:
@@ -596,9 +597,13 @@ class MarkdownRenderer:
             if info == "mermaid":
                 prepared_source = self._prepare_mermaid_source(code)
                 mermaid_hash = hashlib.sha1(prepared_source.encode("utf-8", errors="replace")).hexdigest()
+                mermaid_index = int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
+                if isinstance(env, dict):
+                    env["mermaid_index"] = mermaid_index + 1
                 return (
                     f'<div class="mdexplore-fence"{line_attrs}>'
-                    f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}">\n{html.escape(code)}\n</div>'
+                    f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                    f'data-mdexplore-mermaid-index="{mermaid_index}">\n{html.escape(code)}\n</div>'
                     "</div>\n"
                 )
 
@@ -841,12 +846,14 @@ class MarkdownRenderer:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
         env = {}
+        env["mermaid_index"] = 0
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
         body = self._md.render(markdown_text, env)
         escaped_title = html.escape(title)
         mermaid_cache_token = MERMAID_CACHE_JSON_TOKEN
+        diagram_state_token = DIAGRAM_VIEW_STATE_JSON_TOKEN
         mathjax_sources_json = json.dumps(self._mathjax_script_sources())
         mermaid_sources_json = json.dumps(self._mermaid_script_sources())
         return f"""<!doctype html>
@@ -940,7 +947,117 @@ class MarkdownRenderer:
       max-width: 100%;
       height: auto;
     }}
+    .mdexplore-mermaid-shell {{
+      margin: 0.65rem 0 0.95rem 0;
+    }}
+    .mdexplore-mermaid-toolbar {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 0.35rem;
+      margin: 0 0 0.34rem 0;
+    }}
+    .mdexplore-mermaid-zoom-btn {{
+      min-width: 1.9rem;
+      height: 1.65rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code-bg);
+      color: var(--fg);
+      font-size: 0.86rem;
+      line-height: 1;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .mdexplore-mermaid-zoom-btn:hover {{
+      filter: brightness(1.07);
+    }}
+    .mdexplore-mermaid-zoom-value {{
+      min-width: 3.6rem;
+      text-align: center;
+      font-size: 0.79rem;
+      color: color-mix(in srgb, var(--fg) 86%, transparent);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      user-select: none;
+    }}
+    .mdexplore-mermaid-viewport {{
+      overflow: auto;
+      max-width: 100%;
+      max-height: 78vh;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.28rem;
+      cursor: grab;
+    }}
+    .mdexplore-mermaid-viewport.mdexplore-pan-active {{
+      cursor: grabbing;
+    }}
+    .mdexplore-mermaid-viewport > svg {{
+      display: block;
+      transform-origin: top left;
+      transform-box: fill-box;
+      max-width: none !important;
+      height: auto;
+    }}
     @media screen and (prefers-color-scheme: dark) {{
+      .mermaid .edge-thickness-normal,
+      .mermaid .edge-thickness-thick,
+      .mermaid .edge-pattern-solid,
+      .mermaid .edge-pattern-dashed,
+      .mermaid .edge-pattern-dotted,
+      .mermaid .flowchart-link,
+      .mermaid .relationshipLine,
+      .mermaid .messageLine0,
+      .mermaid .messageLine1,
+      .mermaid .loopLine,
+      .mermaid .activation0,
+      .mermaid .activation1,
+      .mermaid path[style*="stroke:#000"],
+      .mermaid path[style*="stroke: #000"],
+      .mermaid path[style*="stroke:black"],
+      .mermaid path[style*="stroke: black"],
+      .mermaid path[style*="fill:none"],
+      .mermaid path[style*="fill: none"],
+      .mermaid line[style*="stroke:#000"],
+      .mermaid line[style*="stroke: #000"],
+      .mermaid line[style*="stroke:black"],
+      .mermaid line[style*="stroke: black"],
+      .mermaid line[style*="fill:none"],
+      .mermaid line[style*="fill: none"],
+      .mermaid polyline[style*="fill:none"],
+      .mermaid polyline[style*="fill: none"] {{
+        stroke: #eaf2ff !important;
+        stroke-opacity: 1 !important;
+        opacity: 1 !important;
+      }}
+      .mermaid .marker,
+      .mermaid .marker path,
+      .mermaid marker path {{
+        stroke: #eaf2ff !important;
+        fill: #eaf2ff !important;
+        stroke-opacity: 1 !important;
+        fill-opacity: 1 !important;
+        opacity: 1 !important;
+      }}
+      .mermaid .edgeLabel,
+      .mermaid .edgeLabel *,
+      .mermaid .messageText,
+      .mermaid .relation {{
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        opacity: 1 !important;
+      }}
+      .mermaid .labelBkg,
+      .mermaid .edgeLabel rect {{
+        fill: #1e293b !important;
+        stroke: #93c5fd !important;
+      }}
+      .mermaid rect[stroke-dasharray][fill="none"] {{
+        stroke: #c3d4ef !important;
+        stroke-opacity: 0.96 !important;
+      }}
       .mermaid g.row-rect-even > path:first-child {{
         fill: #2b3f5f !important;
       }}
@@ -1064,6 +1181,21 @@ class MarkdownRenderer:
       background: var(--callout-caution-bg);
     }}
     @media print {{
+      .mdexplore-mermaid-toolbar {{
+        display: none !important;
+      }}
+      .mdexplore-mermaid-viewport {{
+        border: none !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        max-height: none !important;
+        overflow: visible !important;
+      }}
+      .mdexplore-mermaid-viewport > svg {{
+        transform: none !important;
+        max-width: 100% !important;
+        width: auto !important;
+      }}
       .mdexplore-callout {{
         border-left-width: 4px;
       }}
@@ -1129,6 +1261,78 @@ class MarkdownRenderer:
       }}
       return {{}};
     }})();
+    window.__mdexploreDiagramViewState = (() => {{
+      try {{
+        const seedText = {json.dumps(diagram_state_token)};
+        const parsed = JSON.parse(seedText);
+        if (parsed && typeof parsed === "object") {{
+          return parsed;
+        }}
+      }} catch (_error) {{
+        // Seed parsing is best-effort.
+      }}
+      return {{}};
+    }})();
+    window.__mdexploreGetDiagramViewState = (stateKey) => {{
+      const key = String(stateKey || "").trim();
+      if (!key) {{
+        return null;
+      }}
+      const all = window.__mdexploreDiagramViewState;
+      if (!all || typeof all !== "object") {{
+        return null;
+      }}
+      const raw = all[key];
+      if (!raw || typeof raw !== "object") {{
+        return null;
+      }}
+      const zoom = Number(raw.zoom);
+      const scrollLeft = Number(raw.scrollLeft);
+      const scrollTop = Number(raw.scrollTop);
+      return {{
+        zoom: Number.isFinite(zoom) ? zoom : 1.0,
+        scrollLeft: Number.isFinite(scrollLeft) ? scrollLeft : 0,
+        scrollTop: Number.isFinite(scrollTop) ? scrollTop : 0,
+        dirty: !!raw.dirty,
+      }};
+    }};
+    window.__mdexploreSetDiagramViewState = (stateKey, rawState) => {{
+      const key = String(stateKey || "").trim();
+      if (!key) {{
+        return;
+      }}
+      if (!window.__mdexploreDiagramViewState || typeof window.__mdexploreDiagramViewState !== "object") {{
+        window.__mdexploreDiagramViewState = {{}};
+      }}
+      const zoom = Number(rawState && rawState.zoom);
+      const scrollLeft = Number(rawState && rawState.scrollLeft);
+      const scrollTop = Number(rawState && rawState.scrollTop);
+      window.__mdexploreDiagramViewState[key] = {{
+        zoom: Number.isFinite(zoom) ? zoom : 1.0,
+        scrollLeft: Number.isFinite(scrollLeft) ? scrollLeft : 0.0,
+        scrollTop: Number.isFinite(scrollTop) ? scrollTop : 0.0,
+        dirty: !!(rawState && rawState.dirty),
+      }};
+    }};
+    window.__mdexploreCollectDiagramViewState = () => {{
+      const source = window.__mdexploreDiagramViewState;
+      if (!source || typeof source !== "object") {{
+        return {{}};
+      }}
+      const out = {{}};
+      for (const [rawKey, rawValue] of Object.entries(source)) {{
+        const key = String(rawKey || "").trim();
+        if (!key || key.length > 240) {{
+          continue;
+        }}
+        const parsed = window.__mdexploreGetDiagramViewState(key);
+        if (!parsed) {{
+          continue;
+        }}
+        out[key] = parsed;
+      }}
+      return out;
+    }};
 
     window.__mdexploreLoadMathJaxScript = () => {{
       if (window.__mdexploreMathJaxLoadPromise) {{
@@ -1322,11 +1526,850 @@ class MarkdownRenderer:
       return "";
     }};
 
+    window.__mdexploreApplyMermaidZoomControls = (block, mode = "auto") => {{
+      if (!(block instanceof HTMLElement)) {{
+        return;
+      }}
+      const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      const currentSvg = block.querySelector("svg");
+      let currentShell = null;
+      for (const child of Array.from(block.children || [])) {{
+        if (child instanceof HTMLElement && child.classList.contains("mdexplore-mermaid-shell")) {{
+          currentShell = child;
+          break;
+        }}
+      }}
+      if (normalizedMode === "pdf") {{
+        // Keep PDF output clean and unscaled.
+        if (currentShell instanceof HTMLElement && currentSvg instanceof SVGElement) {{
+          block.innerHTML = "";
+          currentSvg.style.transform = "";
+          currentSvg.style.width = "";
+          currentSvg.style.maxWidth = "100%";
+          block.appendChild(currentSvg);
+        }}
+        return;
+      }}
+      if (!(currentSvg instanceof SVGElement)) {{
+        return;
+      }}
+      const currentParent = currentSvg.parentElement;
+      if (
+        currentShell instanceof HTMLElement &&
+        currentParent instanceof HTMLElement &&
+        currentParent.classList.contains("mdexplore-mermaid-viewport")
+      ) {{
+        return;
+      }}
+      const hashKey = String(block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
+      const mermaidIndex = String(block.getAttribute("data-mdexplore-mermaid-index") || "").trim();
+      const stateKey = `mermaid:${{mermaidIndex || "0"}}:${{hashKey || "nohash"}}`;
+
+      const parseViewBox = (svgNode) => {{
+        const viewBoxText = String(svgNode.getAttribute("viewBox") || "").trim();
+        const parts = viewBoxText
+          .split(/[\\s,]+/)
+          .map((piece) => Number.parseFloat(piece))
+          .filter((n) => Number.isFinite(n));
+        if (parts.length === 4 && parts[2] > 1 && parts[3] > 1) {{
+          return {{
+            x: parts[0],
+            y: parts[1],
+            width: parts[2],
+            height: parts[3],
+          }};
+        }}
+        return null;
+      }};
+
+      const tightenSvgViewBoxWhitespace = (svgNode) => {{
+        if (!(svgNode instanceof SVGElement)) {{
+          return;
+        }}
+        if (svgNode.dataset && svgNode.dataset.mdexploreViewBoxTightened === "1") {{
+          return;
+        }}
+        const parsedViewBox = parseViewBox(svgNode);
+        if (!parsedViewBox) {{
+          if (svgNode.dataset) {{
+            svgNode.dataset.mdexploreViewBoxTightened = "1";
+          }}
+          return;
+        }}
+        let bbox = null;
+        try {{
+          bbox = svgNode.getBBox();
+        }} catch (_error) {{
+          bbox = null;
+        }}
+        if (!bbox || bbox.width <= 1 || bbox.height <= 1) {{
+          if (svgNode.dataset) {{
+            svgNode.dataset.mdexploreViewBoxTightened = "1";
+          }}
+          return;
+        }}
+        const widthGain = parsedViewBox.width / Math.max(1, bbox.width);
+        const heightGain = parsedViewBox.height / Math.max(1, bbox.height);
+        if (widthGain < 1.08 && heightGain < 1.12) {{
+          if (svgNode.dataset) {{
+            svgNode.dataset.mdexploreViewBoxTightened = "1";
+          }}
+          return;
+        }}
+        const padX = Math.max(4, bbox.width * 0.015);
+        const padY = Math.max(4, bbox.height * 0.02);
+        const minX = parsedViewBox.x;
+        const minY = parsedViewBox.y;
+        const maxX = parsedViewBox.x + parsedViewBox.width;
+        const maxY = parsedViewBox.y + parsedViewBox.height;
+        let newX = bbox.x - padX;
+        let newY = bbox.y - padY;
+        let newW = bbox.width + (padX * 2);
+        let newH = bbox.height + (padY * 2);
+        newX = Math.max(minX, newX);
+        newY = Math.max(minY, newY);
+        newW = Math.min(maxX - newX, newW);
+        newH = Math.min(maxY - newY, newH);
+        if (newW > 2 && newH > 2) {{
+          svgNode.setAttribute("viewBox", `${{newX}} ${{newY}} ${{newW}} ${{newH}}`);
+        }}
+        if (svgNode.dataset) {{
+          svgNode.dataset.mdexploreViewBoxTightened = "1";
+        }}
+      }};
+
+      const parseBaseSize = (svgNode) => {{
+        const parsedViewBox = parseViewBox(svgNode);
+        if (parsedViewBox) {{
+          return {{
+            width: parsedViewBox.width,
+            height: parsedViewBox.height,
+          }};
+        }}
+        const widthAttr = Number.parseFloat(String(svgNode.getAttribute("width") || "").trim());
+        const heightAttr = Number.parseFloat(String(svgNode.getAttribute("height") || "").trim());
+        if (Number.isFinite(widthAttr) && widthAttr > 1 && Number.isFinite(heightAttr) && heightAttr > 1) {{
+          return {{
+            width: widthAttr,
+            height: heightAttr,
+          }};
+        }}
+        if (Number.isFinite(widthAttr) && widthAttr > 1) {{
+          return {{
+            width: widthAttr,
+            height: Math.max(1, widthAttr * 0.62),
+          }};
+        }}
+        try {{
+          const bbox = svgNode.getBBox();
+          if (bbox && bbox.width > 1 && bbox.height > 1) {{
+            return {{
+              width: bbox.width,
+              height: bbox.height,
+            }};
+          }}
+        }} catch (_error) {{
+          // Ignore and fall back.
+        }}
+        const rect = svgNode.getBoundingClientRect();
+        if (rect.width > 1 && rect.height > 1) {{
+          return {{
+            width: rect.width,
+            height: rect.height,
+          }};
+        }}
+        return {{
+          width: 800,
+          height: 520,
+        }};
+      }};
+
+      const shell = document.createElement("div");
+      shell.className = "mdexplore-mermaid-shell";
+      shell.dataset.mdexploreStateKey = stateKey;
+      const toolbar = document.createElement("div");
+      toolbar.className = "mdexplore-mermaid-toolbar";
+      const zoomOutBtn = document.createElement("button");
+      zoomOutBtn.type = "button";
+      zoomOutBtn.className = "mdexplore-mermaid-zoom-btn";
+      zoomOutBtn.title = "Zoom out";
+      zoomOutBtn.textContent = "−";
+      const zoomInBtn = document.createElement("button");
+      zoomInBtn.type = "button";
+      zoomInBtn.className = "mdexplore-mermaid-zoom-btn";
+      zoomInBtn.title = "Zoom in";
+      zoomInBtn.textContent = "+";
+      const zoomResetBtn = document.createElement("button");
+      zoomResetBtn.type = "button";
+      zoomResetBtn.className = "mdexplore-mermaid-zoom-btn";
+      zoomResetBtn.title = "Fit diagram";
+      zoomResetBtn.textContent = "Fit";
+      const panLeftBtn = document.createElement("button");
+      panLeftBtn.type = "button";
+      panLeftBtn.className = "mdexplore-mermaid-zoom-btn";
+      panLeftBtn.title = "Pan left";
+      panLeftBtn.textContent = "←";
+      const panUpBtn = document.createElement("button");
+      panUpBtn.type = "button";
+      panUpBtn.className = "mdexplore-mermaid-zoom-btn";
+      panUpBtn.title = "Pan up";
+      panUpBtn.textContent = "↑";
+      const panDownBtn = document.createElement("button");
+      panDownBtn.type = "button";
+      panDownBtn.className = "mdexplore-mermaid-zoom-btn";
+      panDownBtn.title = "Pan down";
+      panDownBtn.textContent = "↓";
+      const panRightBtn = document.createElement("button");
+      panRightBtn.type = "button";
+      panRightBtn.className = "mdexplore-mermaid-zoom-btn";
+      panRightBtn.title = "Pan right";
+      panRightBtn.textContent = "→";
+      const zoomValue = document.createElement("span");
+      zoomValue.className = "mdexplore-mermaid-zoom-value";
+      zoomValue.textContent = "100%";
+      toolbar.appendChild(zoomOutBtn);
+      toolbar.appendChild(zoomInBtn);
+      toolbar.appendChild(zoomResetBtn);
+      toolbar.appendChild(panLeftBtn);
+      toolbar.appendChild(panUpBtn);
+      toolbar.appendChild(panDownBtn);
+      toolbar.appendChild(panRightBtn);
+      toolbar.appendChild(zoomValue);
+
+      const viewport = document.createElement("div");
+      viewport.className = "mdexplore-mermaid-viewport";
+      viewport.tabIndex = 0;
+      currentSvg.style.display = "block";
+      currentSvg.style.transformOrigin = "top left";
+      currentSvg.style.transformBox = "fill-box";
+      currentSvg.style.maxWidth = "none";
+      tightenSvgViewBoxWhitespace(currentSvg);
+
+      const baseSize = parseBaseSize(currentSvg);
+      currentSvg.style.width = `${{Math.max(32, Math.round(baseSize.width))}}px`;
+
+      const clampZoom = (value) => Math.max(0.35, Math.min(4.0, value));
+      let zoom = 1.0;
+      let fitZoom = 1.0;
+      let zoomDirty = false;
+      let resizeObserver = null;
+      let resizeDebounceTimer = null;
+      let isPanning = false;
+      let wheelZoomArmed = false;
+      let panStartClientX = 0;
+      let panStartClientY = 0;
+      let panStartScrollLeft = 0;
+      let panStartScrollTop = 0;
+      const MIN_VIEWPORT_HEIGHT = 220;
+      const savedState = window.__mdexploreGetDiagramViewState(stateKey);
+      if (savedState && typeof savedState === "object") {{
+        zoomDirty = !!savedState.dirty;
+      }}
+      let saveState = () => {{}};
+
+      const setViewportHeightForFit = (fitScale) => {{
+        const scaledHeight = Math.max(80, baseSize.height * Math.max(0.1, fitScale));
+        const idealHeight = Math.round(scaledHeight + 14);
+        const maxHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.floor(window.innerHeight * 0.76));
+        const finalHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.min(maxHeight, idealHeight));
+        viewport.style.height = `${{finalHeight}}px`;
+      }};
+
+      const computeFitZoom = () => {{
+        const widthPx = Math.max(1, baseSize.width);
+        const availableWidth = Math.max(120, viewport.clientWidth - 12);
+        const fitByWidth = availableWidth / widthPx;
+        // Width-first fit: initial/auto-fit should keep the full diagram width visible.
+        fitZoom = clampZoom(Math.min(1.0, fitByWidth));
+        return fitZoom;
+      }};
+
+      const applyZoom = (nextZoom, markDirty = false) => {{
+        zoom = clampZoom(nextZoom);
+        currentSvg.style.transform = `scale(${{zoom}})`;
+        const pct = Math.round(zoom * 100);
+        zoomValue.textContent = `${{pct}}%`;
+        if (markDirty) {{
+          zoomDirty = true;
+        }}
+        saveState();
+      }};
+
+      const applyFitIfClean = () => {{
+        if (zoomDirty) {{
+          return;
+        }}
+        const nextFit = computeFitZoom();
+        setViewportHeightForFit(nextFit);
+        applyZoom(nextFit, false);
+      }};
+
+      const panBy = (dx, dy) => {{
+        viewport.scrollLeft += dx;
+        viewport.scrollTop += dy;
+        saveState();
+      }};
+      saveState = () => {{
+        window.__mdexploreSetDiagramViewState(stateKey, {{
+          zoom,
+          scrollLeft: viewport.scrollLeft,
+          scrollTop: viewport.scrollTop,
+          dirty: zoomDirty,
+        }});
+      }};
+
+      const scheduleFitIfClean = () => {{
+        if (resizeDebounceTimer) {{
+          window.clearTimeout(resizeDebounceTimer);
+        }}
+        resizeDebounceTimer = window.setTimeout(() => {{
+          resizeDebounceTimer = null;
+          applyFitIfClean();
+        }}, 90);
+      }};
+
+      zoomOutBtn.addEventListener("click", () => applyZoom(zoom / 1.2, true));
+      zoomInBtn.addEventListener("click", () => applyZoom(zoom * 1.2, true));
+      zoomResetBtn.addEventListener("click", () => {{
+        zoomDirty = false;
+        const nextFit = computeFitZoom();
+        setViewportHeightForFit(nextFit);
+        applyZoom(nextFit, false);
+        viewport.scrollTop = 0;
+        viewport.scrollLeft = 0;
+        saveState();
+      }});
+      const PAN_STEP = 120;
+      panLeftBtn.addEventListener("click", () => panBy(-PAN_STEP, 0));
+      panRightBtn.addEventListener("click", () => panBy(PAN_STEP, 0));
+      panUpBtn.addEventListener("click", () => panBy(0, -PAN_STEP));
+      panDownBtn.addEventListener("click", () => panBy(0, PAN_STEP));
+      viewport.addEventListener(
+        "wheel",
+        (event) => {{
+          if (!wheelZoomArmed) {{
+            return;
+          }}
+          event.preventDefault();
+          const direction = event.deltaY > 0 ? -1 : 1;
+          applyZoom(direction > 0 ? zoom * 1.12 : zoom / 1.12, true);
+        }},
+        {{ passive: false }},
+      );
+      viewport.addEventListener("scroll", () => {{
+        saveState();
+      }}, {{ passive: true }});
+      const onViewportKeyDown = (event) => {{
+        if (!(event instanceof KeyboardEvent)) {{
+          return;
+        }}
+        const key = String(event.key || "");
+        if (!key.startsWith("Arrow")) {{
+          return;
+        }}
+        event.preventDefault();
+        const step = event.shiftKey ? PAN_STEP * 2 : PAN_STEP;
+        if (key === "ArrowLeft") {{
+          panBy(-step, 0);
+        }} else if (key === "ArrowRight") {{
+          panBy(step, 0);
+        }} else if (key === "ArrowUp") {{
+          panBy(0, -step);
+        }} else if (key === "ArrowDown") {{
+          panBy(0, step);
+        }}
+      }};
+      viewport.addEventListener("keydown", onViewportKeyDown);
+
+      const onPanStart = (event) => {{
+        if (!(event instanceof MouseEvent) || event.button !== 0) {{
+          return;
+        }}
+        if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {{
+          return;
+        }}
+        isPanning = true;
+        panStartClientX = event.clientX;
+        panStartClientY = event.clientY;
+        panStartScrollLeft = viewport.scrollLeft;
+        panStartScrollTop = viewport.scrollTop;
+        viewport.classList.add("mdexplore-pan-active");
+        event.preventDefault();
+      }};
+      const onViewportClick = (event) => {{
+        if (!(event instanceof MouseEvent) || event.button !== 0) {{
+          return;
+        }}
+        wheelZoomArmed = !wheelZoomArmed;
+      }};
+      const onPanMove = (event) => {{
+        if (!isPanning || !(event instanceof MouseEvent)) {{
+          return;
+        }}
+        const dx = event.clientX - panStartClientX;
+        const dy = event.clientY - panStartClientY;
+        viewport.scrollLeft = panStartScrollLeft - dx;
+        viewport.scrollTop = panStartScrollTop - dy;
+        saveState();
+        event.preventDefault();
+      }};
+      const onPanEnd = () => {{
+        if (!isPanning) {{
+          return;
+        }}
+        isPanning = false;
+        viewport.classList.remove("mdexplore-pan-active");
+      }};
+      const onViewportMouseLeave = () => {{
+        wheelZoomArmed = false;
+      }};
+      viewport.addEventListener("mousedown", onPanStart);
+      viewport.addEventListener("click", onViewportClick);
+      viewport.addEventListener("mouseleave", onViewportMouseLeave);
+      window.addEventListener("mousemove", onPanMove);
+      window.addEventListener("mouseup", onPanEnd);
+      window.addEventListener("blur", onPanEnd);
+      window.addEventListener("resize", scheduleFitIfClean);
+      if (typeof ResizeObserver === "function") {{
+        resizeObserver = new ResizeObserver(() => {{
+          scheduleFitIfClean();
+        }});
+        resizeObserver.observe(viewport);
+      }}
+
+      viewport.appendChild(currentSvg);
+      shell.appendChild(toolbar);
+      shell.appendChild(viewport);
+      block.innerHTML = "";
+      block.appendChild(shell);
+      const applyInitialFitZoom = () => {{
+        if (savedState && typeof savedState === "object") {{
+          const restoredZoom = Number(savedState.zoom);
+          zoomDirty = !!savedState.dirty;
+          applyZoom(Number.isFinite(restoredZoom) ? restoredZoom : computeFitZoom(), false);
+          viewport.scrollLeft = Number.isFinite(Number(savedState.scrollLeft)) ? Number(savedState.scrollLeft) : 0;
+          viewport.scrollTop = Number.isFinite(Number(savedState.scrollTop)) ? Number(savedState.scrollTop) : 0;
+          saveState();
+          return;
+        }}
+        zoomDirty = false;
+        const nextFit = computeFitZoom();
+        setViewportHeightForFit(nextFit);
+        applyZoom(nextFit, false);
+        viewport.scrollLeft = 0;
+        viewport.scrollTop = 0;
+        saveState();
+      }};
+      window.requestAnimationFrame(() => {{
+        window.requestAnimationFrame(() => {{
+          applyInitialFitZoom();
+        }});
+      }});
+      shell.addEventListener("DOMNodeRemovedFromDocument", () => {{
+        if (resizeDebounceTimer) {{
+          window.clearTimeout(resizeDebounceTimer);
+          resizeDebounceTimer = null;
+        }}
+        window.removeEventListener("resize", scheduleFitIfClean);
+        viewport.removeEventListener("keydown", onViewportKeyDown);
+        viewport.removeEventListener("mousedown", onPanStart);
+        viewport.removeEventListener("click", onViewportClick);
+        viewport.removeEventListener("mouseleave", onViewportMouseLeave);
+        window.removeEventListener("mousemove", onPanMove);
+        window.removeEventListener("mouseup", onPanEnd);
+        window.removeEventListener("blur", onPanEnd);
+        if (resizeObserver) {{
+          try {{
+            resizeObserver.disconnect();
+          }} catch (_error) {{
+            // Ignore cleanup errors.
+          }}
+          resizeObserver = null;
+        }}
+      }});
+    }};
+
+    window.__mdexploreApplyPlantUmlZoomControls = (mode = "auto") => {{
+      const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      const images = Array.from(document.querySelectorAll("img.plantuml"));
+      let plantumlIndex = 0;
+      for (const imgNode of images) {{
+        if (!(imgNode instanceof HTMLImageElement)) {{
+          continue;
+        }}
+        const fence = imgNode.closest(".mdexplore-fence");
+        if (!(fence instanceof HTMLElement)) {{
+          continue;
+        }}
+        const hashKey = String(fence.getAttribute("data-mdexplore-plantuml-hash") || "").trim().toLowerCase();
+        const fenceId = String(fence.id || "").trim();
+        const stateKey = `plantuml:${{fenceId || String(plantumlIndex)}}:${{hashKey || "nohash"}}`;
+        plantumlIndex += 1;
+
+        let currentShell = null;
+        for (const child of Array.from(fence.children || [])) {{
+          if (child instanceof HTMLElement && child.classList.contains("mdexplore-mermaid-shell")) {{
+            currentShell = child;
+            break;
+          }}
+        }}
+        const currentImage = fence.querySelector("img.plantuml");
+        if (!(currentImage instanceof HTMLImageElement)) {{
+          continue;
+        }}
+        if (normalizedMode === "pdf") {{
+          if (currentShell instanceof HTMLElement) {{
+            fence.innerHTML = "";
+            currentImage.style.transform = "";
+            currentImage.style.width = "";
+            currentImage.style.maxWidth = "100%";
+            fence.appendChild(currentImage);
+          }}
+          continue;
+        }}
+        const currentParent = currentImage.parentElement;
+        if (
+          currentShell instanceof HTMLElement &&
+          currentParent instanceof HTMLElement &&
+          currentParent.classList.contains("mdexplore-mermaid-viewport")
+        ) {{
+          continue;
+        }}
+
+        const baseWidth = (() => {{
+          if (Number.isFinite(currentImage.naturalWidth) && currentImage.naturalWidth > 1) {{
+            return currentImage.naturalWidth;
+          }}
+          const widthAttr = Number.parseFloat(String(currentImage.getAttribute("width") || "").trim());
+          if (Number.isFinite(widthAttr) && widthAttr > 1) {{
+            return widthAttr;
+          }}
+          const rect = currentImage.getBoundingClientRect();
+          if (rect.width > 1) {{
+            return rect.width;
+          }}
+          return 800;
+        }})();
+        const baseHeight = (() => {{
+          if (Number.isFinite(currentImage.naturalHeight) && currentImage.naturalHeight > 1) {{
+            return currentImage.naturalHeight;
+          }}
+          const heightAttr = Number.parseFloat(String(currentImage.getAttribute("height") || "").trim());
+          if (Number.isFinite(heightAttr) && heightAttr > 1) {{
+            return heightAttr;
+          }}
+          const rect = currentImage.getBoundingClientRect();
+          if (rect.height > 1) {{
+            return rect.height;
+          }}
+          return Math.max(1, baseWidth * 0.62);
+        }})();
+
+        const shell = document.createElement("div");
+        shell.className = "mdexplore-mermaid-shell";
+        shell.dataset.mdexploreStateKey = stateKey;
+        const toolbar = document.createElement("div");
+        toolbar.className = "mdexplore-mermaid-toolbar";
+        const zoomOutBtn = document.createElement("button");
+        zoomOutBtn.type = "button";
+        zoomOutBtn.className = "mdexplore-mermaid-zoom-btn";
+        zoomOutBtn.title = "Zoom out";
+        zoomOutBtn.textContent = "−";
+        const zoomInBtn = document.createElement("button");
+        zoomInBtn.type = "button";
+        zoomInBtn.className = "mdexplore-mermaid-zoom-btn";
+        zoomInBtn.title = "Zoom in";
+        zoomInBtn.textContent = "+";
+        const zoomResetBtn = document.createElement("button");
+        zoomResetBtn.type = "button";
+        zoomResetBtn.className = "mdexplore-mermaid-zoom-btn";
+        zoomResetBtn.title = "Fit diagram";
+        zoomResetBtn.textContent = "Fit";
+        const panLeftBtn = document.createElement("button");
+        panLeftBtn.type = "button";
+        panLeftBtn.className = "mdexplore-mermaid-zoom-btn";
+        panLeftBtn.title = "Pan left";
+        panLeftBtn.textContent = "←";
+        const panUpBtn = document.createElement("button");
+        panUpBtn.type = "button";
+        panUpBtn.className = "mdexplore-mermaid-zoom-btn";
+        panUpBtn.title = "Pan up";
+        panUpBtn.textContent = "↑";
+        const panDownBtn = document.createElement("button");
+        panDownBtn.type = "button";
+        panDownBtn.className = "mdexplore-mermaid-zoom-btn";
+        panDownBtn.title = "Pan down";
+        panDownBtn.textContent = "↓";
+        const panRightBtn = document.createElement("button");
+        panRightBtn.type = "button";
+        panRightBtn.className = "mdexplore-mermaid-zoom-btn";
+        panRightBtn.title = "Pan right";
+        panRightBtn.textContent = "→";
+        const zoomValue = document.createElement("span");
+        zoomValue.className = "mdexplore-mermaid-zoom-value";
+        zoomValue.textContent = "100%";
+        toolbar.appendChild(zoomOutBtn);
+        toolbar.appendChild(zoomInBtn);
+        toolbar.appendChild(zoomResetBtn);
+        toolbar.appendChild(panLeftBtn);
+        toolbar.appendChild(panUpBtn);
+        toolbar.appendChild(panDownBtn);
+        toolbar.appendChild(panRightBtn);
+        toolbar.appendChild(zoomValue);
+
+        const viewport = document.createElement("div");
+        viewport.className = "mdexplore-mermaid-viewport";
+        viewport.tabIndex = 0;
+        currentImage.style.display = "block";
+        currentImage.style.transformOrigin = "top left";
+        currentImage.style.maxWidth = "none";
+        currentImage.style.width = `${{Math.max(32, Math.round(baseWidth))}}px`;
+
+        const clampZoom = (value) => Math.max(0.35, Math.min(4.0, value));
+        let zoom = 1.0;
+        let fitZoom = 1.0;
+        let zoomDirty = false;
+        let resizeObserver = null;
+        let resizeDebounceTimer = null;
+        let isPanning = false;
+        let wheelZoomArmed = false;
+        let panStartClientX = 0;
+        let panStartClientY = 0;
+        let panStartScrollLeft = 0;
+        let panStartScrollTop = 0;
+        const MIN_VIEWPORT_HEIGHT = 220;
+        const savedState = window.__mdexploreGetDiagramViewState(stateKey);
+        if (savedState && typeof savedState === "object") {{
+          zoomDirty = !!savedState.dirty;
+        }}
+        let saveState = () => {{}};
+
+        const setViewportHeightForFit = (fitScale) => {{
+          const scaledHeight = Math.max(80, baseHeight * Math.max(0.1, fitScale));
+          // Leave modest breathing room above/below PlantUML diagrams.
+          const verticalPadding = Math.max(8, Math.round(scaledHeight * 0.05));
+          const idealHeight = Math.round(scaledHeight + verticalPadding + 14);
+          const maxHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.floor(window.innerHeight * 0.76));
+          const finalHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.min(maxHeight, idealHeight));
+          viewport.style.height = `${{finalHeight}}px`;
+        }};
+
+        const computeFitZoom = () => {{
+          const availableWidth = Math.max(120, viewport.clientWidth - 12);
+          const fitByWidth = availableWidth / Math.max(1, baseWidth);
+          fitZoom = clampZoom(Math.min(1.0, fitByWidth));
+          return fitZoom;
+        }};
+
+        const applyZoom = (nextZoom, markDirty = false) => {{
+          zoom = clampZoom(nextZoom);
+          currentImage.style.transform = `scale(${{zoom}})`;
+          const pct = Math.round(zoom * 100);
+          zoomValue.textContent = `${{pct}}%`;
+          if (markDirty) {{
+            zoomDirty = true;
+          }}
+          saveState();
+        }};
+
+        const panBy = (dx, dy) => {{
+          viewport.scrollLeft += dx;
+          viewport.scrollTop += dy;
+          saveState();
+        }};
+        saveState = () => {{
+          window.__mdexploreSetDiagramViewState(stateKey, {{
+            zoom,
+            scrollLeft: viewport.scrollLeft,
+            scrollTop: viewport.scrollTop,
+            dirty: zoomDirty,
+          }});
+        }};
+        const applyFitIfClean = () => {{
+          if (zoomDirty) {{
+            return;
+          }}
+          const nextFit = computeFitZoom();
+          setViewportHeightForFit(nextFit);
+          applyZoom(nextFit, false);
+        }};
+        const scheduleFitIfClean = () => {{
+          if (resizeDebounceTimer) {{
+            window.clearTimeout(resizeDebounceTimer);
+          }}
+          resizeDebounceTimer = window.setTimeout(() => {{
+            resizeDebounceTimer = null;
+            applyFitIfClean();
+          }}, 90);
+        }};
+
+        zoomOutBtn.addEventListener("click", () => applyZoom(zoom / 1.2, true));
+        zoomInBtn.addEventListener("click", () => applyZoom(zoom * 1.2, true));
+        zoomResetBtn.addEventListener("click", () => {{
+          zoomDirty = false;
+          const nextFit = computeFitZoom();
+          setViewportHeightForFit(nextFit);
+          applyZoom(nextFit, false);
+          viewport.scrollTop = 0;
+          viewport.scrollLeft = 0;
+          saveState();
+        }});
+        const PAN_STEP = 120;
+        panLeftBtn.addEventListener("click", () => panBy(-PAN_STEP, 0));
+        panRightBtn.addEventListener("click", () => panBy(PAN_STEP, 0));
+        panUpBtn.addEventListener("click", () => panBy(0, -PAN_STEP));
+        panDownBtn.addEventListener("click", () => panBy(0, PAN_STEP));
+        viewport.addEventListener(
+          "wheel",
+          (event) => {{
+            if (!wheelZoomArmed) {{
+              return;
+            }}
+            event.preventDefault();
+            const direction = event.deltaY > 0 ? -1 : 1;
+            applyZoom(direction > 0 ? zoom * 1.12 : zoom / 1.12, true);
+          }},
+          {{ passive: false }},
+        );
+        viewport.addEventListener("scroll", () => {{
+          saveState();
+        }}, {{ passive: true }});
+        const onViewportKeyDown = (event) => {{
+          if (!(event instanceof KeyboardEvent)) {{
+            return;
+          }}
+          const key = String(event.key || "");
+          if (!key.startsWith("Arrow")) {{
+            return;
+          }}
+          event.preventDefault();
+          const step = event.shiftKey ? PAN_STEP * 2 : PAN_STEP;
+          if (key === "ArrowLeft") {{
+            panBy(-step, 0);
+          }} else if (key === "ArrowRight") {{
+            panBy(step, 0);
+          }} else if (key === "ArrowUp") {{
+            panBy(0, -step);
+          }} else if (key === "ArrowDown") {{
+            panBy(0, step);
+          }}
+        }};
+        viewport.addEventListener("keydown", onViewportKeyDown);
+        const onPanStart = (event) => {{
+          if (!(event instanceof MouseEvent) || event.button !== 0) {{
+            return;
+          }}
+          if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {{
+            return;
+          }}
+          isPanning = true;
+          panStartClientX = event.clientX;
+          panStartClientY = event.clientY;
+          panStartScrollLeft = viewport.scrollLeft;
+          panStartScrollTop = viewport.scrollTop;
+          viewport.classList.add("mdexplore-pan-active");
+          event.preventDefault();
+        }};
+        const onViewportClick = (event) => {{
+          if (!(event instanceof MouseEvent) || event.button !== 0) {{
+            return;
+          }}
+          wheelZoomArmed = !wheelZoomArmed;
+        }};
+        const onPanMove = (event) => {{
+          if (!isPanning || !(event instanceof MouseEvent)) {{
+            return;
+          }}
+          const dx = event.clientX - panStartClientX;
+          const dy = event.clientY - panStartClientY;
+          viewport.scrollLeft = panStartScrollLeft - dx;
+          viewport.scrollTop = panStartScrollTop - dy;
+          saveState();
+          event.preventDefault();
+        }};
+        const onPanEnd = () => {{
+          if (!isPanning) {{
+            return;
+          }}
+          isPanning = false;
+          viewport.classList.remove("mdexplore-pan-active");
+        }};
+        const onViewportMouseLeave = () => {{
+          wheelZoomArmed = false;
+        }};
+        viewport.addEventListener("mousedown", onPanStart);
+        viewport.addEventListener("click", onViewportClick);
+        viewport.addEventListener("mouseleave", onViewportMouseLeave);
+        window.addEventListener("mousemove", onPanMove);
+        window.addEventListener("mouseup", onPanEnd);
+        window.addEventListener("blur", onPanEnd);
+        window.addEventListener("resize", scheduleFitIfClean);
+        if (typeof ResizeObserver === "function") {{
+          resizeObserver = new ResizeObserver(() => {{
+            scheduleFitIfClean();
+          }});
+          resizeObserver.observe(viewport);
+        }}
+
+        viewport.appendChild(currentImage);
+        shell.appendChild(toolbar);
+        shell.appendChild(viewport);
+        fence.innerHTML = "";
+        fence.appendChild(shell);
+        const applyInitialFitZoom = () => {{
+          if (savedState && typeof savedState === "object") {{
+            const restoredZoom = Number(savedState.zoom);
+            zoomDirty = !!savedState.dirty;
+            applyZoom(Number.isFinite(restoredZoom) ? restoredZoom : computeFitZoom(), false);
+            viewport.scrollLeft = Number.isFinite(Number(savedState.scrollLeft)) ? Number(savedState.scrollLeft) : 0;
+            viewport.scrollTop = Number.isFinite(Number(savedState.scrollTop)) ? Number(savedState.scrollTop) : 0;
+            saveState();
+            return;
+          }}
+          zoomDirty = false;
+          const nextFit = computeFitZoom();
+          setViewportHeightForFit(nextFit);
+          applyZoom(nextFit, false);
+          viewport.scrollLeft = 0;
+          viewport.scrollTop = 0;
+          saveState();
+        }};
+        window.requestAnimationFrame(() => {{
+          window.requestAnimationFrame(() => {{
+            applyInitialFitZoom();
+          }});
+        }});
+        shell.addEventListener("DOMNodeRemovedFromDocument", () => {{
+          if (resizeDebounceTimer) {{
+            window.clearTimeout(resizeDebounceTimer);
+            resizeDebounceTimer = null;
+          }}
+          window.removeEventListener("resize", scheduleFitIfClean);
+          viewport.removeEventListener("keydown", onViewportKeyDown);
+          viewport.removeEventListener("mousedown", onPanStart);
+          viewport.removeEventListener("click", onViewportClick);
+          viewport.removeEventListener("mouseleave", onViewportMouseLeave);
+          window.removeEventListener("mousemove", onPanMove);
+          window.removeEventListener("mouseup", onPanEnd);
+          window.removeEventListener("blur", onPanEnd);
+          if (resizeObserver) {{
+            try {{
+              resizeObserver.disconnect();
+            }} catch (_error) {{
+              // Ignore cleanup errors.
+            }}
+            resizeObserver = null;
+          }}
+        }});
+      }}
+    }};
+
     window.__mdexploreApplyMermaidPostStyles = (block, mode = "auto") => {{
       if (!(block instanceof HTMLElement)) {{
         return;
       }}
       const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      window.__mdexploreApplyMermaidZoomControls(block, normalizedMode);
       if (normalizedMode === "pdf") {{
         return;
       }}
@@ -1338,6 +2381,678 @@ class MarkdownRenderer:
       if (!(svg instanceof SVGElement)) {{
         return;
       }}
+
+      const hardenGenericEdgesAndLabels = () => {{
+        const edgeStrokeColor = "#eaf2ff";
+        const boundaryStrokeColor = "#c3d4ef";
+        const edgeLabelColor = "#ffffff";
+        const edgeLabelBackground = "#1e293b";
+
+        const edgeSelectors = [
+          ".edge-thickness-normal",
+          ".edge-thickness-thick",
+          ".edge-pattern-solid",
+          ".edge-pattern-dashed",
+          ".edge-pattern-dotted",
+          ".flowchart-link",
+          ".relationshipLine",
+          ".messageLine0",
+          ".messageLine1",
+          ".loopLine",
+          ".activation0",
+          ".activation1",
+        ];
+        for (const selector of edgeSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const edgeNode of nodes) {{
+            if (!(edgeNode instanceof SVGElement)) {{
+              continue;
+            }}
+            edgeNode.setAttribute("stroke", edgeStrokeColor);
+            edgeNode.style.stroke = edgeStrokeColor;
+            edgeNode.style.strokeOpacity = "1";
+            edgeNode.style.opacity = "1";
+          }}
+        }}
+
+        const styleBlackSelectors = [
+          'path[style*="stroke:#000"]',
+          'path[style*="stroke: #000"]',
+          'path[style*="stroke:black"]',
+          'path[style*="stroke: black"]',
+          'line[style*="stroke:#000"]',
+          'line[style*="stroke: #000"]',
+          'line[style*="stroke:black"]',
+          'line[style*="stroke: black"]',
+        ];
+        for (const selector of styleBlackSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const edgeNode of nodes) {{
+            if (!(edgeNode instanceof SVGElement)) {{
+              continue;
+            }}
+            edgeNode.setAttribute("stroke", edgeStrokeColor);
+            edgeNode.style.stroke = edgeStrokeColor;
+            edgeNode.style.strokeOpacity = "1";
+            edgeNode.style.opacity = "1";
+          }}
+        }}
+
+        // Fallback for diagrams (notably C4) that emit plain, unclassed edge
+        // geometry with inline stroke/fill:none and marker endpoints.
+        const geometricEdgeNodes = svg.querySelectorAll("path, line, polyline");
+        for (const edgeNode of geometricEdgeNodes) {{
+          if (!(edgeNode instanceof SVGElement)) {{
+            continue;
+          }}
+          if (edgeNode.closest("defs, marker, symbol")) {{
+            continue;
+          }}
+          const styleText = String(edgeNode.getAttribute("style") || "").toLowerCase();
+          const fillAttr = String(edgeNode.getAttribute("fill") || "").trim().toLowerCase();
+          const strokeAttr = String(edgeNode.getAttribute("stroke") || "").trim().toLowerCase();
+          const hasMarker =
+            edgeNode.hasAttribute("marker-end") ||
+            edgeNode.hasAttribute("marker-start") ||
+            styleText.includes("marker-end") ||
+            styleText.includes("marker-start");
+          const fillIsNone =
+            fillAttr == "none" ||
+            styleText.includes("fill:none") ||
+            styleText.includes("fill: none");
+          const hasStrokeHint =
+            strokeAttr.length > 0 ||
+            styleText.includes("stroke:") ||
+            styleText.includes("stroke=");
+          if (!(hasMarker || (fillIsNone && hasStrokeHint))) {{
+            continue;
+          }}
+          edgeNode.setAttribute("stroke", edgeStrokeColor);
+          edgeNode.style.stroke = edgeStrokeColor;
+          edgeNode.style.strokeOpacity = "1";
+          edgeNode.style.opacity = "1";
+        }}
+
+        const markerNodes = svg.querySelectorAll(".marker, .marker path, marker path");
+        for (const markerNode of markerNodes) {{
+          if (!(markerNode instanceof SVGElement)) {{
+            continue;
+          }}
+          markerNode.setAttribute("stroke", edgeStrokeColor);
+          markerNode.style.stroke = edgeStrokeColor;
+          markerNode.setAttribute("fill", edgeStrokeColor);
+          markerNode.style.fill = edgeStrokeColor;
+          markerNode.style.strokeOpacity = "1";
+          markerNode.style.fillOpacity = "1";
+          markerNode.style.opacity = "1";
+        }}
+
+        const boundarySelectors = [
+          "rect[stroke-dasharray]",
+          'rect[style*="stroke-dasharray"]',
+        ];
+        for (const selector of boundarySelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const boundaryNode of nodes) {{
+            if (!(boundaryNode instanceof SVGElement)) {{
+              continue;
+            }}
+            const dashText = String(
+              boundaryNode.getAttribute("stroke-dasharray") || boundaryNode.style.strokeDasharray || ""
+            ).trim();
+            if (!dashText) {{
+              continue;
+            }}
+            const dashParts = dashText
+              .split(/[\\s,]+/)
+              .map((part) => Number.parseFloat(part))
+              .filter((value) => Number.isFinite(value));
+            if (!dashParts.some((value) => value > 0.01)) {{
+              continue;
+            }}
+            const fillAttr = String(boundaryNode.getAttribute("fill") || "").trim().toLowerCase();
+            const styleFill = String(boundaryNode.style.fill || "").trim().toLowerCase();
+            const fillLooksNone =
+              fillAttr === "none" ||
+              fillAttr === "transparent" ||
+              styleFill === "none" ||
+              styleFill === "transparent" ||
+              styleFill === "";
+            if (!fillLooksNone) {{
+              continue;
+            }}
+            boundaryNode.setAttribute("stroke", boundaryStrokeColor);
+            boundaryNode.style.stroke = boundaryStrokeColor;
+            boundaryNode.style.strokeOpacity = "0.96";
+          }}
+        }}
+
+        const labelBgNodes = svg.querySelectorAll(".labelBkg, .edgeLabel rect");
+        for (const bgNode of labelBgNodes) {{
+          if (!(bgNode instanceof SVGElement)) {{
+            continue;
+          }}
+          bgNode.setAttribute("fill", edgeLabelBackground);
+          bgNode.style.fill = edgeLabelBackground;
+          bgNode.setAttribute("stroke", "#93c5fd");
+          bgNode.style.stroke = "#93c5fd";
+        }}
+
+        const labelSelectors = [
+          ".edgeLabel",
+          ".edgeLabel *",
+          ".messageText",
+          ".relation",
+        ];
+        for (const selector of labelSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const labelNode of nodes) {{
+            if (labelNode instanceof HTMLElement) {{
+              labelNode.style.color = edgeLabelColor;
+              labelNode.style.fill = edgeLabelColor;
+              labelNode.style.opacity = "1";
+              continue;
+            }}
+            if (labelNode instanceof SVGElement) {{
+              labelNode.setAttribute("fill", edgeLabelColor);
+              labelNode.style.fill = edgeLabelColor;
+              labelNode.style.opacity = "1";
+            }}
+          }}
+        }}
+      }};
+
+      const parseAnyColorRgb = (rawColor) => {{
+        const raw = String(rawColor || "").trim();
+        if (!raw || raw === "none" || raw === "transparent" || raw === "currentColor") {{
+          return null;
+        }}
+        const rgbMatch = raw.match(/^rgba?\\(([^)]+)\\)$/i);
+        if (rgbMatch) {{
+          const rawParts = rgbMatch[1].split(",").map((part) => part.trim());
+          const parts = rawParts
+            .map((part) => Number.parseFloat(part))
+            .filter((value) => Number.isFinite(value));
+          if (parts.length >= 4 && parts[3] <= 0.01) {{
+            return null;
+          }}
+          if (parts.length >= 3) {{
+            return [parts[0], parts[1], parts[2]];
+          }}
+        }}
+        const hexMatch = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+        if (hexMatch) {{
+          const value = hexMatch[1];
+          if (value.length === 3) {{
+            return [
+              Number.parseInt(value[0] + value[0], 16),
+              Number.parseInt(value[1] + value[1], 16),
+              Number.parseInt(value[2] + value[2], 16),
+            ];
+          }}
+          return [
+            Number.parseInt(value.slice(0, 2), 16),
+            Number.parseInt(value.slice(2, 4), 16),
+            Number.parseInt(value.slice(4, 6), 16),
+          ];
+        }}
+        return null;
+      }};
+
+      const relativeLuminance = (rgb) => {{
+        if (!Array.isArray(rgb) || rgb.length < 3) {{
+          return 0;
+        }}
+        const toLinear = (value) => {{
+          const v = Math.max(0, Math.min(255, Number(value) || 0)) / 255;
+          return v <= 0.03928 ? (v / 12.92) : Math.pow((v + 0.055) / 1.055, 2.4);
+        }};
+        const r = toLinear(rgb[0]);
+        const g = toLinear(rgb[1]);
+        const b = toLinear(rgb[2]);
+        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+      }};
+
+      const contrastRatio = (fg, bg) => {{
+        const l1 = relativeLuminance(fg);
+        const l2 = relativeLuminance(bg);
+        const bright = Math.max(l1, l2);
+        const dark = Math.min(l1, l2);
+        return (bright + 0.05) / (dark + 0.05);
+      }};
+
+      const clampColor = (value) => Math.max(0, Math.min(255, Math.round(value)));
+      const rgbToCss = (rgb) => `rgb(${{clampColor(rgb[0])}}, ${{clampColor(rgb[1])}}, ${{clampColor(rgb[2])}})`;
+      const darkenRgb = (rgb, factor) => {{
+        const f = Math.max(0, Math.min(0.6, Number(factor) || 0));
+        return [
+          clampColor(rgb[0] * (1.0 - f)),
+          clampColor(rgb[1] * (1.0 - f)),
+          clampColor(rgb[2] * (1.0 - f)),
+        ];
+      }};
+
+      const hardenNodeAndLabelContrast = () => {{
+        const LIGHT_TEXT = "#f8fbff";
+        const DARK_TEXT = "#0f172a";
+        const LIGHT_TEXT_RGB = [248, 251, 255];
+        const DARK_TEXT_RGB = [15, 23, 42];
+        const EDGE_TEXT = "#ffffff";
+        const pageBgRgb = (() => {{
+          let node = block;
+          while (node instanceof HTMLElement) {{
+            const bg = getComputedStyle(node).backgroundColor || "";
+            const rgb = parseAnyColorRgb(bg);
+            if (rgb) {{
+              return rgb;
+            }}
+            node = node.parentElement;
+          }}
+          const fallbackBg = getComputedStyle(document.body || document.documentElement).backgroundColor || "";
+          return parseAnyColorRgb(fallbackBg) || [15, 23, 42];
+        }})();
+        const svgArea = (() => {{
+          try {{
+            const b = svg.getBBox();
+            if (b && b.width > 0.5 && b.height > 0.5) {{
+              return b.width * b.height;
+            }}
+          }} catch (_error) {{
+            // Ignore and use fallback area.
+          }}
+          return 1;
+        }})();
+        const parseNumber = (raw, fallback = Number.NaN) => {{
+          const n = Number.parseFloat(String(raw ?? "").trim());
+          return Number.isFinite(n) ? n : fallback;
+        }};
+
+        const shapeSamples = [];
+        const shapeNodes = svg.querySelectorAll("rect, path, polygon, ellipse, circle");
+        for (const shapeNode of shapeNodes) {{
+          if (!(shapeNode instanceof SVGGraphicsElement)) {{
+            continue;
+          }}
+          if (shapeNode.closest("defs, marker, symbol")) {{
+            continue;
+          }}
+          const classText = String(shapeNode.getAttribute("class") || "").toLowerCase();
+          if (
+            classText.includes("relationshipline") ||
+              classText.includes("edge") ||
+              classText.includes("marker") ||
+              classText.includes("edgelabel") ||
+              classText.includes("labelbkg") ||
+              classText.includes("relationlabel") ||
+              classText.includes("messagetext")
+            ) {{
+              continue;
+            }}
+          const computed = getComputedStyle(shapeNode);
+          const styleText = String(shapeNode.getAttribute("style") || "").toLowerCase();
+          if (
+            styleText.includes("display:none") ||
+            styleText.includes("display: none") ||
+            computed.display === "none" ||
+            computed.visibility === "hidden"
+          ) {{
+            continue;
+          }}
+          if (styleText.includes("fill:none") || styleText.includes("fill: none")) {{
+            continue;
+          }}
+          const fillOpacity = parseNumber(
+            shapeNode.getAttribute("fill-opacity"),
+            parseNumber(shapeNode.style.fillOpacity, parseNumber(computed.fillOpacity, 1))
+          );
+          const nodeOpacity = parseNumber(
+            shapeNode.getAttribute("opacity"),
+            parseNumber(shapeNode.style.opacity, parseNumber(computed.opacity, 1))
+          );
+          if (fillOpacity <= 0.05 || nodeOpacity <= 0.05) {{
+            continue;
+          }}
+          const fillText = String(
+            shapeNode.getAttribute("fill") || shapeNode.style.fill || computed.fill || ""
+          ).trim();
+          const rgb = parseAnyColorRgb(fillText);
+          if (!rgb) {{
+            continue;
+          }}
+          let bbox = null;
+          try {{
+            bbox = shapeNode.getBBox();
+          }} catch (_error) {{
+            bbox = null;
+          }}
+          if (!bbox || bbox.width <= 1 || bbox.height <= 1) {{
+            continue;
+          }}
+          const area = bbox.width * bbox.height;
+          shapeSamples.push({{
+            node: shapeNode,
+            x1: bbox.x,
+            y1: bbox.y,
+            x2: bbox.x + bbox.width,
+            y2: bbox.y + bbox.height,
+            area,
+            rgb,
+          }});
+        }}
+
+        if (shapeSamples.length === 0) {{
+          return;
+        }}
+
+        // Slightly darken medium-light blue fills in dark mode so white node
+        // labels are easier to read.
+        for (const sample of shapeSamples) {{
+          const [r, g, b] = sample.rgb;
+          const lum = relativeLuminance(sample.rgb);
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          const saturation = max <= 0 ? 0 : (max - min) / max;
+          const blueDominant = b >= g + 10 && b >= r + 10;
+          const shouldDarken = blueDominant && saturation >= 0.08 && lum >= 0.42 && lum <= 0.78;
+          if (!shouldDarken) {{
+            continue;
+          }}
+          const darkened = darkenRgb(sample.rgb, 0.27);
+          const cssColor = rgbToCss(darkened);
+          sample.node.setAttribute("fill", cssColor);
+          sample.node.style.fill = cssColor;
+          sample.rgb = darkened;
+        }}
+
+        const sampleAtPoint = (x, y) => {{
+          let best = null;
+          let bestArea = Number.POSITIVE_INFINITY;
+          for (const sample of shapeSamples) {{
+            if (x < sample.x1 || x > sample.x2 || y < sample.y1 || y > sample.y2) {{
+              continue;
+            }}
+            if (sample.area < bestArea) {{
+              bestArea = sample.area;
+              best = sample;
+            }}
+          }}
+          return best && bestArea < svgArea * 0.45 ? best : null;
+        }};
+
+        const preferredTextColor = (bgRgb) => {{
+          const lightScore = contrastRatio(LIGHT_TEXT_RGB, bgRgb);
+          const darkScore = contrastRatio(DARK_TEXT_RGB, bgRgb);
+          return lightScore >= darkScore ? LIGHT_TEXT : DARK_TEXT;
+        }};
+
+        const isLikelyNodeText = (node) => {{
+          if (!(node instanceof Element)) {{
+            return false;
+          }}
+          return !!node.closest(
+            "g.node, g[class*='node'], g[class*='actor'], g[class*='entity'], g[class*='cluster'], g[class*='row-rect'], .nodeLabel, .entityLabel, .er.entityBox"
+          );
+        }};
+
+        const isEdgeLikeText = (node, localSample, fontSizePx, textValue = "") => {{
+          if (!(node instanceof Element)) {{
+            return false;
+          }}
+          if (node.closest(".edgeLabel, .messageText, .relation, .label")) {{
+            return true;
+          }}
+          const classText = String(node.getAttribute("class") || "").toLowerCase();
+          const hasClassHint = (
+            classText.includes("edge") ||
+            classText.includes("relation") ||
+            classText.includes("message") ||
+            classText.includes("label")
+          );
+          if (hasClassHint) {{
+            return true;
+          }}
+          if (isLikelyNodeText(node)) {{
+            return false;
+          }}
+          const text = String(textValue || "").trim();
+          const connectorVerbPattern =
+            /(reads|writes|routes|uses|sends|requests|invokes|provides|streams|contains|ingests|maps|links|calls|normalizes|authenticates|downloads|publishes|interacts|generates|captures|processes)/i;
+          if (
+            fontSizePx > 0 &&
+            fontSizePx <= 30 &&
+            (connectorVerbPattern.test(text) || (text.length > 0 && text.length <= 64 && /\\s/.test(text)))
+          ) {{
+            return true;
+          }}
+          // Heuristic: small labels on open background are almost always edge labels.
+          if (!localSample && fontSizePx > 0 && fontSizePx <= 21) {{
+            return true;
+          }}
+          if (localSample && localSample.area > (svgArea * 0.08) && fontSizePx > 0 && fontSizePx <= 24) {{
+            return true;
+          }}
+          return false;
+        }};
+
+        const ensureWhiteContrastForSample = (sample, minRatio = 5.4) => {{
+          if (!sample || !Array.isArray(sample.rgb) || sample.rgb.length < 3) {{
+            return;
+          }}
+          let current = sample.rgb;
+          let ratio = contrastRatio(LIGHT_TEXT_RGB, current);
+          if (ratio >= minRatio) {{
+            return;
+          }}
+          for (let step = 0; step < 10 && ratio < minRatio; step += 1) {{
+            current = darkenRgb(current, 0.07);
+            ratio = contrastRatio(LIGHT_TEXT_RGB, current);
+          }}
+          sample.rgb = current;
+          const cssColor = rgbToCss(current);
+          sample.node.setAttribute("fill", cssColor);
+          sample.node.style.fill = cssColor;
+        }};
+
+        const forceEdgeTextColor = (node) => {{
+          if (node instanceof HTMLElement) {{
+            node.style.setProperty("color", EDGE_TEXT, "important");
+            node.style.setProperty("fill", EDGE_TEXT, "important");
+            node.style.setProperty("opacity", "1", "important");
+            return;
+          }}
+          if (node instanceof SVGElement) {{
+            node.setAttribute("fill", EDGE_TEXT);
+            node.style.setProperty("fill", EDGE_TEXT, "important");
+            node.style.setProperty("opacity", "1", "important");
+          }}
+        }};
+
+        // Force edge/connector label readability even when Mermaid/C4 emits
+        // nested classes/styles that vary across versions.
+        const edgeLabelSelectors = [
+          ".edgeLabel",
+          ".edgeLabel *",
+          ".messageText",
+          ".messageText *",
+          ".relation",
+          ".relation *",
+          "[class*='edgeLabel']",
+          "[class*='edgeLabel'] *",
+          "[class*='edge-label']",
+          "[class*='edge-label'] *",
+          "[class*='relationshipLabel']",
+          "[class*='relationshipLabel'] *",
+          "[class*='relationLabel']",
+          "[class*='relationLabel'] *",
+          "[class*='messageText']",
+          "[class*='messageText'] *",
+          "[class*='linkLabel']",
+          "[class*='linkLabel'] *",
+        ];
+        for (const selector of edgeLabelSelectors) {{
+          const nodes = svg.querySelectorAll(selector);
+          for (const node of nodes) {{
+            forceEdgeTextColor(node);
+          }}
+        }}
+
+        const textNodes = svg.querySelectorAll("text, tspan");
+        for (const textNode of textNodes) {{
+          if (!(textNode instanceof SVGGraphicsElement)) {{
+            continue;
+          }}
+          const textValue = String(textNode.textContent || "").trim();
+          if (!textValue) {{
+            continue;
+          }}
+          let bbox = null;
+          try {{
+            bbox = textNode.getBBox();
+          }} catch (_error) {{
+            bbox = null;
+          }}
+          if (!bbox || bbox.width <= 0.2 || bbox.height <= 0.2) {{
+            continue;
+          }}
+          const fontSizePx = parseNumber(getComputedStyle(textNode).fontSize, 0);
+          const centerX = bbox.x + (bbox.width / 2);
+          const centerY = bbox.y + (bbox.height / 2);
+          const localSample = sampleAtPoint(centerX, centerY);
+          if (isEdgeLikeText(textNode, localSample, fontSizePx, textValue)) {{
+            forceEdgeTextColor(textNode);
+            const edgeContainer = textNode.closest(
+              ".edgeLabel, .messageText, .relation, g[class*='edge'], g[class*='relation'], g[class*='message']"
+            );
+            if (edgeContainer instanceof SVGElement) {{
+              edgeContainer.style.opacity = "1";
+            }}
+            continue;
+          }}
+          const bgRgb = (localSample && localSample.rgb) || pageBgRgb;
+          const labelColor = preferredTextColor(bgRgb);
+          if (labelColor === LIGHT_TEXT && localSample) {{
+            ensureWhiteContrastForSample(localSample);
+          }}
+          forceEdgeTextColor(textNode);
+          textNode.setAttribute("fill", labelColor);
+          textNode.style.setProperty("fill", labelColor, "important");
+          textNode.style.setProperty("opacity", "1", "important");
+          // Safety net: if text remains low-contrast against open background,
+          // force the edge-label color.
+          if (!localSample) {{
+            const renderedFill = String(getComputedStyle(textNode).fill || "").trim();
+            const renderedRgb = parseAnyColorRgb(renderedFill);
+            if (renderedRgb && contrastRatio(renderedRgb, pageBgRgb) < 4.6) {{
+              forceEdgeTextColor(textNode);
+            }}
+          }}
+        }}
+
+        const htmlTextNodes = svg.querySelectorAll("foreignObject span, foreignObject div, foreignObject p");
+        for (const textNode of htmlTextNodes) {{
+          if (!(textNode instanceof HTMLElement)) {{
+            continue;
+          }}
+          const textValue = String(textNode.textContent || "").trim();
+          if (!textValue) {{
+            continue;
+          }}
+          const fontSizePx = parseNumber(getComputedStyle(textNode).fontSize, 0);
+          const container = textNode.closest("foreignObject");
+          let bgRgb = pageBgRgb;
+          let localSample = null;
+          if (container instanceof SVGGraphicsElement) {{
+            let bbox = null;
+            try {{
+              bbox = container.getBBox();
+            }} catch (_error) {{
+              bbox = null;
+            }}
+            if (bbox && bbox.width > 0.2 && bbox.height > 0.2) {{
+              const centerX = bbox.x + (bbox.width / 2);
+              const centerY = bbox.y + (bbox.height / 2);
+              localSample = sampleAtPoint(centerX, centerY);
+              bgRgb = (localSample && localSample.rgb) || pageBgRgb;
+            }}
+          }}
+          if (isEdgeLikeText(textNode, localSample, fontSizePx, textValue)) {{
+            forceEdgeTextColor(textNode);
+            continue;
+          }}
+          const labelColor = preferredTextColor(bgRgb);
+          if (labelColor === LIGHT_TEXT && localSample) {{
+            ensureWhiteContrastForSample(localSample);
+          }}
+          textNode.style.setProperty("color", labelColor, "important");
+          textNode.style.setProperty("fill", labelColor, "important");
+          textNode.style.setProperty("opacity", "1", "important");
+          if (!localSample) {{
+            const renderedColor = String(getComputedStyle(textNode).color || "").trim();
+            const renderedRgb = parseAnyColorRgb(renderedColor);
+            if (renderedRgb && contrastRatio(renderedRgb, pageBgRgb) < 4.6) {{
+              forceEdgeTextColor(textNode);
+            }}
+          }}
+        }}
+
+        // Final pass: any small non-node labels with weak contrast on page
+        // background are forced to the edge-label color.
+        const finalSvgTextNodes = svg.querySelectorAll("text, tspan");
+        for (const textNode of finalSvgTextNodes) {{
+          if (!(textNode instanceof SVGGraphicsElement)) {{
+            continue;
+          }}
+          const textValue = String(textNode.textContent || "").trim();
+          if (!textValue) {{
+            continue;
+          }}
+          if (isLikelyNodeText(textNode)) {{
+            continue;
+          }}
+          const fontSizePx = parseNumber(getComputedStyle(textNode).fontSize, 0);
+          if (fontSizePx <= 0 || fontSizePx > 32) {{
+            continue;
+          }}
+          const renderedFill = String(getComputedStyle(textNode).fill || "").trim();
+          const renderedRgb = parseAnyColorRgb(renderedFill);
+          if (!renderedRgb) {{
+            continue;
+          }}
+          if (contrastRatio(renderedRgb, pageBgRgb) < 4.8) {{
+            forceEdgeTextColor(textNode);
+          }}
+        }}
+
+        const finalHtmlTextNodes = svg.querySelectorAll("foreignObject span, foreignObject div, foreignObject p");
+        for (const textNode of finalHtmlTextNodes) {{
+          if (!(textNode instanceof HTMLElement)) {{
+            continue;
+          }}
+          const textValue = String(textNode.textContent || "").trim();
+          if (!textValue) {{
+            continue;
+          }}
+          if (isLikelyNodeText(textNode)) {{
+            continue;
+          }}
+          const fontSizePx = parseNumber(getComputedStyle(textNode).fontSize, 0);
+          if (fontSizePx <= 0 || fontSizePx > 32) {{
+            continue;
+          }}
+          const renderedColor = String(getComputedStyle(textNode).color || "").trim();
+          const renderedRgb = parseAnyColorRgb(renderedColor);
+          if (!renderedRgb) {{
+            continue;
+          }}
+          if (contrastRatio(renderedRgb, pageBgRgb) < 4.8) {{
+            forceEdgeTextColor(textNode);
+          }}
+        }}
+      }};
+
+      hardenGenericEdgesAndLabels();
+      hardenNodeAndLabelContrast();
+
       const kind = String((block.dataset && block.dataset.mdexploreMermaidKind) || "").toLowerCase();
       const looksLikeEr =
         kind === "er" ||
@@ -1926,6 +3641,9 @@ class MarkdownRenderer:
       ) {{
         await window.__mdexploreRunMermaidWithMode(mermaidMode, false);
       }}
+      if (window.__mdexploreApplyPlantUmlZoomControls) {{
+        window.__mdexploreApplyPlantUmlZoomControls(mermaidMode);
+      }}
       const mathReady = await window.__mdexploreTryTypesetMath();
       if (!mathReady) {{
         window.__mdexploreScheduleMathRetries();
@@ -2458,6 +4176,8 @@ class MdExploreWindow(QMainWindow):
         self._next_view_sequence = 1
         self._next_tab_color_index = 0
         self._mermaid_svg_cache_by_mode: dict[str, dict[str, str]] = {"auto": {}, "pdf": {}}
+        # Per-document, in-memory diagram viewport state (zoom/pan) for this run.
+        self._diagram_view_state_by_doc: dict[str, dict[str, dict[str, float | bool]]] = {}
         # In-memory per-document tab/view sessions for this app run only.
         self._document_view_sessions: dict[str, dict] = {}
         self._document_line_counts: dict[str, int] = {}
@@ -3082,13 +4802,89 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             return "{}"
 
-    def _inject_mermaid_cache_seed(self, html_doc: str) -> str:
-        """Inject current Mermaid cache payload into HTML template seed token."""
+    def _serialized_diagram_view_state_json(self, path_key: str | None) -> str:
+        """Serialize per-document diagram view state for HTML seed injection."""
+        if not path_key:
+            return "{}"
+        payload = self._diagram_view_state_by_doc.get(path_key, {})
+        if not isinstance(payload, dict):
+            return "{}"
+        try:
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    def _inject_mermaid_cache_seed(self, html_doc: str, path_key: str | None = None) -> str:
+        """Inject runtime cache/state payloads into HTML template seed tokens."""
+        resolved_key = path_key if path_key is not None else self._current_preview_path_key()
         token_literal = json.dumps(MERMAID_CACHE_JSON_TOKEN)
         cache_literal = json.dumps(self._serialized_mermaid_cache_json())
-        if token_literal not in html_doc:
-            return html_doc
-        return html_doc.replace(token_literal, cache_literal, 1)
+        out = html_doc
+        if token_literal in out:
+            out = out.replace(token_literal, cache_literal, 1)
+
+        state_token_literal = json.dumps(DIAGRAM_VIEW_STATE_JSON_TOKEN)
+        state_literal = json.dumps(self._serialized_diagram_view_state_json(resolved_key))
+        if state_token_literal in out:
+            out = out.replace(state_token_literal, state_literal, 1)
+        return out
+
+    def _capture_current_diagram_view_state(self, expected_key: str | None = None) -> None:
+        """Snapshot in-page diagram zoom/pan state into per-document runtime cache."""
+        key = expected_key or self._current_preview_path_key()
+        if key is None:
+            return
+        js = """
+(() => {
+  if (window.__mdexploreCollectDiagramViewState) {
+    return window.__mdexploreCollectDiagramViewState();
+  }
+  return {};
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, path_key=key: self._on_diagram_view_state_snapshot(path_key, result),
+        )
+
+    def _on_diagram_view_state_snapshot(self, path_key: str, result) -> None:
+        """Merge diagram view state snapshot from JS into process cache."""
+        if not isinstance(path_key, str) or not path_key:
+            return
+        if not isinstance(result, dict):
+            return
+        sanitized: dict[str, dict[str, float | bool]] = {}
+        for raw_key, raw_state in result.items():
+            if not isinstance(raw_key, str) or not isinstance(raw_state, dict):
+                continue
+            state_key = raw_key.strip()
+            if not state_key or len(state_key) > 240:
+                continue
+            try:
+                zoom = float(raw_state.get("zoom", 1.0))
+            except Exception:
+                zoom = 1.0
+            try:
+                scroll_left = float(raw_state.get("scrollLeft", 0.0))
+            except Exception:
+                scroll_left = 0.0
+            try:
+                scroll_top = float(raw_state.get("scrollTop", 0.0))
+            except Exception:
+                scroll_top = 0.0
+            if not math.isfinite(zoom):
+                zoom = 1.0
+            if not math.isfinite(scroll_left):
+                scroll_left = 0.0
+            if not math.isfinite(scroll_top):
+                scroll_top = 0.0
+            sanitized[state_key] = {
+                "zoom": max(0.2, min(8.0, zoom)),
+                "scrollLeft": max(0.0, scroll_left),
+                "scrollTop": max(0.0, scroll_top),
+                "dirty": bool(raw_state.get("dirty")),
+            }
+        self._diagram_view_state_by_doc[path_key] = sanitized
 
     def _schedule_mermaid_cache_harvest_for(self, expected_key: str) -> None:
         """Collect Mermaid SVG cache snapshots after client rendering settles."""
@@ -5330,7 +7126,7 @@ class MdExploreWindow(QMainWindow):
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
-        self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc), base_url)
+        self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc, path_key), base_url)
 
     @staticmethod
     def _doc_id_for_path(path_key: str) -> str:
@@ -5425,6 +7221,8 @@ class MdExploreWindow(QMainWindow):
         self._preview_capture_enabled = True
         self._scroll_restore_block_until = 0.0
         self._capture_current_preview_scroll(force=True)
+        if previous_path_key is not None:
+            self._capture_current_diagram_view_state(previous_path_key)
         self._request_active_view_top_line_update(force=True)
 
     def _restore_current_preview_scroll(self, expected_key: str | None = None) -> None:
@@ -5477,7 +7275,14 @@ class MdExploreWindow(QMainWindow):
             f'<pre class="plantuml-error-detail">{safe_error}</pre>'
         )
 
-    def _plantuml_block_html(self, placeholder_id: str, line_attrs: str, status: str, payload: str) -> str:
+    def _plantuml_block_html(
+        self,
+        placeholder_id: str,
+        line_attrs: str,
+        status: str,
+        payload: str,
+        hash_key: str | None = None,
+    ) -> str:
         inner = self._plantuml_inner_html(status, payload) if status in {"done", "error"} else "PlantUML rendering..."
         classes = ["mdexplore-fence", "plantuml-async"]
         if status == "pending":
@@ -5487,8 +7292,12 @@ class MdExploreWindow(QMainWindow):
         else:
             classes.append("plantuml-ready")
         class_attr = " ".join(classes)
+        hash_attr = ""
+        if hash_key:
+            safe_hash = html.escape(hash_key, quote=True)
+            hash_attr = f' data-mdexplore-plantuml-hash="{safe_hash}"'
         return (
-            f'<div class="{class_attr}" id="{placeholder_id}"{line_attrs}>'
+            f'<div class="{class_attr}" id="{placeholder_id}"{hash_attr}{line_attrs}>'
             f"{inner}"
             "</div>\n"
         )
@@ -5578,6 +7387,9 @@ class MdExploreWindow(QMainWindow):
     node.classList.remove("plantuml-pending", "plantuml-ready", "plantuml-error");
     node.classList.add(className);
     node.innerHTML = inner;
+  }}
+  if (window.__mdexploreApplyPlantUmlZoomControls) {{
+    window.__mdexploreApplyPlantUmlZoomControls("auto");
   }}
 }})();
 """
@@ -5674,7 +7486,7 @@ class MdExploreWindow(QMainWindow):
                     phase="restoring",
                 )
                 self.statusBar().showMessage(f"Using cached preview: {resolved.name}...")
-                self.preview.setHtml(self._inject_mermaid_cache_seed(cached[2]), base_url)
+                self.preview.setHtml(self._inject_mermaid_cache_seed(cached[2], cache_key), base_url)
                 return
 
             self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
@@ -5712,13 +7524,13 @@ class MdExploreWindow(QMainWindow):
                 # Always emit a lightweight placeholder first so file restores
                 # are immediate; ready/error SVG payloads are patched in after
                 # the page mounts.
-                return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "")
+                return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "", hash_key=hash_key)
 
             html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
             self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
-            self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc), base_url)
+            self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc, cache_key), base_url)
         except Exception as exc:
             self._stop_restore_overlay_monitor()
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
@@ -6046,7 +7858,7 @@ class MdExploreWindow(QMainWindow):
       if (measuredHeight > availableDiagramHeight) {
         const shrinkRatio = availableDiagramHeight / measuredHeight;
         if (shrinkRatio >= MIN_KEEP_SHRINK_RATIO) {
-          fence.style.setProperty("--mdexplore-print-diagram-max-height", `${Math.floor(availableDiagramHeight)}px`);
+          fence.style.setProperty("--mdexplore-print-diagram-max-height", `${{Math.floor(availableDiagramHeight)}}px`);
         } else {
           keepDiagram = false;
         }
