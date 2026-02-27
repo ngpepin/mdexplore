@@ -8911,6 +8911,26 @@ class MdExploreWindow(QMainWindow):
   .mdexplore-fence.mdexplore-print-allow-break .mermaid svg {
     max-height: none !important;
   }
+  pre {
+    overflow: visible !important;
+    max-width: 100% !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
+  pre > code,
+  pre code,
+  code[class*="language-"],
+  pre code[class*="language-"] {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
+  pre::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+  }
   mjx-container[jax="SVG"] {
     font-size: 1.08em !important;
     text-rendering: geometricPrecision;
@@ -8991,6 +9011,26 @@ body.mdexplore-pdf-export-mode pre {
   background: #efefef !important;
   border-color: #7a7a7a !important;
 }
+body.mdexplore-pdf-export-mode pre {
+  overflow: visible !important;
+  max-width: 100% !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+body.mdexplore-pdf-export-mode pre > code,
+body.mdexplore-pdf-export-mode pre code,
+body.mdexplore-pdf-export-mode code[class*="language-"],
+body.mdexplore-pdf-export-mode pre code[class*="language-"] {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+body.mdexplore-pdf-export-mode pre::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+}
 body.mdexplore-pdf-export-mode table,
 body.mdexplore-pdf-export-mode th,
 body.mdexplore-pdf-export-mode td,
@@ -9064,6 +9104,26 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       img.style.removeProperty("width");
       img.style.setProperty("max-width", "100%", "important");
       img.style.setProperty("height", "auto", "important");
+    }
+
+    // Prevent horizontal-scroll snapshots in PDF for long command/code lines.
+    for (const preNode of Array.from(document.querySelectorAll("pre"))) {
+      if (!(preNode instanceof HTMLElement)) {
+        continue;
+      }
+      preNode.style.setProperty("overflow", "visible", "important");
+      preNode.style.setProperty("max-width", "100%", "important");
+      preNode.style.setProperty("white-space", "pre-wrap", "important");
+      preNode.style.setProperty("overflow-wrap", "anywhere", "important");
+      preNode.style.setProperty("word-break", "break-word", "important");
+    }
+    for (const codeNode of Array.from(document.querySelectorAll("pre code, code[class*='language-']"))) {
+      if (!(codeNode instanceof HTMLElement)) {
+        continue;
+      }
+      codeNode.style.setProperty("white-space", "pre-wrap", "important");
+      codeNode.style.setProperty("overflow-wrap", "anywhere", "important");
+      codeNode.style.setProperty("word-break", "break-word", "important");
     }
   };
 
