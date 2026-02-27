@@ -32,6 +32,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `PySide6` and `QtWebEngine` available via pip dependencies.
 - `pypdf` and `reportlab` available for PDF page-number stamping.
 - Mermaid should prefer a local bundle when available and only use CDN fallback.
+- Rust Mermaid backend is optional and uses `mmdr` when `--mermaid-backend rust` is selected.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
 - Java runtime is expected for local PlantUML rendering.
 - VS Code `code` command may or may not be installed; app should fail gracefully when missing.
@@ -141,6 +142,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 
 - Markdown parser is `markdown-it-py`.
 - Mermaid and MathJax are rendered client-side in web view.
+- Mermaid backend is switchable via CLI:
+  - `--mermaid-backend js` (default)
+  - `--mermaid-backend rust` (renders SVG with `mmdr`)
 - Mermaid loading order is local-first, then CDN fallback.
 - Mermaid rendering should use a dark-theme-friendly high-contrast palette when
   preview background is dark.
@@ -149,6 +153,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - PDF export currently forces a print-safe monochrome/grayscale Mermaid path,
   then restores preview Mermaid rendering mode after export.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
+- `MDEXPLORE_MERMAID_RS_BIN` can be used to force a specific `mmdr` executable path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.
 - Callout syntax is parsed from blockquotes using `[!TYPE]` markers and rendered
@@ -192,6 +197,7 @@ across all navigation sequences.
   - empty argument should behave like "no path"
   - `file://` URIs should be decoded
   - file arguments should resolve to parent directory
+- Launcher must pass through supported app switches (for example `--mermaid-backend`).
 - Non-interactive launcher runs should log to
   `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
   Log retention is capped to the most recent 1000 lines.

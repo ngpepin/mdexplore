@@ -52,3 +52,4 @@ Thumbs.db
 *.class
 
 test
+mermaid-rs-renderer

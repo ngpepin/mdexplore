@@ -89,7 +89,7 @@ if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
 fi
 
 usage() {
-  echo "Usage: $(basename "$0") [PATH]"
+  echo "Usage: $(basename "$0") [--mermaid-backend js|rust] [PATH]"
   echo "If PATH is omitted, mdexplore uses ~/.mdexplore.cfg or HOME."
 }
 
@@ -182,59 +182,97 @@ configure_local_renderer_overrides() {
   fi
 }
 
+configure_mermaid_rs_override() {
+  local detected_path=""
+
+  if [[ -z "${MDEXPLORE_MERMAID_RS_BIN:-}" ]]; then
+    detected_path="$(resolve_local_script_path \
+      "${HOME}/.cargo/bin/mmdr" \
+      "${SCRIPT_DIR}/vendor/mermaid-rs-renderer/target/release/mmdr" \
+      "${SCRIPT_DIR}/vendor/mermaid-rs-renderer/mmdr" \
+      "${SCRIPT_DIR}/vendor/mermaid-rs-renderer/bin/mmdr" \
+      "${SCRIPT_DIR}/mermaid-rs-renderer/target/release/mmdr" \
+      "${SCRIPT_DIR}/mmdr" \
+      || true)"
+    if [[ -n "${detected_path}" ]]; then
+      export MDEXPLORE_MERMAID_RS_BIN="${detected_path}"
+      echo "Using local Mermaid Rust renderer: ${MDEXPLORE_MERMAID_RS_BIN}"
+    fi
+  else
+    echo "Using configured MDEXPLORE_MERMAID_RS_BIN: ${MDEXPLORE_MERMAID_RS_BIN}"
+  fi
+}
+
 TARGET_PATH=""
-if [[ $# -ge 1 ]]; then
-  for RAW_PATH in "$@"; do
-    [[ -z "${RAW_PATH}" ]] && continue
-    TARGET_PATH=""
-    URI_INPUT=0
-    case "${RAW_PATH}" in
-      ""|"%u"|"%U"|"%f"|"%F")
-        continue
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      -*)
-        # Some desktop launchers may add non-path args. Ignore them.
-        echo "Ignoring non-path argument: ${RAW_PATH}"
-        continue
-        ;;
-      file://*)
-        URI_INPUT=1
-        TARGET_PATH="$(decode_file_uri "${RAW_PATH}")"
-        ;;
-      *)
-        TARGET_PATH="${RAW_PATH}"
-        ;;
-    esac
+APP_ARGS=()
+MERMAID_BACKEND_EXPLICIT=0
+while [[ $# -gt 0 ]]; do
+  RAW_ARG="$1"
+  shift
+  [[ -z "${RAW_ARG}" ]] && continue
 
-    if [[ -f "${TARGET_PATH}" ]]; then
-      TARGET_PATH="$(dirname "${TARGET_PATH}")"
-    fi
-
-    if [[ -d "${TARGET_PATH}" ]]; then
-      break
-    fi
-
-    if [[ "${URI_INPUT}" -eq 1 ]]; then
-      # Desktop URI launches can occasionally pass odd values. Fall back
-      # to default root instead of aborting a dock/menu launch.
-      echo "Ignoring invalid URI-derived path: ${TARGET_PATH}"
-      TARGET_PATH=""
+  case "${RAW_ARG}" in
+    ""|"%u"|"%U"|"%f"|"%F")
       continue
-    fi
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --mermaid-backend)
+      if [[ $# -eq 0 ]]; then
+        echo "Missing value for --mermaid-backend (expected js|rust)." >&2
+        exit 1
+      fi
+      APP_ARGS+=("${RAW_ARG}" "$1")
+      MERMAID_BACKEND_EXPLICIT=1
+      shift
+      continue
+      ;;
+    --mermaid-backend=*)
+      APP_ARGS+=("${RAW_ARG}")
+      MERMAID_BACKEND_EXPLICIT=1
+      continue
+      ;;
+  esac
 
-    if [[ $# -eq 1 ]]; then
-      echo "Path is not a directory: ${TARGET_PATH}" >&2
-      exit 1
-    fi
+  URI_INPUT=0
+  CANDIDATE_PATH=""
+  case "${RAW_ARG}" in
+    -*)
+      # Some desktop launchers may add non-path args. Ignore them.
+      echo "Ignoring non-path argument: ${RAW_ARG}"
+      continue
+      ;;
+    file://*)
+      URI_INPUT=1
+      CANDIDATE_PATH="$(decode_file_uri "${RAW_ARG}")"
+      ;;
+    *)
+      CANDIDATE_PATH="${RAW_ARG}"
+      ;;
+  esac
 
-    echo "Ignoring invalid path argument: ${TARGET_PATH}"
-    TARGET_PATH=""
-  done
-fi
+  if [[ -f "${CANDIDATE_PATH}" ]]; then
+    CANDIDATE_PATH="$(dirname "${CANDIDATE_PATH}")"
+  fi
+
+  if [[ -d "${CANDIDATE_PATH}" ]]; then
+    TARGET_PATH="${CANDIDATE_PATH}"
+    continue
+  fi
+
+  if [[ "${URI_INPUT}" -eq 1 ]]; then
+    # Desktop URI launches can occasionally pass odd values. Fall back
+    # to default root instead of aborting a dock/menu launch.
+    echo "Ignoring invalid URI-derived path: ${CANDIDATE_PATH}"
+    continue
+  fi
+
+  if [[ -n "${CANDIDATE_PATH}" ]]; then
+    echo "Ignoring invalid path argument: ${CANDIDATE_PATH}"
+  fi
+done
 
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   echo "No GUI display detected (DISPLAY/WAYLAND_DISPLAY unset)." >&2
@@ -308,6 +346,14 @@ if ! runtime_import_check; then
 fi
 
 configure_local_renderer_overrides
+configure_mermaid_rs_override
+
+# Default to Rust Mermaid renderer for launcher-driven debugging, unless the
+# caller explicitly selected a backend on the command line.
+if [[ "${MERMAID_BACKEND_EXPLICIT}" -eq 0 ]]; then
+  APP_ARGS+=("--mermaid-backend" "rust")
+  echo "Defaulting Mermaid backend to rust (override with --mermaid-backend js)."
+fi
 
 if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
   trim_log_file_inplace "${LOG_FILE}" "${MAX_LOG_LINES}"
@@ -317,8 +363,8 @@ if [[ -n "${TARGET_PATH}" ]]; then
   echo "Launching mdexplore for: ${TARGET_PATH}"
   # Do not override argv[0] for python; it can break venv detection and
   # cause imports to resolve against system packages.
-  exec "${VENV_PYTHON}" "${APP_FILE}" "${TARGET_PATH}"
+  exec "${VENV_PYTHON}" "${APP_FILE}" "${APP_ARGS[@]}" "${TARGET_PATH}"
 else
   echo "Launching mdexplore using configured default root (or home)"
-  exec "${VENV_PYTHON}" "${APP_FILE}"
+  exec "${VENV_PYTHON}" "${APP_FILE}" "${APP_ARGS[@]}"
 fi

@@ -16,7 +16,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from collections import deque
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -59,6 +61,12 @@ MERMAID_CACHE_RESTORE_BATCH_SIZE = 2
 RESTORE_OVERLAY_TIMEOUT_SECONDS = 25.0
 RESTORE_OVERLAY_SHOW_DELAY_MS = 350
 RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 1.0
+MERMAID_BACKEND_JS = "js"
+MERMAID_BACKEND_RUST = "rust"
+# QWebEngineView.setHtml uses an internal data URL path with practical size
+# limits; large inline-SVG documents can fail to load. Use file-based loading
+# above this threshold.
+PREVIEW_SETHTML_MAX_BYTES = 650_000
 
 
 def _config_file_path() -> Path:
@@ -554,7 +562,17 @@ class ColorizedMarkdownModel(QFileSystemModel):
 class MarkdownRenderer:
     """Converts markdown to HTML with Mermaid, MathJax, and PlantUML support."""
 
-    def __init__(self) -> None:
+    def __init__(self, mermaid_backend: str = MERMAID_BACKEND_JS) -> None:
+        self._mermaid_backend_requested = str(mermaid_backend or MERMAID_BACKEND_JS).strip().lower()
+        if self._mermaid_backend_requested not in {MERMAID_BACKEND_JS, MERMAID_BACKEND_RUST}:
+            self._mermaid_backend_requested = MERMAID_BACKEND_JS
+        self._mermaid_rs_binary = self._resolve_mermaid_rs_binary()
+        self._mermaid_rs_setup_issue = self._mermaid_rs_setup_error()
+        if self._mermaid_backend_requested == MERMAID_BACKEND_RUST and self._mermaid_rs_setup_issue is None:
+            self._mermaid_backend = MERMAID_BACKEND_RUST
+        else:
+            self._mermaid_backend = MERMAID_BACKEND_JS
+        self._mermaid_svg_cache: dict[str, str] = {}
         self._mathjax_local_script = self._resolve_local_mathjax_script()
         self._mermaid_local_script = self._resolve_local_mermaid_script()
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
@@ -595,17 +613,49 @@ class MarkdownRenderer:
                 line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
 
             if info == "mermaid":
-                prepared_source = self._prepare_mermaid_source(code)
-                mermaid_hash = hashlib.sha1(prepared_source.encode("utf-8", errors="replace")).hexdigest()
-                mermaid_index = int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
-                if isinstance(env, dict):
-                    env["mermaid_index"] = mermaid_index + 1
-                return (
-                    f'<div class="mdexplore-fence"{line_attrs}>'
-                    f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}" '
-                    f'data-mdexplore-mermaid-index="{mermaid_index}">\n{html.escape(code)}\n</div>'
-                    "</div>\n"
-                )
+                try:
+                    prepared_source = self._prepare_mermaid_source(code)
+                    mermaid_hash = hashlib.sha1(prepared_source.encode("utf-8", errors="replace")).hexdigest()
+                    mermaid_index = int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
+                    if isinstance(env, dict):
+                        env["mermaid_index"] = mermaid_index + 1
+                    if self._mermaid_backend == MERMAID_BACKEND_RUST:
+                        svg_markup, error_message = self._render_mermaid_svg_markup(prepared_source)
+                        source_attr = html.escape(prepared_source, quote=True)
+                        if svg_markup is not None:
+                            return (
+                                f'<div class="mdexplore-fence"{line_attrs}>'
+                                f'<div class="mermaid mermaid-ready" data-mdexplore-mermaid-backend="rust" '
+                                f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                                f'data-mdexplore-mermaid-index="{mermaid_index}" '
+                                f'data-mdexplore-mermaid-source="{source_attr}">\n{svg_markup}\n</div>'
+                                "</div>\n"
+                            )
+                        safe_error_attr = html.escape(error_message or "Rust Mermaid rendering failed", quote=True)
+                        return (
+                            f'<div class="mdexplore-fence"{line_attrs}>'
+                            f'<div class="mermaid mermaid-rust-fallback" data-mdexplore-mermaid-backend="rust" '
+                            f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                            f'data-mdexplore-mermaid-index="{mermaid_index}" '
+                            f'data-mdexplore-mermaid-source="{source_attr}" '
+                            f'data-mdexplore-rust-error="{safe_error_attr}">'
+                            "Mermaid rendering..."
+                            "</div>"
+                            "</div>\n"
+                        )
+                    return (
+                        f'<div class="mdexplore-fence"{line_attrs}>'
+                        f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                        f'data-mdexplore-mermaid-index="{mermaid_index}">\n{html.escape(code)}\n</div>'
+                        "</div>\n"
+                    )
+                except Exception as exc:
+                    safe_error = html.escape(str(exc) or "unexpected Mermaid rendering error")
+                    return (
+                        f'<div class="mdexplore-fence mermaid-error"{line_attrs}>'
+                        f'<div class="mermaid mermaid-error">Mermaid render failed: {safe_error}</div>'
+                        "</div>\n"
+                    )
 
             if info in {"plantuml", "puml", "uml"}:
                 resolver = env.get("plantuml_resolver") if isinstance(env, dict) else None
@@ -646,6 +696,302 @@ class MarkdownRenderer:
         self._md.renderer.rules["math_inline"] = custom_math_inline
         self._md.renderer.rules["math_block"] = custom_math_block
         self._md.renderer.renderToken = custom_render_token
+
+    @property
+    def mermaid_backend(self) -> str:
+        """Return active Mermaid backend (`js` or `rust`)."""
+        return self._mermaid_backend
+
+    @property
+    def mermaid_backend_requested(self) -> str:
+        """Return requested Mermaid backend from CLI/config."""
+        return self._mermaid_backend_requested
+
+    def mermaid_backend_warning(self) -> str | None:
+        """Describe why requested Mermaid backend could not be activated."""
+        if self._mermaid_backend_requested == MERMAID_BACKEND_RUST and self._mermaid_backend != MERMAID_BACKEND_RUST:
+            return self._mermaid_rs_setup_issue or "Rust Mermaid backend unavailable"
+        return None
+
+    def _resolve_mermaid_rs_binary(self) -> Path | None:
+        """Locate mmdr executable for Rust Mermaid rendering."""
+        env_value = os.environ.get("MDEXPLORE_MERMAID_RS_BIN", "").strip()
+        candidates: list[Path] = []
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+
+        app_dir = Path(__file__).resolve().parent
+        candidates.extend(
+            [
+                Path.home() / ".cargo" / "bin" / "mmdr",
+                app_dir / "vendor" / "mermaid-rs-renderer" / "target" / "release" / "mmdr",
+                app_dir / "vendor" / "mermaid-rs-renderer" / "mmdr",
+                app_dir / "vendor" / "mermaid-rs-renderer" / "bin" / "mmdr",
+                app_dir / "mermaid-rs-renderer" / "target" / "release" / "mmdr",
+                app_dir / "mmdr",
+            ]
+        )
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return candidate.resolve()
+            except Exception:
+                continue
+
+        for name in ("mmdr", "mermaid-rs-renderer"):
+            found = shutil.which(name)
+            if found:
+                try:
+                    return Path(found).resolve()
+                except Exception:
+                    return Path(found)
+        return None
+
+    def _mermaid_rs_setup_error(self) -> str | None:
+        """Return setup issue text when Rust Mermaid backend is unavailable."""
+        if self._mermaid_rs_binary is None:
+            return (
+                "mmdr executable not found "
+                "(set MDEXPLORE_MERMAID_RS_BIN or install mermaid-rs-renderer)"
+            )
+        return None
+
+    def _render_mermaid_svg_markup(self, code: str) -> tuple[str | None, str | None]:
+        """Render Mermaid source through Rust mmdr backend and return raw SVG."""
+        if self._mermaid_rs_setup_issue is not None:
+            return None, self._mermaid_rs_setup_issue
+        if self._mermaid_rs_binary is None:
+            return None, "mmdr executable not available"
+
+        prepared_source = self._prepare_mermaid_source(code)
+        rust_theme_config = self._rust_mermaid_theme_config()
+        config_signature = json.dumps(rust_theme_config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cache_key = hashlib.sha1(
+            (prepared_source + "\n__MDEXPLORE_RUST_CFG__\n" + config_signature).encode("utf-8", errors="replace")
+        ).hexdigest()
+        cached = self._mermaid_svg_cache.get(cache_key)
+        if cached is not None:
+            return cached, None
+
+        tmp_input_path = None
+        tmp_output_path = None
+        tmp_config_path = None
+        try:
+            input_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".mmd", delete=False)
+            tmp_input_path = Path(input_file.name)
+            input_file.write(prepared_source)
+            input_file.flush()
+            input_file.close()
+
+            output_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".svg", delete=False)
+            tmp_output_path = Path(output_file.name)
+            output_file.close()
+
+            config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+            tmp_config_path = Path(config_file.name)
+            config_file.write(config_signature)
+            config_file.flush()
+            config_file.close()
+
+            # `mmdr` CLI signatures vary by build. Prefer the current
+            # flag-based form (-i/-o/-e), then fall back to positional.
+            candidate_commands = [
+                [
+                    str(self._mermaid_rs_binary),
+                    "-i",
+                    str(tmp_input_path),
+                    "-o",
+                    str(tmp_output_path),
+                    "-e",
+                    "svg",
+                    "-c",
+                    str(tmp_config_path),
+                ],
+                [
+                    str(self._mermaid_rs_binary),
+                    "-i",
+                    str(tmp_input_path),
+                    "-o",
+                    str(tmp_output_path),
+                    "-e",
+                    "svg",
+                ],
+                [
+                    str(self._mermaid_rs_binary),
+                    str(tmp_input_path),
+                    str(tmp_output_path),
+                    "--output-format",
+                    "svg",
+                ],
+            ]
+            result = None
+            for command in candidate_commands:
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+                if result.returncode == 0:
+                    break
+
+            if result is None or result.returncode != 0:
+                error_text = ((result.stderr if result is not None else "") or (result.stdout if result is not None else "") or "").strip()
+                if not error_text:
+                    code = result.returncode if result is not None else "unknown"
+                    error_text = f"mmdr exited with code {code}"
+                return None, error_text
+
+            svg_markup = tmp_output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if "<svg" not in svg_markup.casefold():
+                return None, "mmdr did not produce SVG output"
+            cleaned_svg = self._sanitize_rust_mermaid_svg_markup(svg_markup)
+            self._mermaid_svg_cache[cache_key] = cleaned_svg
+            return cleaned_svg, None
+        except subprocess.TimeoutExpired:
+            return None, "mmdr render timed out"
+        except Exception as exc:
+            return None, f"Rust Mermaid render failed: {exc}"
+        finally:
+            if tmp_input_path is not None:
+                try:
+                    tmp_input_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if tmp_output_path is not None:
+                try:
+                    tmp_output_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if tmp_config_path is not None:
+                try:
+                    tmp_config_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _rust_mermaid_theme_config() -> dict[str, object]:
+        """Dark-theme palette for Rust Mermaid output in GUI preview mode."""
+        return {
+            "theme": "base",
+            "themeVariables": {
+                "background": "#0f172a",
+                "primaryColor": "#1e293b",
+                "primaryBorderColor": "#93c5fd",
+                "primaryTextColor": "#e5e7eb",
+                "secondaryColor": "#172554",
+                "tertiaryColor": "#111827",
+                "lineColor": "#d1d5db",
+                "textColor": "#e5e7eb",
+                "edgeLabelBackground": "#0f172a",
+                "clusterBkg": "#1f2937",
+                "clusterBorder": "#94a3b8",
+                "actorBkg": "#1e293b",
+                "actorBorder": "#93c5fd",
+                "actorLine": "#d1d5db",
+                "noteBkg": "#1f2937",
+                "noteBorderColor": "#93c5fd",
+                "fontFamily": "Noto Sans, DejaVu Sans, sans-serif",
+            },
+        }
+
+    @staticmethod
+    def _parse_svg_length(value: str | None) -> float | None:
+        """Parse numeric SVG lengths from values like '123', '123px', '123.4%'."""
+        if not value:
+            return None
+        match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(value))
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    @classmethod
+    def _sanitize_rust_mermaid_svg_markup(cls, svg_markup: str) -> str:
+        """Remove opaque white canvas background from Rust Mermaid SVG output."""
+        if not svg_markup:
+            return svg_markup
+        try:
+            root = ET.fromstring(svg_markup)
+        except Exception:
+            return svg_markup
+
+        def local_name(tag: str) -> str:
+            return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+        if local_name(root.tag).lower() != "svg":
+            return svg_markup
+
+        # Some renderers add root-level background styles; strip them for
+        # dark preview transparency.
+        style_attr = str(root.attrib.get("style", "")).strip()
+        if style_attr:
+            style_parts = [part.strip() for part in style_attr.split(";") if part.strip()]
+            kept_parts = [part for part in style_parts if "background" not in part.casefold()]
+            if kept_parts:
+                root.set("style", "; ".join(kept_parts))
+            else:
+                root.attrib.pop("style", None)
+
+        view_w = None
+        view_h = None
+        view_box = str(root.attrib.get("viewBox", "")).strip()
+        if view_box:
+            numbers = [float(part) for part in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", view_box)]
+            if len(numbers) == 4:
+                view_w = numbers[2]
+                view_h = numbers[3]
+        if view_w is None or view_h is None:
+            view_w = cls._parse_svg_length(root.attrib.get("width"))
+            view_h = cls._parse_svg_length(root.attrib.get("height"))
+
+        white_fill_values = {
+            "#fff",
+            "#ffffff",
+            "white",
+            "rgb(255,255,255)",
+            "rgba(255,255,255,1)",
+            "rgba(255,255,255,1.0)",
+        }
+
+        # Rust output commonly injects a first full-canvas white <rect>.
+        # Remove only when it clearly covers the canvas.
+        for child in list(root):
+            if local_name(child.tag).lower() != "rect":
+                continue
+            fill_value = str(child.attrib.get("fill", "")).strip().casefold().replace(" ", "")
+            if not fill_value:
+                style_text = str(child.attrib.get("style", ""))
+                style_match = re.search(r"(?:^|;)\s*fill\s*:\s*([^;]+)", style_text, flags=re.IGNORECASE)
+                if style_match:
+                    fill_value = style_match.group(1).strip().casefold().replace(" ", "")
+            if fill_value not in white_fill_values:
+                continue
+
+            x = cls._parse_svg_length(child.attrib.get("x")) or 0.0
+            y = cls._parse_svg_length(child.attrib.get("y")) or 0.0
+            w = cls._parse_svg_length(child.attrib.get("width"))
+            h = cls._parse_svg_length(child.attrib.get("height"))
+            if view_w and view_h and w and h:
+                covers_canvas = x <= 1.0 and y <= 1.0 and w >= (view_w * 0.97) and h >= (view_h * 0.97)
+            else:
+                covers_canvas = x <= 1.0 and y <= 1.0
+            if not covers_canvas:
+                continue
+            root.remove(child)
+            break
+
+        try:
+            if root.tag.startswith("{") and "}" in root.tag:
+                namespace_uri = root.tag[1:].split("}", 1)[0]
+                ET.register_namespace("", namespace_uri)
+            return ET.tostring(root, encoding="unicode")
+        except Exception:
+            return svg_markup
 
     def _resolve_local_mathjax_script(self) -> Path | None:
         """Locate a local MathJax bundle, preferring SVG output quality."""
@@ -856,6 +1202,7 @@ class MarkdownRenderer:
         diagram_state_token = DIAGRAM_VIEW_STATE_JSON_TOKEN
         mathjax_sources_json = json.dumps(self._mathjax_script_sources())
         mermaid_sources_json = json.dumps(self._mermaid_script_sources())
+        mermaid_backend_json = json.dumps(self._mermaid_backend)
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1045,16 +1392,23 @@ class MarkdownRenderer:
         fill-opacity: 1 !important;
         opacity: 1 !important;
       }}
-      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel,
-      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel *,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.edgeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.edgeLabel *,
       body:not(.mdexplore-pdf-export-mode) .mermaid .messageText,
-      body:not(.mdexplore-pdf-export-mode) .mermaid .relation {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .messageText *,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .relation,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .relation *,
+      body:not(.mdexplore-pdf-export-mode) .mermaid [class*="edgeLabel"] text,
+      body:not(.mdexplore-pdf-export-mode) .mermaid [class*="edgeLabel"] tspan {{
         color: #ffffff !important;
         fill: #ffffff !important;
         opacity: 1 !important;
       }}
       body:not(.mdexplore-pdf-export-mode) .mermaid .labelBkg,
-      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel rect {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel rect,
+      body:not(.mdexplore-pdf-export-mode) .mermaid rect.edgeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid rect.sequenceEdgeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid rect[class*="edgeLabel"] {{
         fill: #1e293b !important;
         stroke: #93c5fd !important;
       }}
@@ -1248,6 +1602,7 @@ class MarkdownRenderer:
     window.__mdexploreMermaidReady = false;
     window.__mdexploreMermaidSource = "";
     window.__mdexploreMermaidSources = {mermaid_sources_json};
+    window.__mdexploreMermaidBackend = {mermaid_backend_json};
     window.__mdexploreMermaidLoadPromise = null;
     window.__mdexploreMermaidAttempted = false;
     window.__mdexploreMermaidPaletteMode = "auto";
@@ -2868,7 +3223,9 @@ class MarkdownRenderer:
           }}
         }}
 
-        const labelBgNodes = svg.querySelectorAll(".labelBkg, .edgeLabel rect");
+        const labelBgNodes = svg.querySelectorAll(
+          ".labelBkg, .edgeLabel rect, rect.edgeLabel, rect.sequenceEdgeLabel, rect[class*='edgeLabel']"
+        );
         for (const bgNode of labelBgNodes) {{
           if (!(bgNode instanceof SVGElement)) {{
             continue;
@@ -2880,10 +3237,14 @@ class MarkdownRenderer:
         }}
 
         const labelSelectors = [
-          ".edgeLabel",
-          ".edgeLabel *",
+          "g.edgeLabel",
+          "g.edgeLabel *",
           ".messageText",
+          ".messageText *",
           ".relation",
+          ".relation *",
+          "[class*='edgeLabel'] text",
+          "[class*='edgeLabel'] tspan",
         ];
         for (const selector of labelSelectors) {{
           const nodes = svg.querySelectorAll(selector);
@@ -3211,24 +3572,24 @@ class MarkdownRenderer:
         // Force edge/connector label readability even when Mermaid/C4 emits
         // nested classes/styles that vary across versions.
         const edgeLabelSelectors = [
-          ".edgeLabel",
-          ".edgeLabel *",
+          "g.edgeLabel",
+          "g.edgeLabel *",
           ".messageText",
           ".messageText *",
           ".relation",
           ".relation *",
-          "[class*='edgeLabel']",
-          "[class*='edgeLabel'] *",
-          "[class*='edge-label']",
-          "[class*='edge-label'] *",
-          "[class*='relationshipLabel']",
-          "[class*='relationshipLabel'] *",
-          "[class*='relationLabel']",
-          "[class*='relationLabel'] *",
-          "[class*='messageText']",
-          "[class*='messageText'] *",
-          "[class*='linkLabel']",
-          "[class*='linkLabel'] *",
+          "[class*='edgeLabel'] text",
+          "[class*='edgeLabel'] tspan",
+          "[class*='edge-label'] text",
+          "[class*='edge-label'] tspan",
+          "[class*='relationshipLabel'] text",
+          "[class*='relationshipLabel'] tspan",
+          "[class*='relationLabel'] text",
+          "[class*='relationLabel'] tspan",
+          "[class*='messageText'] text",
+          "[class*='messageText'] tspan",
+          "[class*='linkLabel'] text",
+          "[class*='linkLabel'] tspan",
         ];
         for (const selector of edgeLabelSelectors) {{
           const nodes = svg.querySelectorAll(selector);
@@ -3395,8 +3756,65 @@ class MarkdownRenderer:
       hardenNodeAndLabelContrast();
 
       const kind = String((block.dataset && block.dataset.mdexploreMermaidKind) || "").toLowerCase();
+      const sourceTextForKind = String(
+        (block.dataset && block.dataset.mdexploreMermaidSource) ||
+        block.getAttribute("data-mdexplore-mermaid-source") ||
+        ""
+      );
+      const sourceLooksLikeEr = /^\\s*erDiagram\\b/im.test(sourceTextForKind);
+      if (sourceLooksLikeEr && block.dataset && !block.dataset.mdexploreMermaidKind) {{
+        block.dataset.mdexploreMermaidKind = "er";
+      }}
+      const looksLikeRustErGeometry = (() => {{
+        const parseSvgNumber = (rawValue, fallback = 0) => {{
+          const parsed = Number.parseFloat(String(rawValue ?? "").trim());
+          return Number.isFinite(parsed) ? parsed : fallback;
+        }};
+        // Rust ER SVGs do not always carry Mermaid's ER classes. Detect by
+        // geometry: multiple large white table bodies + compact PK/FK pills.
+        try {{
+          const rects = Array.from(svg.querySelectorAll("rect"));
+          let largeWhiteBodies = 0;
+          let pkfkPills = 0;
+          for (const rectNode of rects) {{
+            if (!(rectNode instanceof SVGGraphicsElement)) {{
+              continue;
+            }}
+            const fillText = String(
+              rectNode.getAttribute("fill") || rectNode.style.fill || getComputedStyle(rectNode).fill || ""
+            ).trim();
+            const fillRgb = parseAnyColorRgb(fillText);
+            if (!fillRgb) {{
+              continue;
+            }}
+            let bbox = null;
+            try {{
+              bbox = rectNode.getBBox();
+            }} catch (_error) {{
+              bbox = null;
+            }}
+            if (!bbox || bbox.width <= 0.5 || bbox.height <= 0.5) {{
+              continue;
+            }}
+            const rx = parseSvgNumber(rectNode.getAttribute("rx"), 0);
+            const ry = parseSvgNumber(rectNode.getAttribute("ry"), 0);
+            const lum = relativeLuminance(fillRgb);
+            if (bbox.width >= 180 && bbox.height >= 80 && lum >= 0.84) {{
+              largeWhiteBodies += 1;
+            }}
+            if (bbox.width <= 40 && bbox.height <= 22 && rx >= 6 && ry >= 6) {{
+              pkfkPills += 1;
+            }}
+          }}
+          return largeWhiteBodies >= 2 && pkfkPills >= 1;
+        }} catch (_error) {{
+          return false;
+        }}
+      }})();
       const looksLikeEr =
         kind === "er" ||
+        sourceLooksLikeEr ||
+        looksLikeRustErGeometry ||
         !!svg.querySelector(".entityBox, .relationshipLine, .relationshipLabelBox");
       if (!looksLikeEr) {{
         return;
@@ -3479,6 +3897,54 @@ class MarkdownRenderer:
             textNode.setAttribute("fill", rowLabelColor);
             textNode.style.fill = rowLabelColor;
             textNode.style.opacity = "1";
+          }}
+        }}
+
+        // Rust Mermaid ER output uses plain <rect> blocks for entity bodies,
+        // often with white fill. Darken those bodies in preview mode so the
+        // existing light label colors remain readable.
+        const entityBodyRects = [];
+        const rectNodes = svg.querySelectorAll("rect");
+        for (const rectNode of rectNodes) {{
+          if (!(rectNode instanceof SVGGraphicsElement)) {{
+            continue;
+          }}
+          if (rectNode.closest("defs, marker, symbol, .edgeLabel, .labelBkg, [class*='edgeLabel']")) {{
+            continue;
+          }}
+          const classText = String(rectNode.getAttribute("class") || "").toLowerCase();
+          if (classText.includes("edge") || classText.includes("label")) {{
+            continue;
+          }}
+          const fillText = String(
+            rectNode.getAttribute("fill") || rectNode.style.fill || getComputedStyle(rectNode).fill || ""
+          ).trim();
+          const fillRgb = parseAnyColorRgb(fillText);
+          if (!fillRgb || relativeLuminance(fillRgb) < 0.84) {{
+            continue;
+          }}
+          let bbox = null;
+          try {{
+            bbox = rectNode.getBBox();
+          }} catch (_error) {{
+            bbox = null;
+          }}
+          if (!bbox || bbox.width < 180 || bbox.height < 80) {{
+            continue;
+          }}
+          entityBodyRects.push({{ node: rectNode, x: bbox.x, y: bbox.y }});
+        }}
+
+        if (entityBodyRects.length > 0) {{
+          entityBodyRects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+          const entityFills = [evenRowFill, oddRowFill];
+          for (let index = 0; index < entityBodyRects.length; index += 1) {{
+            const item = entityBodyRects[index];
+            const fillColor = entityFills[index % entityFills.length];
+            item.node.setAttribute("fill", fillColor);
+            item.node.style.fill = fillColor;
+            item.node.setAttribute("stroke", strokeColor);
+            item.node.style.stroke = strokeColor;
           }}
         }}
       }};
@@ -3799,6 +4265,115 @@ class MarkdownRenderer:
 
     window.__mdexploreRunMermaidWithMode = async (mode = "auto", force = false) => {{
       const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      const backend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();
+      if (backend === "rust") {{
+        const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
+        const fallbackBlocks = [];
+        const forceJsForPdf = normalizedMode === "pdf";
+        for (const block of mermaidBlocks) {{
+          if (!(block instanceof HTMLElement)) {{
+            continue;
+          }}
+          const sourceText = ((block.dataset && block.dataset.mdexploreMermaidSource) || (block.textContent || "").trim());
+          const mermaidKind = sourceText ? window.__mdexploreDetectMermaidKind(sourceText) : "";
+          if (block.dataset) {{
+            if (mermaidKind) {{
+              block.dataset.mdexploreMermaidKind = mermaidKind;
+            }} else if (block.dataset.mdexploreMermaidKind) {{
+              delete block.dataset.mdexploreMermaidKind;
+            }}
+          }}
+          if (forceJsForPdf && sourceText) {{
+            block.dataset.mdexploreMermaidSource = sourceText;
+            block.classList.remove("mermaid-ready", "mermaid-error");
+            block.classList.add("mermaid-pending");
+            block.textContent = "Mermaid rendering...";
+            fallbackBlocks.push(block);
+            continue;
+          }}
+          const hasSvg = !!block.querySelector("svg");
+          block.classList.remove("mermaid-pending");
+          if (hasSvg) {{
+            block.classList.remove("mermaid-error");
+            block.classList.add("mermaid-ready");
+            window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+          }} else {{
+            if (sourceText) {{
+              block.dataset.mdexploreMermaidSource = sourceText;
+              block.classList.remove("mermaid-ready", "mermaid-error");
+              block.classList.add("mermaid-pending");
+              block.textContent = "Mermaid rendering...";
+              fallbackBlocks.push(block);
+            }} else {{
+              block.classList.remove("mermaid-ready");
+              block.classList.add("mermaid-error");
+            }}
+          }}
+        }}
+        if (fallbackBlocks.length > 0) {{
+          try {{
+            const loaded = await window.__mdexploreLoadMermaidScript();
+            if (!loaded || !window.mermaid) {{
+              throw new Error("Mermaid script failed to load for Rust fallback");
+            }}
+            const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
+            mermaid.initialize(mermaidConfig);
+            for (const block of fallbackBlocks) {{
+              if (!(block instanceof HTMLElement)) {{
+                continue;
+              }}
+              const sourceText = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
+              const rustError = (block.getAttribute("data-mdexplore-rust-error") || "").trim();
+              if (!sourceText) {{
+                block.classList.remove("mermaid-pending", "mermaid-ready");
+                block.classList.add("mermaid-error");
+                block.textContent = "Mermaid source unavailable";
+                continue;
+              }}
+              try {{
+                const renderId = `mdexplore_mermaid_rust_fallback_${{Date.now()}}_${{Math.random().toString(36).slice(2)}}`;
+                const renderResult = await mermaid.render(renderId, sourceText);
+                const svgMarkup =
+                  renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
+                    ? renderResult.svg
+                    : String(renderResult || "");
+                if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {{
+                  throw new Error("Mermaid returned empty SVG");
+                }}
+                block.innerHTML = svgMarkup;
+                block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+                block.classList.add("mermaid-ready");
+                window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+              }} catch (renderError) {{
+                block.classList.remove("mermaid-pending", "mermaid-ready");
+                block.classList.add("mermaid-error");
+                const jsMessage =
+                  renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
+                const prefix = rustError ? `Rust renderer: ${{rustError}}; ` : "";
+                block.textContent = `Mermaid render failed: ${{prefix}}JS fallback: ${{jsMessage}}`;
+              }}
+            }}
+          }} catch (fallbackLoadError) {{
+            const loadMessage =
+              fallbackLoadError && fallbackLoadError.message
+                ? fallbackLoadError.message
+                : String(fallbackLoadError || "Mermaid fallback load failed");
+            for (const block of fallbackBlocks) {{
+              if (!(block instanceof HTMLElement)) {{
+                continue;
+              }}
+              const rustError = (block.getAttribute("data-mdexplore-rust-error") || "").trim();
+              const prefix = rustError ? `Rust renderer: ${{rustError}}; ` : "";
+              block.classList.remove("mermaid-pending", "mermaid-ready");
+              block.classList.add("mermaid-error");
+              block.textContent = `Mermaid render failed: ${{prefix}}JS fallback load: ${{loadMessage}}`;
+            }}
+          }}
+        }}
+        window.__mdexploreMermaidReady = true;
+        window.__mdexploreMermaidPaletteMode = normalizedMode;
+        return true;
+      }}
       if (
         !force &&
         window.__mdexploreMermaidReady &&
@@ -4025,7 +4600,9 @@ class MarkdownRenderer:
     }};
 
     window.__mdexploreLoadMathJaxScript();
-    window.__mdexploreLoadMermaidScript();
+    if (String(window.__mdexploreMermaidBackend || "js").toLowerCase() !== "rust") {{
+      window.__mdexploreLoadMermaidScript();
+    }}
   </script>
 </head>
 <body>
@@ -4504,11 +5081,11 @@ class MdExploreWindow(QMainWindow):
         ("Red", "#ef7d7d"),
     ]
 
-    def __init__(self, root: Path, app_icon: QIcon, config_path: Path):
+    def __init__(self, root: Path, app_icon: QIcon, config_path: Path, mermaid_backend: str = MERMAID_BACKEND_JS):
         super().__init__()
         self.root = root.resolve()
         self.config_path = config_path
-        self.renderer = MarkdownRenderer()
+        self.renderer = MarkdownRenderer(mermaid_backend=mermaid_backend)
         self.current_file: Path | None = None
         self.last_directory_selection: Path | None = self.root
         self.cache: dict[str, tuple[int, int, str]] = {}
@@ -4557,6 +5134,7 @@ class MdExploreWindow(QMainWindow):
         self._document_view_sessions: dict[str, dict] = {}
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
+        self._preview_html_temp_files: deque[Path] = deque()
         self._view_line_probe_pending = False
         self._last_view_line_probe_at = 0.0
         self._match_input_text = ""
@@ -4797,6 +5375,12 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay.hide()
         self._position_restore_overlay()
         self.statusBar().showMessage(self._default_status_text)
+        backend_warning = self.renderer.mermaid_backend_warning()
+        if backend_warning:
+            self.statusBar().showMessage(
+                f"Mermaid backend fallback to JS: {backend_warning}",
+                7000,
+            )
         # Root is initialized after widgets exist so view/model indexes are valid.
         self._set_root_directory(self.root)
         self._add_shortcuts()
@@ -5808,6 +6392,75 @@ class MdExploreWindow(QMainWindow):
 </html>
 """
 
+    @staticmethod
+    def _html_with_base_href(html_doc: str, base_url: QUrl) -> str:
+        """Inject `<base href=...>` so temp-file preview keeps relative links."""
+        if not html_doc:
+            return html_doc
+        href = html.escape(base_url.toString(), quote=True)
+        if not href:
+            return html_doc
+        closing_head = re.search(r"</head\s*>", html_doc, flags=re.IGNORECASE)
+        if closing_head:
+            head_content = html_doc[: closing_head.start()]
+            if re.search(r"<base\s+[^>]*href=", head_content, flags=re.IGNORECASE):
+                return html_doc
+        open_head = re.search(r"<head\b[^>]*>", html_doc, flags=re.IGNORECASE)
+        if not open_head:
+            return html_doc
+        base_tag = f'\n  <base href="{href}"/>'
+        insert_at = open_head.end()
+        return html_doc[:insert_at] + base_tag + html_doc[insert_at:]
+
+    def _cleanup_preview_temp_files(self) -> None:
+        """Delete temporary preview files used for oversized HTML payloads."""
+        while self._preview_html_temp_files:
+            path = self._preview_html_temp_files.popleft()
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _track_preview_temp_file(self, temp_path: Path) -> None:
+        """Track temp preview files and clean up old entries eagerly."""
+        self._preview_html_temp_files.append(temp_path)
+        while len(self._preview_html_temp_files) > 6:
+            stale = self._preview_html_temp_files.popleft()
+            try:
+                stale.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _set_preview_html(self, html_doc: str, base_url: QUrl) -> None:
+        """Load preview HTML with file-based fallback for large documents."""
+        try:
+            encoded_size = len(html_doc.encode("utf-8", errors="replace"))
+        except Exception:
+            encoded_size = len(html_doc)
+        if encoded_size <= PREVIEW_SETHTML_MAX_BYTES:
+            self.preview.setHtml(html_doc, base_url)
+            return
+        try:
+            prepared = self._html_with_base_href(html_doc, base_url)
+            temp_dir = Path(tempfile.gettempdir()) / "mdexplore-preview"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".html",
+                prefix="preview-",
+                dir=temp_dir,
+                delete=False,
+            ) as temp_file:
+                temp_file.write(prepared)
+                temp_path = Path(temp_file.name)
+            self._track_preview_temp_file(temp_path)
+            self.preview.load(QUrl.fromLocalFile(str(temp_path)))
+            return
+        except Exception:
+            # If temp-file load setup fails, fall back to direct setHtml.
+            self.preview.setHtml(html_doc, base_url)
+
     def _ensure_non_empty_status_message(self) -> None:
         """Keep a non-empty status bar message instead of blank idle periods."""
         current = self.statusBar().currentMessage().strip()
@@ -5899,7 +6552,7 @@ class MdExploreWindow(QMainWindow):
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
         self.path_label.setText("Select a markdown file")
-        self.preview.setHtml(
+        self._set_preview_html(
             self._placeholder_html("Select a markdown file to preview"),
             QUrl.fromLocalFile(f"{self.root}/"),
         )
@@ -6072,7 +6725,7 @@ class MdExploreWindow(QMainWindow):
                 self._reset_document_views()
                 self._clear_current_preview_signature()
                 self.path_label.setText("Select a markdown file")
-                self.preview.setHtml(
+                self._set_preview_html(
                     self._placeholder_html("Select a markdown file to preview"),
                     QUrl.fromLocalFile(f"{self.root}/"),
                 )
@@ -7443,6 +8096,7 @@ class MdExploreWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_restore_overlay_monitor()
         self._persist_effective_root()
+        self._cleanup_preview_temp_files()
         super().closeEvent(event)
 
     def _confirm_and_clear_all_highlighting(self) -> None:
@@ -7588,7 +8242,7 @@ class MdExploreWindow(QMainWindow):
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
-        self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc, path_key), base_url)
+        self._set_preview_html(self._inject_mermaid_cache_seed(html_doc, path_key), base_url)
 
     @staticmethod
     def _doc_id_for_path(path_key: str) -> str:
@@ -7959,7 +8613,7 @@ class MdExploreWindow(QMainWindow):
                     phase="restoring",
                 )
                 self.statusBar().showMessage(f"Using cached preview: {resolved.name}...")
-                self.preview.setHtml(self._inject_mermaid_cache_seed(cached[2], cache_key), base_url)
+                self._set_preview_html(self._inject_mermaid_cache_seed(cached[2], cache_key), base_url)
                 return
 
             self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
@@ -8003,11 +8657,11 @@ class MdExploreWindow(QMainWindow):
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
             self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
-            self.preview.setHtml(self._inject_mermaid_cache_seed(html_doc, cache_key), base_url)
+            self._set_preview_html(self._inject_mermaid_cache_seed(html_doc, cache_key), base_url)
         except Exception as exc:
             self._stop_restore_overlay_monitor()
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
-            self.preview.setHtml(
+            self._set_preview_html(
                 self._placeholder_html(f"Could not render preview for {path.name}: {exc}"),
                 base_url,
             )
@@ -8454,6 +9108,33 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid")).filter(
       (block) => block instanceof HTMLElement
     );
+    const backend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();
+    if (backend === "rust") {
+      if (window.__mdexplorePdfMermaidInFlight) {
+        return;
+      }
+      window.__mdexplorePdfMermaidInFlight = true;
+      window.__mdexplorePdfMermaidReady = false;
+      window.__mdexplorePdfMermaidError = "";
+      (async () => {
+        try {
+          if (window.__mdexploreRunMermaidWithMode) {
+            await window.__mdexploreRunMermaidWithMode("pdf", true);
+          }
+          forceAllMermaidMonochromeForPdf();
+          window.__mdexploreMermaidReady = true;
+          window.__mdexploreMermaidPaletteMode = "pdf";
+        } catch (error) {
+          window.__mdexplorePdfMermaidError =
+            error && error.message ? error.message : String(error || "Rust PDF Mermaid render failed");
+          window.__mdexploreMermaidReady = false;
+        } finally {
+          window.__mdexplorePdfMermaidInFlight = false;
+          window.__mdexplorePdfMermaidReady = true;
+        }
+      })();
+      return;
+    }
     if (mermaidBlocks.length === 0) {
       window.__mdexplorePdfMermaidReady = true;
       window.__mdexploreMermaidReady = true;
@@ -9071,6 +9752,12 @@ def main() -> int:
         default=None,
         help="Root directory to browse (default: ~/.mdexplore.cfg path, or home directory).",
     )
+    parser.add_argument(
+        "--mermaid-backend",
+        choices=[MERMAID_BACKEND_JS, MERMAID_BACKEND_RUST],
+        default=MERMAID_BACKEND_JS,
+        help="Mermaid render backend: 'js' (default) or 'rust' (requires mmdr).",
+    )
     args = parser.parse_args()
 
     root = Path(args.path).expanduser() if args.path is not None else _load_default_root_from_config()
@@ -9089,7 +9776,12 @@ def main() -> int:
     app_icon = _build_markdown_icon()
     app.setWindowIcon(app_icon)
 
-    window = MdExploreWindow(root, app_icon, _config_file_path())
+    window = MdExploreWindow(
+        root,
+        app_icon,
+        _config_file_path(),
+        mermaid_backend=str(args.mermaid_backend or MERMAID_BACKEND_JS),
+    )
     window.show()
     return app.exec()
 

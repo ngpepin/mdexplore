@@ -12,6 +12,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
   - CommonMark + tables + strikethrough.
   - TeX/LaTeX math via MathJax.
   - Mermaid diagrams with improved dark-theme contrast.
+  - Optional Rust Mermaid backend via `mmdr` (`--mermaid-backend rust`).
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
@@ -57,6 +58,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Java runtime (`java` in `PATH`) for local PlantUML rendering.
 - `plantuml.jar` available (vendored path by default, or set `PLANTUML_JAR`).
 - Optional: VS Code `code` command in `PATH` for `Edit`.
+- Optional: `mmdr` in `PATH` (or `MDEXPLORE_MERMAID_RS_BIN`) for Rust Mermaid backend.
 
 ## Quick Start
 
@@ -89,10 +91,11 @@ What the launcher does:
 ### Wrapper script
 
 ```bash
-mdexplore.sh [PATH]
+mdexplore.sh [--mermaid-backend js|rust] [PATH]
 ```
 
 - `PATH` is optional.
+- `--mermaid-backend` is optional (`js` default, `rust` requires `mmdr`).
 - Supports plain paths and `file://` URIs (for `.desktop` `%u` launches).
 - If a file path is passed, mdexplore opens its parent directory.
 - If omitted, `~/.mdexplore.cfg` is used (falling back to home directory).
@@ -102,7 +105,7 @@ mdexplore.sh [PATH]
 
 ```bash
 python3 -m pip install -r /path/to/mdexplore/requirements.txt
-python3 /path/to/mdexplore/mdexplore.py [PATH]
+python3 /path/to/mdexplore/mdexplore.py [--mermaid-backend js|rust] [PATH]
 ```
 
 If `PATH` is omitted for direct run, the same config/home default rule applies.
@@ -281,6 +284,7 @@ Mermaid rendering is local-first:
 
 - mdexplore first tries a local `mermaid.min.js` bundle.
 - If no local bundle is found, it falls back to CDN.
+- If `--mermaid-backend rust` is used, mdexplore uses `mmdr` instead of Mermaid JS for diagram SVG generation.
 
 Local lookup order:
 
@@ -297,6 +301,12 @@ Example override:
 
 ```bash
 MDEXPLORE_MERMAID_JS=/absolute/path/to/mermaid.min.js /path/to/mdexplore/mdexplore.sh
+```
+
+Rust backend executable override:
+
+```bash
+MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh --mermaid-backend rust
 ```
 
 ## Project Structure
