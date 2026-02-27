@@ -23,7 +23,7 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
-from PySide6.QtCore import QDir, QMimeData, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import QDir, QEventLoop, QMimeData, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 
 CONFIG_FILE_NAME = ".mdexplore.cfg"
 SEARCH_CLOSE_WORD_GAP = 50
-PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 20
+PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 60
 PDF_EXPORT_PRECHECK_INTERVAL_MS = 140
 MERMAID_CACHE_JSON_TOKEN = "__MDEXPLORE_MERMAID_CACHE_JSON__"
 DIAGRAM_VIEW_STATE_JSON_TOKEN = "__MDEXPLORE_DIAGRAM_VIEW_STATE_JSON__"
@@ -58,7 +58,7 @@ PLANTUML_RESTORE_BATCH_SIZE = 2
 MERMAID_CACHE_RESTORE_BATCH_SIZE = 2
 RESTORE_OVERLAY_TIMEOUT_SECONDS = 25.0
 RESTORE_OVERLAY_SHOW_DELAY_MS = 350
-RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 2.0
+RESTORE_OVERLAY_MAX_VISIBLE_SECONDS = 1.0
 
 
 def _config_file_path() -> Path:
@@ -983,12 +983,16 @@ class MarkdownRenderer:
       user-select: none;
     }}
     .mdexplore-mermaid-viewport {{
-      overflow: auto;
+      overflow: hidden;
       max-width: 100%;
       max-height: 78vh;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 0.28rem;
+      cursor: default;
+    }}
+    .mdexplore-mermaid-viewport.mdexplore-interaction-armed {{
+      overflow: auto;
       cursor: grab;
     }}
     .mdexplore-mermaid-viewport.mdexplore-pan-active {{
@@ -1002,82 +1006,82 @@ class MarkdownRenderer:
       height: auto;
     }}
     @media screen and (prefers-color-scheme: dark) {{
-      .mermaid .edge-thickness-normal,
-      .mermaid .edge-thickness-thick,
-      .mermaid .edge-pattern-solid,
-      .mermaid .edge-pattern-dashed,
-      .mermaid .edge-pattern-dotted,
-      .mermaid .flowchart-link,
-      .mermaid .relationshipLine,
-      .mermaid .messageLine0,
-      .mermaid .messageLine1,
-      .mermaid .loopLine,
-      .mermaid .activation0,
-      .mermaid .activation1,
-      .mermaid path[style*="stroke:#000"],
-      .mermaid path[style*="stroke: #000"],
-      .mermaid path[style*="stroke:black"],
-      .mermaid path[style*="stroke: black"],
-      .mermaid path[style*="fill:none"],
-      .mermaid path[style*="fill: none"],
-      .mermaid line[style*="stroke:#000"],
-      .mermaid line[style*="stroke: #000"],
-      .mermaid line[style*="stroke:black"],
-      .mermaid line[style*="stroke: black"],
-      .mermaid line[style*="fill:none"],
-      .mermaid line[style*="fill: none"],
-      .mermaid polyline[style*="fill:none"],
-      .mermaid polyline[style*="fill: none"] {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edge-thickness-normal,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edge-thickness-thick,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edge-pattern-solid,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edge-pattern-dashed,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edge-pattern-dotted,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .flowchart-link,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .relationshipLine,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .messageLine0,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .messageLine1,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .loopLine,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .activation0,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .activation1,
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="stroke:#000"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="stroke: #000"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="stroke:black"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="stroke: black"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="fill:none"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid path[style*="fill: none"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="stroke:#000"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="stroke: #000"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="stroke:black"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="stroke: black"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="fill:none"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid line[style*="fill: none"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid polyline[style*="fill:none"],
+      body:not(.mdexplore-pdf-export-mode) .mermaid polyline[style*="fill: none"] {{
         stroke: #eaf2ff !important;
         stroke-opacity: 1 !important;
         opacity: 1 !important;
       }}
-      .mermaid .marker,
-      .mermaid .marker path,
-      .mermaid marker path {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .marker,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .marker path,
+      body:not(.mdexplore-pdf-export-mode) .mermaid marker path {{
         stroke: #eaf2ff !important;
         fill: #eaf2ff !important;
         stroke-opacity: 1 !important;
         fill-opacity: 1 !important;
         opacity: 1 !important;
       }}
-      .mermaid .edgeLabel,
-      .mermaid .edgeLabel *,
-      .mermaid .messageText,
-      .mermaid .relation {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel *,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .messageText,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .relation {{
         color: #ffffff !important;
         fill: #ffffff !important;
         opacity: 1 !important;
       }}
-      .mermaid .labelBkg,
-      .mermaid .edgeLabel rect {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid .labelBkg,
+      body:not(.mdexplore-pdf-export-mode) .mermaid .edgeLabel rect {{
         fill: #1e293b !important;
         stroke: #93c5fd !important;
       }}
-      .mermaid rect[stroke-dasharray][fill="none"] {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid rect[stroke-dasharray][fill="none"] {{
         stroke: #c3d4ef !important;
         stroke-opacity: 0.96 !important;
       }}
-      .mermaid g.row-rect-even > path:first-child {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.row-rect-even > path:first-child {{
         fill: #2b3f5f !important;
       }}
-      .mermaid g.row-rect-odd > path:first-child {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.row-rect-odd > path:first-child {{
         fill: #223754 !important;
       }}
-      .mermaid g.row-rect-even > path,
-      .mermaid g.row-rect-odd > path {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.row-rect-even > path,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.row-rect-odd > path {{
         stroke: #93c5fd !important;
       }}
-      .mermaid g.label.name .nodeLabel,
-      .mermaid g.label.attribute-type .nodeLabel,
-      .mermaid g.label.attribute-name .nodeLabel,
-      .mermaid g.label.attribute-keys .nodeLabel,
-      .mermaid g.label.attribute-comment .nodeLabel,
-      .mermaid g.label.name text,
-      .mermaid g.label.attribute-type text,
-      .mermaid g.label.attribute-name text,
-      .mermaid g.label.attribute-keys text,
-      .mermaid g.label.attribute-comment text {{
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.name .nodeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-type .nodeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-name .nodeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-keys .nodeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-comment .nodeLabel,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.name text,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-type text,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-name text,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-keys text,
+      body:not(.mdexplore-pdf-export-mode) .mermaid g.label.attribute-comment text {{
         color: #e5e7eb !important;
         fill: #e5e7eb !important;
         opacity: 1 !important;
@@ -1436,6 +1440,15 @@ class MarkdownRenderer:
         gantt: {{ useMaxWidth: true }},
       }};
 
+      if (usePdfMode) {{
+        return {{
+          ...shared,
+          // Keep PDF Mermaid rendering "vanilla" (no mdexplore color tuning).
+          theme: "default",
+          darkMode: false,
+        }};
+      }}
+
       if (dark) {{
         return {{
           ...shared,
@@ -1514,6 +1527,16 @@ class MarkdownRenderer:
           clusterBkg: "#f1f5f9",
           clusterBorder: "#334155",
           labelTextColor: "#111827",
+          cScale0: "#d1d5db",
+          cScale1: "#e5e7eb",
+          cScale2: "#f3f4f6",
+          cScale3: "#e5e7eb",
+          cScale4: "#d1d5db",
+          cScale5: "#9ca3af",
+          cScale6: "#6b7280",
+          cScale7: "#4b5563",
+          cScale8: "#334155",
+          cScale9: "#1f2937",
         }},
       }};
     }};
@@ -1539,6 +1562,9 @@ class MarkdownRenderer:
           break;
         }}
       }}
+      const hashKey = String(block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
+      const mermaidIndex = String(block.getAttribute("data-mdexplore-mermaid-index") || "").trim();
+      const stateKey = `mermaid:${{mermaidIndex || "0"}}:${{hashKey || "nohash"}}`;
       if (normalizedMode === "pdf") {{
         // Keep PDF output clean and unscaled.
         if (currentShell instanceof HTMLElement && currentSvg instanceof SVGElement) {{
@@ -1559,11 +1585,16 @@ class MarkdownRenderer:
         currentParent instanceof HTMLElement &&
         currentParent.classList.contains("mdexplore-mermaid-viewport")
       ) {{
+        const reapply = currentShell.__mdexploreReapplySavedState;
+        if (typeof reapply === "function") {{
+          try {{
+            reapply();
+          }} catch (_error) {{
+            // Ignore stale wrapper reapply errors.
+          }}
+        }}
         return;
       }}
-      const hashKey = String(block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
-      const mermaidIndex = String(block.getAttribute("data-mdexplore-mermaid-index") || "").trim();
-      const stateKey = `mermaid:${{mermaidIndex || "0"}}:${{hashKey || "nohash"}}`;
 
       const parseViewBox = (svgNode) => {{
         const viewBoxText = String(svgNode.getAttribute("viewBox") || "").trim();
@@ -1755,7 +1786,7 @@ class MarkdownRenderer:
       let resizeObserver = null;
       let resizeDebounceTimer = null;
       let isPanning = false;
-      let wheelZoomArmed = false;
+      let interactionArmed = false;
       let panStartClientX = 0;
       let panStartClientY = 0;
       let panStartScrollLeft = 0;
@@ -1777,7 +1808,12 @@ class MarkdownRenderer:
 
       const computeFitZoom = () => {{
         const widthPx = Math.max(1, baseSize.width);
-        const availableWidth = Math.max(120, viewport.clientWidth - 12);
+        const viewportRectWidth = viewport.getBoundingClientRect().width;
+        const blockRectWidth = block.getBoundingClientRect().width;
+        const availableWidth = Math.max(
+          120,
+          Math.max(viewport.clientWidth, viewportRectWidth, blockRectWidth) - 12,
+        );
         const fitByWidth = availableWidth / widthPx;
         // Width-first fit: initial/auto-fit should keep the full diagram width visible.
         fitZoom = clampZoom(Math.min(1.0, fitByWidth));
@@ -1809,6 +1845,14 @@ class MarkdownRenderer:
         viewport.scrollTop += dy;
         saveState();
       }};
+      const setInteractionArmed = (nextArmed) => {{
+        interactionArmed = !!nextArmed;
+        viewport.classList.toggle("mdexplore-interaction-armed", interactionArmed);
+        if (!interactionArmed) {{
+          isPanning = false;
+          viewport.classList.remove("mdexplore-pan-active");
+        }}
+      }};
       saveState = () => {{
         window.__mdexploreSetDiagramViewState(stateKey, {{
           zoom,
@@ -1816,6 +1860,32 @@ class MarkdownRenderer:
           scrollTop: viewport.scrollTop,
           dirty: zoomDirty,
         }});
+      }};
+      const applySavedState = (rawState) => {{
+        if (!(rawState && typeof rawState === "object")) {{
+          return false;
+        }}
+        const restoredZoom = Number(rawState.zoom);
+        const restoredScrollLeft = Number(rawState.scrollLeft);
+        const restoredScrollTop = Number(rawState.scrollTop);
+        zoomDirty = !!rawState.dirty;
+        const layoutFit = computeFitZoom();
+        setViewportHeightForFit(layoutFit);
+        applyZoom(Number.isFinite(restoredZoom) ? restoredZoom : layoutFit, false);
+        const applyRestoredScroll = () => {{
+          viewport.scrollLeft = Number.isFinite(restoredScrollLeft) ? restoredScrollLeft : 0;
+          viewport.scrollTop = Number.isFinite(restoredScrollTop) ? restoredScrollTop : 0;
+          saveState();
+        }};
+        applyRestoredScroll();
+        window.requestAnimationFrame(() => {{
+          applyRestoredScroll();
+        }});
+        window.setTimeout(() => {{
+          applyRestoredScroll();
+        }}, 70);
+        saveState();
+        return true;
       }};
 
       const scheduleFitIfClean = () => {{
@@ -1825,12 +1895,19 @@ class MarkdownRenderer:
         resizeDebounceTimer = window.setTimeout(() => {{
           resizeDebounceTimer = null;
           applyFitIfClean();
-        }}, 90);
+        }}, 55);
       }};
 
-      zoomOutBtn.addEventListener("click", () => applyZoom(zoom / 1.2, true));
-      zoomInBtn.addEventListener("click", () => applyZoom(zoom * 1.2, true));
+      zoomOutBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        applyZoom(zoom / 1.2, true);
+      }});
+      zoomInBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        applyZoom(zoom * 1.2, true);
+      }});
       zoomResetBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
         zoomDirty = false;
         const nextFit = computeFitZoom();
         setViewportHeightForFit(nextFit);
@@ -1840,14 +1917,26 @@ class MarkdownRenderer:
         saveState();
       }});
       const PAN_STEP = 120;
-      panLeftBtn.addEventListener("click", () => panBy(-PAN_STEP, 0));
-      panRightBtn.addEventListener("click", () => panBy(PAN_STEP, 0));
-      panUpBtn.addEventListener("click", () => panBy(0, -PAN_STEP));
-      panDownBtn.addEventListener("click", () => panBy(0, PAN_STEP));
+      panLeftBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        panBy(-PAN_STEP, 0);
+      }});
+      panRightBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        panBy(PAN_STEP, 0);
+      }});
+      panUpBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        panBy(0, -PAN_STEP);
+      }});
+      panDownBtn.addEventListener("click", () => {{
+        setInteractionArmed(true);
+        panBy(0, PAN_STEP);
+      }});
       viewport.addEventListener(
         "wheel",
         (event) => {{
-          if (!wheelZoomArmed) {{
+          if (!interactionArmed) {{
             return;
           }}
           event.preventDefault();
@@ -1885,6 +1974,9 @@ class MarkdownRenderer:
         if (!(event instanceof MouseEvent) || event.button !== 0) {{
           return;
         }}
+        if (!interactionArmed) {{
+          return;
+        }}
         if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {{
           return;
         }}
@@ -1900,7 +1992,7 @@ class MarkdownRenderer:
         if (!(event instanceof MouseEvent) || event.button !== 0) {{
           return;
         }}
-        wheelZoomArmed = !wheelZoomArmed;
+        setInteractionArmed(!interactionArmed);
       }};
       const onPanMove = (event) => {{
         if (!isPanning || !(event instanceof MouseEvent)) {{
@@ -1921,7 +2013,7 @@ class MarkdownRenderer:
         viewport.classList.remove("mdexplore-pan-active");
       }};
       const onViewportMouseLeave = () => {{
-        wheelZoomArmed = false;
+        setInteractionArmed(false);
       }};
       viewport.addEventListener("mousedown", onPanStart);
       viewport.addEventListener("click", onViewportClick);
@@ -1942,14 +2034,13 @@ class MarkdownRenderer:
       shell.appendChild(viewport);
       block.innerHTML = "";
       block.appendChild(shell);
+      setInteractionArmed(false);
+      shell.__mdexploreReapplySavedState = () => {{
+        const latest = window.__mdexploreGetDiagramViewState(stateKey);
+        return applySavedState(latest);
+      }};
       const applyInitialFitZoom = () => {{
-        if (savedState && typeof savedState === "object") {{
-          const restoredZoom = Number(savedState.zoom);
-          zoomDirty = !!savedState.dirty;
-          applyZoom(Number.isFinite(restoredZoom) ? restoredZoom : computeFitZoom(), false);
-          viewport.scrollLeft = Number.isFinite(Number(savedState.scrollLeft)) ? Number(savedState.scrollLeft) : 0;
-          viewport.scrollTop = Number.isFinite(Number(savedState.scrollTop)) ? Number(savedState.scrollTop) : 0;
-          saveState();
+        if (applySavedState(savedState)) {{
           return;
         }}
         zoomDirty = false;
@@ -1960,11 +2051,7 @@ class MarkdownRenderer:
         viewport.scrollTop = 0;
         saveState();
       }};
-      window.requestAnimationFrame(() => {{
-        window.requestAnimationFrame(() => {{
-          applyInitialFitZoom();
-        }});
-      }});
+      applyInitialFitZoom();
       shell.addEventListener("DOMNodeRemovedFromDocument", () => {{
         if (resizeDebounceTimer) {{
           window.clearTimeout(resizeDebounceTimer);
@@ -1978,6 +2065,11 @@ class MarkdownRenderer:
         window.removeEventListener("mousemove", onPanMove);
         window.removeEventListener("mouseup", onPanEnd);
         window.removeEventListener("blur", onPanEnd);
+        try {{
+          delete shell.__mdexploreReapplySavedState;
+        }} catch (_error) {{
+          // Ignore cleanup errors.
+        }}
         if (resizeObserver) {{
           try {{
             resizeObserver.disconnect();
@@ -2033,37 +2125,58 @@ class MarkdownRenderer:
           currentParent instanceof HTMLElement &&
           currentParent.classList.contains("mdexplore-mermaid-viewport")
         ) {{
+          const reapply = currentShell.__mdexploreReapplySavedState;
+          if (typeof reapply === "function") {{
+            try {{
+              reapply();
+            }} catch (_error) {{
+              // Ignore stale wrapper reapply errors.
+            }}
+          }}
           continue;
         }}
 
-        const baseWidth = (() => {{
+        let baseWidth = 800;
+        let baseHeight = Math.max(1, baseWidth * 0.62);
+        const updateBaseDimensions = () => {{
+          let nextWidth = NaN;
+          let nextHeight = NaN;
           if (Number.isFinite(currentImage.naturalWidth) && currentImage.naturalWidth > 1) {{
-            return currentImage.naturalWidth;
+            nextWidth = currentImage.naturalWidth;
+          }} else {{
+            const widthAttr = Number.parseFloat(String(currentImage.getAttribute("width") || "").trim());
+            if (Number.isFinite(widthAttr) && widthAttr > 1) {{
+              nextWidth = widthAttr;
+            }} else {{
+              const rect = currentImage.getBoundingClientRect();
+              if (rect.width > 1) {{
+                nextWidth = rect.width;
+              }}
+            }}
           }}
-          const widthAttr = Number.parseFloat(String(currentImage.getAttribute("width") || "").trim());
-          if (Number.isFinite(widthAttr) && widthAttr > 1) {{
-            return widthAttr;
-          }}
-          const rect = currentImage.getBoundingClientRect();
-          if (rect.width > 1) {{
-            return rect.width;
-          }}
-          return 800;
-        }})();
-        const baseHeight = (() => {{
           if (Number.isFinite(currentImage.naturalHeight) && currentImage.naturalHeight > 1) {{
-            return currentImage.naturalHeight;
+            nextHeight = currentImage.naturalHeight;
+          }} else {{
+            const heightAttr = Number.parseFloat(String(currentImage.getAttribute("height") || "").trim());
+            if (Number.isFinite(heightAttr) && heightAttr > 1) {{
+              nextHeight = heightAttr;
+            }} else {{
+              const rect = currentImage.getBoundingClientRect();
+              if (rect.height > 1) {{
+                nextHeight = rect.height;
+              }}
+            }}
           }}
-          const heightAttr = Number.parseFloat(String(currentImage.getAttribute("height") || "").trim());
-          if (Number.isFinite(heightAttr) && heightAttr > 1) {{
-            return heightAttr;
+          if (Number.isFinite(nextWidth) && nextWidth > 1) {{
+            baseWidth = nextWidth;
           }}
-          const rect = currentImage.getBoundingClientRect();
-          if (rect.height > 1) {{
-            return rect.height;
+          if (Number.isFinite(nextHeight) && nextHeight > 1) {{
+            baseHeight = nextHeight;
+          }} else {{
+            baseHeight = Math.max(1, baseWidth * 0.62);
           }}
-          return Math.max(1, baseWidth * 0.62);
-        }})();
+        }};
+        updateBaseDimensions();
 
         const shell = document.createElement("div");
         shell.className = "mdexplore-mermaid-shell";
@@ -2125,19 +2238,22 @@ class MarkdownRenderer:
         currentImage.style.maxWidth = "none";
         currentImage.style.width = `${{Math.max(32, Math.round(baseWidth))}}px`;
 
-        const clampZoom = (value) => Math.max(0.35, Math.min(4.0, value));
+        // PlantUML diagrams can be much wider than Mermaid diagrams; allow a
+        // lower minimum zoom so width-fit can avoid right-edge clipping.
+        const clampZoom = (value) => Math.max(0.1, Math.min(4.0, value));
         let zoom = 1.0;
         let fitZoom = 1.0;
         let zoomDirty = false;
         let resizeObserver = null;
         let resizeDebounceTimer = null;
+        let postLayoutFitTimers = [];
         let isPanning = false;
-        let wheelZoomArmed = false;
+        let interactionArmed = false;
         let panStartClientX = 0;
         let panStartClientY = 0;
         let panStartScrollLeft = 0;
         let panStartScrollTop = 0;
-        const MIN_VIEWPORT_HEIGHT = 220;
+        const MIN_VIEWPORT_HEIGHT = 96;
         const savedState = window.__mdexploreGetDiagramViewState(stateKey);
         if (savedState && typeof savedState === "object") {{
           zoomDirty = !!savedState.dirty;
@@ -2145,18 +2261,38 @@ class MarkdownRenderer:
         let saveState = () => {{}};
 
         const setViewportHeightForFit = (fitScale) => {{
-          const scaledHeight = Math.max(80, baseHeight * Math.max(0.1, fitScale));
-          // Leave modest breathing room above/below PlantUML diagrams.
-          const verticalPadding = Math.max(8, Math.round(scaledHeight * 0.05));
-          const idealHeight = Math.round(scaledHeight + verticalPadding + 14);
-          const maxHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.floor(window.innerHeight * 0.76));
-          const finalHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.min(maxHeight, idealHeight));
+          const scaledHeight = Math.max(24, baseHeight * Math.max(0.1, fitScale));
+          // Match viewport height to width-fit diagram height with only light breathing room.
+          const verticalPadding = Math.max(6, Math.round(scaledHeight * 0.05));
+          const finalHeight = Math.max(MIN_VIEWPORT_HEIGHT, Math.round(scaledHeight + verticalPadding));
           viewport.style.height = `${{finalHeight}}px`;
         }};
 
+        const getViewportInnerWidth = () => {{
+          const viewportStyles = window.getComputedStyle(viewport);
+          const padLeft = Number.parseFloat(String(viewportStyles.paddingLeft || "0")) || 0;
+          const padRight = Number.parseFloat(String(viewportStyles.paddingRight || "0")) || 0;
+          return Math.max(80, viewport.clientWidth - padLeft - padRight - 2);
+        }};
+        const getViewportInnerBounds = () => {{
+          const viewportStyles = window.getComputedStyle(viewport);
+          const padLeft = Number.parseFloat(String(viewportStyles.paddingLeft || "0")) || 0;
+          const padRight = Number.parseFloat(String(viewportStyles.paddingRight || "0")) || 0;
+          const rect = viewport.getBoundingClientRect();
+          const innerLeft = rect.left + padLeft;
+          const innerWidth = Math.max(80, viewport.clientWidth - padLeft - padRight - 2);
+          return {{
+            innerLeft,
+            innerRight: innerLeft + innerWidth,
+            innerWidth,
+          }};
+        }};
+
         const computeFitZoom = () => {{
-          const availableWidth = Math.max(120, viewport.clientWidth - 12);
-          const fitByWidth = availableWidth / Math.max(1, baseWidth);
+          const innerWidth = getViewportInnerWidth();
+          // Keep an explicit safety margin; very wide PlantUML diagrams can clip
+          // by a few pixels on first layout due to transform rounding.
+          const fitByWidth = (innerWidth / Math.max(1, baseWidth)) * 0.97;
           fitZoom = clampZoom(Math.min(1.0, fitByWidth));
           return fitZoom;
         }};
@@ -2177,6 +2313,14 @@ class MarkdownRenderer:
           viewport.scrollTop += dy;
           saveState();
         }};
+        const setInteractionArmed = (nextArmed) => {{
+          interactionArmed = !!nextArmed;
+          viewport.classList.toggle("mdexplore-interaction-armed", interactionArmed);
+          if (!interactionArmed) {{
+            isPanning = false;
+            viewport.classList.remove("mdexplore-pan-active");
+          }}
+        }};
         saveState = () => {{
           window.__mdexploreSetDiagramViewState(stateKey, {{
             zoom,
@@ -2185,13 +2329,142 @@ class MarkdownRenderer:
             dirty: zoomDirty,
           }});
         }};
+        const applySavedState = (rawState) => {{
+          if (!(rawState && typeof rawState === "object")) {{
+            return false;
+          }}
+          const restoredZoom = Number(rawState.zoom);
+          const restoredScrollLeft = Number(rawState.scrollLeft);
+          const restoredScrollTop = Number(rawState.scrollTop);
+          zoomDirty = !!rawState.dirty;
+          const layoutFit = computeFitZoom();
+          let targetZoom = layoutFit;
+          let zoomWasClampedForFit = false;
+          if (Number.isFinite(restoredZoom) && restoredZoom > 0) {{
+            targetZoom = clampZoom(restoredZoom);
+            if (targetZoom > layoutFit) {{
+              // Never restore into a clipped initial view.
+              targetZoom = layoutFit;
+              zoomWasClampedForFit = true;
+            }}
+          }}
+          setViewportHeightForFit(targetZoom);
+          applyZoom(targetZoom, false);
+          if (!zoomDirty) {{
+            // Ensure exact visual fit after layout/pixel rounding.
+            applyCleanFitZoom();
+            zoomWasClampedForFit = false;
+          }}
+          const applyRestoredScroll = () => {{
+            viewport.scrollLeft = zoomWasClampedForFit ? 0 : (Number.isFinite(restoredScrollLeft) ? restoredScrollLeft : 0);
+            viewport.scrollTop = zoomWasClampedForFit ? 0 : (Number.isFinite(restoredScrollTop) ? restoredScrollTop : 0);
+            saveState();
+          }};
+          applyRestoredScroll();
+          window.requestAnimationFrame(() => {{
+            applyRestoredScroll();
+          }});
+          window.setTimeout(() => {{
+            applyRestoredScroll();
+          }}, 70);
+          saveState();
+          return true;
+        }};
         const applyFitIfClean = () => {{
           if (zoomDirty) {{
             return;
           }}
+          applyCleanFitZoom();
+        }};
+        const remeasureAndRefit = (forceReapply = false) => {{
+          const previousWidth = baseWidth;
+          const previousHeight = baseHeight;
+          updateBaseDimensions();
+          if (!forceReapply && Math.abs(baseWidth - previousWidth) < 0.5 && Math.abs(baseHeight - previousHeight) < 0.5) {{
+            return;
+          }}
+          currentImage.style.width = `${{Math.max(32, Math.round(baseWidth))}}px`;
           const nextFit = computeFitZoom();
           setViewportHeightForFit(nextFit);
-          applyZoom(nextFit, false);
+          if (!zoomDirty) {{
+            applyCleanFitZoom();
+          }} else {{
+            applyZoom(zoom, false);
+          }}
+          saveState();
+        }};
+        const measureHorizontalOverflow = () => {{
+          const bounds = getViewportInnerBounds();
+          const imageRect = currentImage.getBoundingClientRect();
+          // Positive means image is extending past the viewport's right edge.
+          const rightOverflow = imageRect.right - bounds.innerRight;
+          // Positive means image started before the viewport's left edge.
+          const leftOverflow = bounds.innerLeft - imageRect.left;
+          return {{
+            rightOverflow: Number.isFinite(rightOverflow) ? rightOverflow : 0,
+            leftOverflow: Number.isFinite(leftOverflow) ? leftOverflow : 0,
+            imageWidth: Math.max(1, imageRect.width),
+            innerWidth: Math.max(1, bounds.innerWidth),
+          }};
+        }};
+        const applyCleanFitZoom = () => {{
+          let candidate = computeFitZoom();
+          setViewportHeightForFit(candidate);
+          applyZoom(candidate, false);
+          // Refine fit from actual post-transform geometry. This is more
+          // reliable than scrollWidth for transformed PlantUML images.
+          for (let pass = 0; pass < 7; pass += 1) {{
+            const metrics = measureHorizontalOverflow();
+            const needsRightFix = metrics.rightOverflow > 0.35;
+            const needsLeftFix = metrics.leftOverflow > 0.35;
+            if (!needsRightFix && !needsLeftFix) {{
+              break;
+            }}
+            const targetWidth = Math.max(1, metrics.innerWidth - 2);
+            const widthRatio = targetWidth / metrics.imageWidth;
+            const correction = Math.max(0.65, Math.min(0.995, widthRatio));
+            candidate = clampZoom(candidate * correction);
+            setViewportHeightForFit(candidate);
+            applyZoom(candidate, false);
+            // Re-anchor at origin while fitting so width checks are stable.
+            viewport.scrollLeft = 0;
+          }}
+          viewport.scrollLeft = 0;
+        }};
+        const clearPostLayoutFitTimers = () => {{
+          for (const timerId of postLayoutFitTimers) {{
+            try {{
+              window.clearTimeout(timerId);
+            }} catch (_error) {{
+              // Ignore timer cleanup errors.
+            }}
+          }}
+          postLayoutFitTimers = [];
+        }};
+        const schedulePostLayoutFitPasses = () => {{
+          clearPostLayoutFitTimers();
+          const runFitPass = () => {{
+            if (zoomDirty) {{
+              return;
+            }}
+            applyCleanFitZoom();
+            viewport.scrollLeft = 0;
+          }};
+          // Refit across a few late layout phases to avoid first-open clipping.
+          const immediate = window.setTimeout(() => {{
+            window.requestAnimationFrame(() => {{
+              window.requestAnimationFrame(() => {{
+                runFitPass();
+              }});
+            }});
+          }}, 0);
+          postLayoutFitTimers.push(immediate);
+          for (const delayMs of [50, 140, 320]) {{
+            const timerId = window.setTimeout(() => {{
+              runFitPass();
+            }}, delayMs);
+            postLayoutFitTimers.push(timerId);
+          }}
         }};
         const scheduleFitIfClean = () => {{
           if (resizeDebounceTimer) {{
@@ -2200,29 +2473,47 @@ class MarkdownRenderer:
           resizeDebounceTimer = window.setTimeout(() => {{
             resizeDebounceTimer = null;
             applyFitIfClean();
-          }}, 90);
+            schedulePostLayoutFitPasses();
+          }}, 55);
         }};
 
-        zoomOutBtn.addEventListener("click", () => applyZoom(zoom / 1.2, true));
-        zoomInBtn.addEventListener("click", () => applyZoom(zoom * 1.2, true));
+        zoomOutBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          applyZoom(zoom / 1.2, true);
+        }});
+        zoomInBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          applyZoom(zoom * 1.2, true);
+        }});
         zoomResetBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
           zoomDirty = false;
-          const nextFit = computeFitZoom();
-          setViewportHeightForFit(nextFit);
-          applyZoom(nextFit, false);
+          applyCleanFitZoom();
           viewport.scrollTop = 0;
           viewport.scrollLeft = 0;
           saveState();
         }});
         const PAN_STEP = 120;
-        panLeftBtn.addEventListener("click", () => panBy(-PAN_STEP, 0));
-        panRightBtn.addEventListener("click", () => panBy(PAN_STEP, 0));
-        panUpBtn.addEventListener("click", () => panBy(0, -PAN_STEP));
-        panDownBtn.addEventListener("click", () => panBy(0, PAN_STEP));
+        panLeftBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          panBy(-PAN_STEP, 0);
+        }});
+        panRightBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          panBy(PAN_STEP, 0);
+        }});
+        panUpBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          panBy(0, -PAN_STEP);
+        }});
+        panDownBtn.addEventListener("click", () => {{
+          setInteractionArmed(true);
+          panBy(0, PAN_STEP);
+        }});
         viewport.addEventListener(
           "wheel",
           (event) => {{
-            if (!wheelZoomArmed) {{
+            if (!interactionArmed) {{
               return;
             }}
             event.preventDefault();
@@ -2259,6 +2550,9 @@ class MarkdownRenderer:
           if (!(event instanceof MouseEvent) || event.button !== 0) {{
             return;
           }}
+          if (!interactionArmed) {{
+            return;
+          }}
           if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {{
             return;
           }}
@@ -2274,7 +2568,7 @@ class MarkdownRenderer:
           if (!(event instanceof MouseEvent) || event.button !== 0) {{
             return;
           }}
-          wheelZoomArmed = !wheelZoomArmed;
+          setInteractionArmed(!interactionArmed);
         }};
         const onPanMove = (event) => {{
           if (!isPanning || !(event instanceof MouseEvent)) {{
@@ -2295,7 +2589,7 @@ class MarkdownRenderer:
           viewport.classList.remove("mdexplore-pan-active");
         }};
         const onViewportMouseLeave = () => {{
-          wheelZoomArmed = false;
+          setInteractionArmed(false);
         }};
         viewport.addEventListener("mousedown", onPanStart);
         viewport.addEventListener("click", onViewportClick);
@@ -2316,34 +2610,47 @@ class MarkdownRenderer:
         shell.appendChild(viewport);
         fence.innerHTML = "";
         fence.appendChild(shell);
+        const handleImageReady = () => {{
+          remeasureAndRefit(true);
+          schedulePostLayoutFitPasses();
+        }};
+        if (!currentImage.complete || !(Number.isFinite(currentImage.naturalWidth) && currentImage.naturalWidth > 1)) {{
+          currentImage.addEventListener("load", handleImageReady, {{ once: true }});
+          if (typeof currentImage.decode === "function") {{
+            currentImage
+              .decode()
+              .then(() => handleImageReady())
+              .catch(() => {{
+                // Ignore decode errors; load event path handles fallback.
+              }});
+          }}
+        }} else {{
+          window.requestAnimationFrame(() => handleImageReady());
+        }}
+        setInteractionArmed(false);
+        shell.__mdexploreReapplySavedState = () => {{
+          const latest = window.__mdexploreGetDiagramViewState(stateKey);
+          return applySavedState(latest);
+        }};
         const applyInitialFitZoom = () => {{
-          if (savedState && typeof savedState === "object") {{
-            const restoredZoom = Number(savedState.zoom);
-            zoomDirty = !!savedState.dirty;
-            applyZoom(Number.isFinite(restoredZoom) ? restoredZoom : computeFitZoom(), false);
-            viewport.scrollLeft = Number.isFinite(Number(savedState.scrollLeft)) ? Number(savedState.scrollLeft) : 0;
-            viewport.scrollTop = Number.isFinite(Number(savedState.scrollTop)) ? Number(savedState.scrollTop) : 0;
-            saveState();
+          if (applySavedState(savedState)) {{
+            schedulePostLayoutFitPasses();
             return;
           }}
           zoomDirty = false;
-          const nextFit = computeFitZoom();
-          setViewportHeightForFit(nextFit);
-          applyZoom(nextFit, false);
+          applyCleanFitZoom();
           viewport.scrollLeft = 0;
           viewport.scrollTop = 0;
           saveState();
+          schedulePostLayoutFitPasses();
         }};
-        window.requestAnimationFrame(() => {{
-          window.requestAnimationFrame(() => {{
-            applyInitialFitZoom();
-          }});
-        }});
+        applyInitialFitZoom();
         shell.addEventListener("DOMNodeRemovedFromDocument", () => {{
           if (resizeDebounceTimer) {{
             window.clearTimeout(resizeDebounceTimer);
             resizeDebounceTimer = null;
           }}
+          clearPostLayoutFitTimers();
           window.removeEventListener("resize", scheduleFitIfClean);
           viewport.removeEventListener("keydown", onViewportKeyDown);
           viewport.removeEventListener("mousedown", onPanStart);
@@ -2352,6 +2659,11 @@ class MarkdownRenderer:
           window.removeEventListener("mousemove", onPanMove);
           window.removeEventListener("mouseup", onPanEnd);
           window.removeEventListener("blur", onPanEnd);
+          try {{
+            delete shell.__mdexploreReapplySavedState;
+          }} catch (_error) {{
+            // Ignore cleanup errors.
+          }}
           if (resizeObserver) {{
             try {{
               resizeObserver.disconnect();
@@ -2369,6 +2681,10 @@ class MarkdownRenderer:
         return;
       }}
       const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      if (document.body && document.body.classList.contains("mdexplore-pdf-export-mode")) {{
+        window.__mdexploreApplyMermaidZoomControls(block, "pdf");
+        return;
+      }}
       window.__mdexploreApplyMermaidZoomControls(block, normalizedMode);
       if (normalizedMode === "pdf") {{
         return;
@@ -3634,12 +3950,18 @@ class MarkdownRenderer:
         options && typeof options === "object" && String(options.mermaidMode || "").toLowerCase() === "pdf"
           ? "pdf"
           : "auto";
+      const forceMermaid = !!(
+        options &&
+        typeof options === "object" &&
+        options.forceMermaid
+      );
       // Keep Mermaid failures isolated so math rendering is never blocked.
       if (
         !window.__mdexploreMermaidReady ||
-        window.__mdexploreMermaidPaletteMode !== mermaidMode
+        window.__mdexploreMermaidPaletteMode !== mermaidMode ||
+        forceMermaid
       ) {{
-        await window.__mdexploreRunMermaidWithMode(mermaidMode, false);
+        await window.__mdexploreRunMermaidWithMode(mermaidMode, forceMermaid);
       }}
       if (window.__mdexploreApplyPlantUmlZoomControls) {{
         window.__mdexploreApplyPlantUmlZoomControls(mermaidMode);
@@ -4153,6 +4475,7 @@ class MdExploreWindow(QMainWindow):
         self._pdf_pool.setMaxThreadCount(1)
         self._active_pdf_workers: set[PdfExportWorker] = set()
         self._pdf_export_in_progress = False
+        self._pdf_export_source_key: str | None = None
         # Global, in-process result cache for PlantUML blocks keyed by hash of
         # normalized source. This survives file navigation during this run.
         self._plantuml_results: dict[str, tuple[str, str]] = {}
@@ -4193,6 +4516,10 @@ class MdExploreWindow(QMainWindow):
         self._scroll_capture_timer.setInterval(200)
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
         self._scroll_capture_timer.start()
+        self._diagram_state_capture_timer = QTimer(self)
+        self._diagram_state_capture_timer.setInterval(250)
+        self._diagram_state_capture_timer.timeout.connect(self._on_diagram_state_capture_tick)
+        self._diagram_state_capture_timer.start()
         self._default_status_text = "Ready"
         self._status_idle_timer = QTimer(self)
         self._status_idle_timer.setInterval(900)
@@ -4498,28 +4825,9 @@ class MdExploreWindow(QMainWindow):
         phase: str,
     ) -> None:
         """Start delayed restore popup and readiness polling for rich previews."""
-        if phase.strip().lower() != "restoring":
-            # Requested behavior: do not show restore popup for fresh renders.
-            self._stop_restore_overlay_monitor()
-            return
-        if not (needs_math or needs_mermaid or needs_plantuml):
-            self._stop_restore_overlay_monitor()
-            return
-
-        self._restore_overlay_expected_key = expected_key
-        self._restore_overlay_needs_math = bool(needs_math)
-        self._restore_overlay_needs_mermaid = bool(needs_mermaid)
-        self._restore_overlay_needs_plantuml = bool(needs_plantuml)
-        self._restore_overlay_deadline = time.monotonic() + RESTORE_OVERLAY_TIMEOUT_SECONDS
-        self._restore_overlay_probe_inflight = False
-        self._restore_overlay_probe_started_at = 0.0
-        self._restore_overlay_pending_show = True
-        self._restore_overlay_shown_at = 0.0
-        self._restore_overlay.setText("One moment please... restoring math/diagrams")
-        self._position_restore_overlay()
-        self._restore_overlay_show_timer.start(RESTORE_OVERLAY_SHOW_DELAY_MS)
-        self._restore_overlay_poll_timer.start()
-        self._check_restore_overlay_progress()
+        # Disabled by request: this overlay could interfere with restore UX.
+        self._stop_restore_overlay_monitor()
+        return
 
     def _show_restore_overlay_now(self) -> None:
         """Show centered popup after delay if work is still in-flight."""
@@ -4847,6 +5155,86 @@ class MdExploreWindow(QMainWindow):
             lambda result, path_key=key: self._on_diagram_view_state_snapshot(path_key, result),
         )
 
+    def _reapply_diagram_view_state_for(self, expected_key: str) -> None:
+        """Push cached diagram zoom/pan state into the active page and reapply."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        payload = self._diagram_view_state_by_doc.get(expected_key, {})
+        if not isinstance(payload, dict) or not payload:
+            return
+        payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        js = f"""
+(() => {{
+  const incoming = {payload_json};
+  if (!incoming || typeof incoming !== "object") {{
+    return 0;
+  }}
+  if (!window.__mdexploreDiagramViewState || typeof window.__mdexploreDiagramViewState !== "object") {{
+    window.__mdexploreDiagramViewState = {{}};
+  }}
+  for (const [key, value] of Object.entries(incoming)) {{
+    window.__mdexploreSetDiagramViewState(key, value || {{}});
+  }}
+  let applied = 0;
+  for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {{
+    const fn = shell && shell.__mdexploreReapplySavedState;
+    if (typeof fn !== "function") {{
+      continue;
+    }}
+    try {{
+      fn();
+      applied += 1;
+    }} catch (_error) {{
+      // Ignore per-shell restore failures.
+    }}
+  }}
+  return applied;
+}})();
+"""
+        self.preview.page().runJavaScript(js)
+
+    def _capture_current_diagram_view_state_blocking(self, expected_key: str, timeout_ms: int = 300) -> None:
+        """Synchronously capture diagram zoom/pan state before preview navigation."""
+        if not expected_key or self._current_preview_path_key() != expected_key:
+            return
+        js = """
+(() => {
+  if (window.__mdexploreCollectDiagramViewState) {
+    return window.__mdexploreCollectDiagramViewState();
+  }
+  return {};
+})();
+"""
+        loop = QEventLoop(self)
+        completed = {"done": False}
+
+        def on_result(result) -> None:
+            if completed["done"]:
+                return
+            completed["done"] = True
+            self._on_diagram_view_state_snapshot(expected_key, result)
+            if loop.isRunning():
+                loop.quit()
+
+        self.preview.page().runJavaScript(js, on_result)
+
+        timeout_timer = QTimer(self)
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(loop.quit)
+        timeout_timer.start(max(40, int(timeout_ms)))
+        loop.exec()
+        timeout_timer.stop()
+        if not completed["done"]:
+            # Fall back to an async capture if the blocking window times out.
+            self._capture_current_diagram_view_state(expected_key)
+
+    def _on_diagram_state_capture_tick(self) -> None:
+        """Periodically mirror diagram zoom/pan state into Python memory."""
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return
+        self._capture_current_diagram_view_state(path_key)
+
     def _on_diagram_view_state_snapshot(self, path_key: str, result) -> None:
         """Merge diagram view state snapshot from JS into process cache."""
         if not isinstance(path_key, str) or not path_key:
@@ -4884,7 +5272,21 @@ class MdExploreWindow(QMainWindow):
                 "scrollTop": max(0.0, scroll_top),
                 "dirty": bool(raw_state.get("dirty")),
             }
-        self._diagram_view_state_by_doc[path_key] = sanitized
+        existing = self._diagram_view_state_by_doc.get(path_key, {})
+        if not sanitized:
+            # Ignore transient empty snapshots (for example during page
+            # teardown/navigation) so a good saved zoom/pan state is not lost.
+            if isinstance(existing, dict) and existing:
+                return
+            self._diagram_view_state_by_doc[path_key] = {}
+            return
+        merged: dict[str, dict[str, float | bool]] = {}
+        if isinstance(existing, dict):
+            for existing_key, existing_state in existing.items():
+                if isinstance(existing_key, str) and isinstance(existing_state, dict):
+                    merged[existing_key] = existing_state
+        merged.update(sanitized)
+        self._diagram_view_state_by_doc[path_key] = merged
 
     def _schedule_mermaid_cache_harvest_for(self, expected_key: str) -> None:
         """Collect Mermaid SVG cache snapshots after client rendering settles."""
@@ -5476,6 +5878,10 @@ class MdExploreWindow(QMainWindow):
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
         self._schedule_mermaid_cache_harvest_for(current_key)
+        self._reapply_diagram_view_state_for(current_key)
+        QTimer.singleShot(120, lambda key=current_key: self._reapply_diagram_view_state_for(key))
+        QTimer.singleShot(420, lambda key=current_key: self._reapply_diagram_view_state_for(key))
+        QTimer.singleShot(980, lambda key=current_key: self._reapply_diagram_view_state_for(key))
         has_saved_scroll = self._has_saved_scroll_for_current_preview()
         if self._pending_preview_search_terms:
             # Search normally scrolls to first hit. If this file has a saved
@@ -7081,6 +7487,10 @@ class MdExploreWindow(QMainWindow):
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
+        current_key = self._current_preview_path_key()
+        next_key = self._path_key(path)
+        if current_key is not None and current_key != next_key:
+            self._capture_current_diagram_view_state_blocking(current_key, timeout_ms=450)
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
 
@@ -7221,8 +7631,7 @@ class MdExploreWindow(QMainWindow):
         self._preview_capture_enabled = True
         self._scroll_restore_block_until = 0.0
         self._capture_current_preview_scroll(force=True)
-        if previous_path_key is not None:
-            self._capture_current_diagram_view_state(previous_path_key)
+        self._capture_current_diagram_view_state(expected_key)
         self._request_active_view_top_line_update(force=True)
 
     def _restore_current_preview_scroll(self, expected_key: str | None = None) -> None:
@@ -7391,6 +7800,17 @@ class MdExploreWindow(QMainWindow):
   if (window.__mdexploreApplyPlantUmlZoomControls) {{
     window.__mdexploreApplyPlantUmlZoomControls("auto");
   }}
+  for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {{
+    const fn = shell && shell.__mdexploreReapplySavedState;
+    if (typeof fn !== "function") {{
+      continue;
+    }}
+    try {{
+      fn();
+    }} catch (_error) {{
+      // Ignore per-shell restore failures.
+    }}
+  }}
 }})();
 """
         # Mutates only known PlantUML placeholder nodes in the active page.
@@ -7435,6 +7855,7 @@ class MdExploreWindow(QMainWindow):
         next_path_key = self._path_key(path)
         self._capture_current_preview_scroll(force=True)
         if previous_path_key is not None and previous_path_key != next_path_key:
+            self._capture_current_diagram_view_state_blocking(previous_path_key)
             self._save_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
@@ -7574,13 +7995,18 @@ class MdExploreWindow(QMainWindow):
             source_path = self.current_file.resolve()
         except Exception:
             source_path = self.current_file
+        source_key = str(source_path)
         output_path = source_path.with_suffix(".pdf")
+        self._pdf_export_source_key = source_key
+        # Preserve current diagram zoom/pan before forcing PDF-safe rendering mode.
+        self._capture_current_diagram_view_state_blocking(source_key, timeout_ms=500)
+        self._capture_current_diagram_view_state(source_key)
 
         self._set_pdf_export_busy(True)
         self.statusBar().showMessage(f"Preparing PDF for {source_path.name}...")
-        self._prepare_preview_for_pdf_export(output_path, attempt=0)
+        self._prepare_preview_for_pdf_export(output_path, attempt=0, source_key=source_key)
 
-    def _prepare_preview_for_pdf_export(self, output_path: Path, attempt: int) -> None:
+    def _prepare_preview_for_pdf_export(self, output_path: Path, attempt: int, source_key: str) -> None:
         """Wait for math/Mermaid/fonts readiness and inject print style before export."""
         js = """
 (() => {
@@ -7677,8 +8103,343 @@ class MdExploreWindow(QMainWindow):
     document.head.appendChild(style);
   }
 
-  if (window.__mdexploreRunClientRenderers) {
-    window.__mdexploreRunClientRenderers({ mermaidMode: "pdf" });
+  if (document.documentElement) {
+    document.documentElement.classList.add("mdexplore-pdf-export-mode");
+  }
+  document.body.classList.add("mdexplore-pdf-export-mode");
+  if (!document.getElementById("__mdexplore_pdf_mermaid_light_override")) {
+    const style = document.createElement("style");
+    style.id = "__mdexplore_pdf_mermaid_light_override";
+    style.textContent = `
+body.mdexplore-pdf-export-mode .mdexplore-mermaid-toolbar {
+  display: none !important;
+}
+body.mdexplore-pdf-export-mode .mdexplore-mermaid-viewport {
+  overflow: hidden !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+body.mdexplore-pdf-export-mode .mermaid svg {
+  filter: grayscale(100%) !important;
+  -webkit-filter: grayscale(100%) !important;
+}
+html.mdexplore-pdf-export-mode,
+body.mdexplore-pdf-export-mode {
+  --fg: #1a1a1a !important;
+  --bg: #ffffff !important;
+  --code-bg: #efefef !important;
+  --border: #7a7a7a !important;
+  --link: #2d2d2d !important;
+  --callout-note-border: #666666 !important;
+  --callout-note-bg: #f2f2f2 !important;
+  --callout-tip-border: #666666 !important;
+  --callout-tip-bg: #f2f2f2 !important;
+  --callout-important-border: #666666 !important;
+  --callout-important-bg: #f2f2f2 !important;
+  --callout-warning-border: #666666 !important;
+  --callout-warning-bg: #f2f2f2 !important;
+  --callout-caution-border: #666666 !important;
+  --callout-caution-bg: #f2f2f2 !important;
+  color: #1a1a1a !important;
+  background: #ffffff !important;
+}
+html.mdexplore-pdf-export-mode,
+body.mdexplore-pdf-export-mode main {
+  color: #1a1a1a !important;
+  background: #ffffff !important;
+}
+body.mdexplore-pdf-export-mode a {
+  color: #2d2d2d !important;
+}
+body.mdexplore-pdf-export-mode code,
+body.mdexplore-pdf-export-mode pre {
+  color: #1a1a1a !important;
+  background: #efefef !important;
+  border-color: #7a7a7a !important;
+}
+body.mdexplore-pdf-export-mode table,
+body.mdexplore-pdf-export-mode th,
+body.mdexplore-pdf-export-mode td,
+body.mdexplore-pdf-export-mode blockquote,
+body.mdexplore-pdf-export-mode .mdexplore-callout,
+body.mdexplore-pdf-export-mode .mdexplore-fence {
+  border-color: #7a7a7a !important;
+}
+`;
+    document.head.appendChild(style);
+  }
+
+  const normalizeDiagramStateForPdf = () => {
+    // Flatten interactive wrappers so current scroll/pan/zoom cannot leak into PDF.
+    for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {
+      if (!(shell instanceof HTMLElement)) {
+        continue;
+      }
+      const host = shell.parentElement;
+      if (!(host instanceof HTMLElement)) {
+        continue;
+      }
+      const viewport = shell.querySelector(".mdexplore-mermaid-viewport");
+      const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
+      const plantImg =
+        viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
+      if (svg instanceof SVGElement) {
+        svg.style.removeProperty("transform");
+        svg.style.removeProperty("width");
+        svg.style.setProperty("max-width", "100%", "important");
+        svg.style.setProperty("height", "auto", "important");
+        host.innerHTML = "";
+        host.appendChild(svg);
+        continue;
+      }
+      if (plantImg instanceof HTMLImageElement) {
+        plantImg.style.removeProperty("transform");
+        plantImg.style.removeProperty("width");
+        plantImg.style.setProperty("max-width", "100%", "important");
+        plantImg.style.setProperty("height", "auto", "important");
+        host.innerHTML = "";
+        host.appendChild(plantImg);
+      }
+    }
+
+    for (const viewport of Array.from(document.querySelectorAll(".mdexplore-mermaid-viewport"))) {
+      if (!(viewport instanceof HTMLElement)) {
+        continue;
+      }
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+      viewport.style.setProperty("overflow", "hidden", "important");
+      viewport.style.setProperty("scrollbar-width", "none", "important");
+      viewport.style.setProperty("-ms-overflow-style", "none", "important");
+    }
+
+    for (const img of Array.from(document.querySelectorAll("img.plantuml"))) {
+      if (!(img instanceof HTMLImageElement)) {
+        continue;
+      }
+      img.style.removeProperty("transform");
+      img.style.removeProperty("width");
+      img.style.setProperty("max-width", "100%", "important");
+      img.style.setProperty("height", "auto", "important");
+    }
+  };
+
+  const forceMermaidSvgMonochromeForPdf = (svgNode) => {
+    if (!(svgNode instanceof SVGElement)) {
+      return;
+    }
+    const SHAPE_FILL = "#e0e0e0";
+    const SHAPE_STROKE = "#555555";
+    const TEXT_DARK = "#1a1a1a";
+    const LABEL_BG = "#f2f2f2";
+    const TRANSPARENT_VALUES = new Set(["none", "transparent", "rgba(0, 0, 0, 0)", "rgba(0,0,0,0)"]);
+    const textTags = new Set(["text", "tspan"]);
+    const paintableSelector = "path, line, polyline, polygon, rect, circle, ellipse, text, tspan, g, stop, marker";
+    const colorIsTransparent = (value) => {
+      const normalized = String(value || "").trim().toLowerCase();
+      return !normalized || TRANSPARENT_VALUES.has(normalized);
+    };
+
+    svgNode.style.setProperty("background", "#ffffff", "important");
+    svgNode.style.setProperty("color", TEXT_DARK, "important");
+    svgNode.style.removeProperty("filter");
+    svgNode.style.removeProperty("-webkit-filter");
+
+    for (const node of Array.from(svgNode.querySelectorAll(paintableSelector))) {
+      if (!(node instanceof SVGElement)) {
+        continue;
+      }
+      const tag = String(node.tagName || "").toLowerCase();
+      const computed = window.getComputedStyle(node);
+      const computedFill = String(computed.fill || "").trim();
+      const computedStroke = String(computed.stroke || "").trim();
+
+      if (tag === "stop") {
+        node.style.setProperty("stop-color", SHAPE_FILL, "important");
+        node.style.setProperty("stop-opacity", "1", "important");
+        continue;
+      }
+
+      if (textTags.has(tag)) {
+        // PDF monochrome mode keeps Mermaid text consistently dark.
+        node.style.setProperty("fill", TEXT_DARK, "important");
+        node.style.setProperty("stroke", "none", "important");
+        node.style.setProperty("color", TEXT_DARK, "important");
+        node.style.setProperty("opacity", "1", "important");
+        continue;
+      }
+
+      if (!colorIsTransparent(computedFill)) {
+        const inLabel = !!node.closest(".edgeLabel, .labelBkg, .messageText");
+        node.style.setProperty("fill", inLabel ? LABEL_BG : SHAPE_FILL, "important");
+        node.style.setProperty("fill-opacity", "1", "important");
+      } else if (node.hasAttribute("fill")) {
+        node.style.setProperty("fill", "none", "important");
+      }
+
+      if (!colorIsTransparent(computedStroke)) {
+        node.style.setProperty("stroke", SHAPE_STROKE, "important");
+        node.style.setProperty("stroke-opacity", "1", "important");
+      } else if (node.hasAttribute("stroke")) {
+        node.style.setProperty("stroke", "none", "important");
+      }
+      node.style.setProperty("opacity", "1", "important");
+    }
+  };
+
+  const forceAllMermaidMonochromeForPdf = () => {
+    for (const block of Array.from(document.querySelectorAll(".mermaid"))) {
+      if (!(block instanceof HTMLElement)) {
+        continue;
+      }
+      const svg = block.querySelector("svg");
+      if (svg instanceof SVGElement) {
+        forceMermaidSvgMonochromeForPdf(svg);
+      }
+    }
+  };
+
+  const startPdfMermaidCleanRender = (forceRender = false) => {
+    const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid")).filter(
+      (block) => block instanceof HTMLElement
+    );
+    if (mermaidBlocks.length === 0) {
+      window.__mdexplorePdfMermaidReady = true;
+      window.__mdexploreMermaidReady = true;
+      window.__mdexploreMermaidPaletteMode = "pdf";
+      return;
+    }
+    if (!forceRender && window.__mdexplorePdfMermaidReady && !window.__mdexplorePdfMermaidInFlight) {
+      return;
+    }
+    if (window.__mdexplorePdfMermaidInFlight) {
+      return;
+    }
+    window.__mdexplorePdfMermaidInFlight = true;
+    window.__mdexplorePdfMermaidReady = false;
+    window.__mdexplorePdfMermaidError = "";
+
+    const normalizeMermaidSource = (value) => String(value || "").replace(/\\r\\n/g, "\\n").trim();
+
+    (async () => {
+      try {
+        if (!window.__mdexploreLoadMermaidScript) {
+          throw new Error("Mermaid loader unavailable in preview page");
+        }
+        const loaded = await window.__mdexploreLoadMermaidScript();
+        if (!loaded || !window.mermaid) {
+          throw new Error("Mermaid script failed to load for PDF render");
+        }
+        const config =
+          (window.__mdexploreMermaidInitConfig && window.__mdexploreMermaidInitConfig("pdf")) || {
+            startOnLoad: false,
+            securityLevel: "loose",
+            theme: "default",
+            darkMode: false,
+          };
+        mermaid.initialize(config);
+
+        let renderFailures = 0;
+        for (let index = 0; index < mermaidBlocks.length; index += 1) {
+          const block = mermaidBlocks[index];
+          if (!(block instanceof HTMLElement)) {
+            continue;
+          }
+          let sourceText = normalizeMermaidSource(block.dataset && block.dataset.mdexploreMermaidSource);
+          if (!sourceText) {
+            const hasRenderedDiagram = !!block.querySelector("svg");
+            if (!hasRenderedDiagram) {
+              sourceText = normalizeMermaidSource(block.textContent || "");
+            }
+            if (sourceText) {
+              block.dataset.mdexploreMermaidSource = sourceText;
+            }
+          }
+          if (!sourceText) {
+            renderFailures += 1;
+            block.classList.remove("mermaid-pending", "mermaid-ready");
+            block.classList.add("mermaid-error");
+            block.textContent = "Mermaid source unavailable for PDF render";
+            continue;
+          }
+          block.classList.remove("mermaid-ready", "mermaid-error");
+          block.classList.add("mermaid-pending");
+          block.textContent = "Mermaid rendering...";
+          try {
+            const renderId = `mdexplore_pdf_mermaid_${Date.now()}_${index}`;
+            const renderResult = await mermaid.render(renderId, sourceText);
+            const svgMarkup =
+              renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
+                ? renderResult.svg
+                : String(renderResult || "");
+            if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
+              throw new Error("Mermaid returned empty SVG for PDF render");
+            }
+            block.innerHTML = svgMarkup;
+            const renderedSvg = block.querySelector("svg");
+            forceMermaidSvgMonochromeForPdf(renderedSvg);
+            block.classList.remove("mermaid-pending", "mermaid-error");
+            block.classList.add("mermaid-ready");
+          } catch (renderError) {
+            renderFailures += 1;
+            block.classList.remove("mermaid-pending", "mermaid-ready");
+            block.classList.add("mermaid-error");
+            const message =
+              renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
+            block.textContent = `Mermaid render failed: ${message}`;
+          }
+        }
+
+        window.__mdexploreMermaidReady = true;
+        window.__mdexploreMermaidPaletteMode = "pdf";
+        if (renderFailures > 0) {
+          window.__mdexplorePdfMermaidError = `${renderFailures} Mermaid block(s) failed during PDF clean render`;
+        }
+      } catch (error) {
+        window.__mdexplorePdfMermaidError = error && error.message ? error.message : String(error);
+        window.__mdexploreMermaidReady = false;
+      } finally {
+        window.__mdexplorePdfMermaidReady = true;
+        window.__mdexplorePdfMermaidInFlight = false;
+      }
+    })();
+  };
+
+  if (__MDEXPLORE_RESET_MERMAID__) {
+    window.__mdexploreMermaidReady = false;
+    window.__mdexploreMermaidPaletteMode = "";
+    window.__mdexplorePdfMermaidReady = false;
+    window.__mdexplorePdfMermaidInFlight = false;
+    window.__mdexplorePdfMermaidError = "";
+  }
+  startPdfMermaidCleanRender(__MDEXPLORE_FORCE_MERMAID__);
+  if (window.__mdexploreTryTypesetMath) {
+    window.__mdexploreTryTypesetMath();
+  }
+  if (window.__mdexploreApplyPlantUmlZoomControls) {
+    window.__mdexploreApplyPlantUmlZoomControls("pdf");
+  }
+  normalizeDiagramStateForPdf();
+  forceAllMermaidMonochromeForPdf();
+  // Ensure interactive zoom/pan toolbars never appear in PDF snapshots.
+  for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
+    if (!(toolbar instanceof HTMLElement)) {
+      continue;
+    }
+    toolbar.dataset.mdexplorePdfHidden = "1";
+    toolbar.style.setProperty("display", "none", "important");
+  }
+  // Hide diagram viewport scrollbars for PDF output.
+  for (const viewport of Array.from(document.querySelectorAll(".mdexplore-mermaid-viewport"))) {
+    if (!(viewport instanceof HTMLElement)) {
+      continue;
+    }
+    viewport.dataset.mdexplorePdfViewportHidden = "1";
+    viewport.style.setProperty("overflow", "hidden", "important");
+    viewport.style.setProperty("scrollbar-width", "none", "important");
+    viewport.style.setProperty("-ms-overflow-style", "none", "important");
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
   }
 
   const markDiagramPrintLayout = () => {
@@ -7858,7 +8619,7 @@ class MdExploreWindow(QMainWindow):
       if (measuredHeight > availableDiagramHeight) {
         const shrinkRatio = availableDiagramHeight / measuredHeight;
         if (shrinkRatio >= MIN_KEEP_SHRINK_RATIO) {
-          fence.style.setProperty("--mdexplore-print-diagram-max-height", `${{Math.floor(availableDiagramHeight)}}px`);
+          fence.style.setProperty("--mdexplore-print-diagram-max-height", `${Math.floor(availableDiagramHeight)}px`);
         } else {
           keepDiagram = false;
         }
@@ -7885,20 +8646,22 @@ class MdExploreWindow(QMainWindow):
   const hasMath = !!document.querySelector("mjx-container, .MathJax");
   const hasMermaid = !!document.querySelector(".mermaid");
   const mathReady = !hasMath || !!window.__mdexploreMathReady;
-  const mermaidReady =
-    !hasMermaid ||
-    (!!window.__mdexploreMermaidReady && String(window.__mdexploreMermaidPaletteMode || "") === "pdf");
+  const mermaidReady = !hasMermaid || !!window.__mdexplorePdfMermaidReady;
   const fontsReady = !document.fonts || document.fonts.status === "loaded";
 
   return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid, diagramLayout };
 })();
 """
+        js = js.replace("__MDEXPLORE_FORCE_MERMAID__", "true" if attempt == 0 else "false")
+        js = js.replace("__MDEXPLORE_RESET_MERMAID__", "true" if attempt == 0 else "false")
         self.preview.page().runJavaScript(
             js,
-            lambda result, target=output_path, tries=attempt: self._on_pdf_precheck_result(target, tries, result),
+            lambda result, target=output_path, tries=attempt, key=source_key: self._on_pdf_precheck_result(
+                target, tries, key, result
+            ),
         )
 
-    def _on_pdf_precheck_result(self, output_path: Path, attempt: int, result) -> None:
+    def _on_pdf_precheck_result(self, output_path: Path, attempt: int, source_key: str, result) -> None:
         """Continue waiting until print assets are ready, then trigger print."""
         math_ready = False
         mermaid_ready = False
@@ -7909,7 +8672,7 @@ class MdExploreWindow(QMainWindow):
             fonts_ready = bool(result.get("fontsReady"))
 
         if math_ready and mermaid_ready and fonts_ready:
-            self._trigger_pdf_print(output_path)
+            self._trigger_pdf_print(output_path, source_key)
             return
 
         if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
@@ -7917,7 +8680,9 @@ class MdExploreWindow(QMainWindow):
                 self.statusBar().showMessage("Waiting for math/Mermaid/fonts before PDF export...")
             QTimer.singleShot(
                 PDF_EXPORT_PRECHECK_INTERVAL_MS,
-                lambda target=output_path, tries=attempt + 1: self._prepare_preview_for_pdf_export(target, tries),
+                lambda target=output_path, tries=attempt + 1, key=source_key: self._prepare_preview_for_pdf_export(
+                    target, tries, key
+                ),
             )
             return
 
@@ -7926,40 +8691,161 @@ class MdExploreWindow(QMainWindow):
             "Proceeding with PDF export before all preview assets reported ready",
             3500,
         )
-        self._trigger_pdf_print(output_path)
+        self._trigger_pdf_print(output_path, source_key)
 
-    def _trigger_pdf_print(self, output_path: Path) -> None:
+    def _trigger_pdf_print(self, output_path: Path, source_key: str) -> None:
         """Start Qt WebEngine PDF generation for the active preview page."""
         self.statusBar().showMessage(f"Rendering PDF snapshot: {output_path.name}...")
-        try:
-            self.preview.page().printToPdf(
-                lambda pdf_data, target=output_path: self._on_pdf_render_ready(target, pdf_data)
-            )
-        except Exception as exc:
-            self._set_pdf_export_busy(False)
-            self._restore_preview_mermaid_palette()
-            error_text = self._truncate_error_text(str(exc), 500)
-            QMessageBox.critical(self, "PDF export failed", f"Could not start PDF rendering:\n{error_text}")
-            self.statusBar().showMessage(f"PDF export failed: {error_text}", 5000)
+        preprint_js = """
+(() => {
+  if (document.documentElement) {
+    document.documentElement.classList.add("mdexplore-pdf-export-mode");
+  }
+  document.body.classList.add("mdexplore-pdf-export-mode");
+  for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+    const host = shell.parentElement;
+    if (!(host instanceof HTMLElement)) {
+      continue;
+    }
+    const viewport = shell.querySelector(".mdexplore-mermaid-viewport");
+    const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
+    const plantImg =
+      viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
+    if (svg instanceof SVGElement) {
+      svg.style.removeProperty("transform");
+      svg.style.removeProperty("width");
+      svg.style.setProperty("max-width", "100%", "important");
+      svg.style.setProperty("height", "auto", "important");
+      host.innerHTML = "";
+      host.appendChild(svg);
+      continue;
+    }
+    if (plantImg instanceof HTMLImageElement) {
+      plantImg.style.removeProperty("transform");
+      plantImg.style.removeProperty("width");
+      plantImg.style.setProperty("max-width", "100%", "important");
+      plantImg.style.setProperty("height", "auto", "important");
+      host.innerHTML = "";
+      host.appendChild(plantImg);
+    }
+  }
+  for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
+    if (!(toolbar instanceof HTMLElement)) {
+      continue;
+    }
+    toolbar.dataset.mdexplorePdfHidden = "1";
+    toolbar.style.setProperty("display", "none", "important");
+  }
+  for (const viewport of Array.from(document.querySelectorAll(".mdexplore-mermaid-viewport"))) {
+    if (!(viewport instanceof HTMLElement)) {
+      continue;
+    }
+    viewport.dataset.mdexplorePdfViewportHidden = "1";
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+    viewport.style.setProperty("overflow", "hidden", "important");
+    viewport.style.setProperty("scrollbar-width", "none", "important");
+    viewport.style.setProperty("-ms-overflow-style", "none", "important");
+  }
+  for (const img of Array.from(document.querySelectorAll("img.plantuml"))) {
+    if (!(img instanceof HTMLImageElement)) {
+      continue;
+    }
+    img.style.removeProperty("transform");
+    img.style.removeProperty("width");
+    img.style.setProperty("max-width", "100%", "important");
+    img.style.setProperty("height", "auto", "important");
+  }
+  return true;
+})();
+"""
 
-    def _restore_preview_mermaid_palette(self) -> None:
+        def _print_after_dom_normalized(_result) -> None:
+            try:
+                # Give layout a brief turn after wrapper flattening before snapshot.
+                QTimer.singleShot(
+                    70,
+                    lambda: self.preview.page().printToPdf(
+                        lambda pdf_data, target=output_path, key=source_key: self._on_pdf_render_ready(
+                            target, key, pdf_data
+                        )
+                    ),
+                )
+            except Exception as exc:
+                self._set_pdf_export_busy(False)
+                self._restore_preview_mermaid_palette(source_key)
+                error_text = self._truncate_error_text(str(exc), 500)
+                QMessageBox.critical(self, "PDF export failed", f"Could not start PDF rendering:\n{error_text}")
+                self.statusBar().showMessage(f"PDF export failed: {error_text}", 5000)
+
+        self.preview.page().runJavaScript(preprint_js, _print_after_dom_normalized)
+
+    def _restore_preview_mermaid_palette(self, source_key: str | None = None) -> None:
         """Switch Mermaid back to preview palette after PDF export attempts."""
         js = """
 (() => {
+  if (document.documentElement) {
+    document.documentElement.classList.remove("mdexplore-pdf-export-mode");
+  }
+  document.body.classList.remove("mdexplore-pdf-export-mode");
+  const pdfMermaidOverride = document.getElementById("__mdexplore_pdf_mermaid_light_override");
+  if (pdfMermaidOverride && pdfMermaidOverride.parentNode) {
+    pdfMermaidOverride.parentNode.removeChild(pdfMermaidOverride);
+  }
+  for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar[data-mdexplore-pdf-hidden='1']"))) {
+    if (!(toolbar instanceof HTMLElement)) {
+      continue;
+    }
+    toolbar.style.removeProperty("display");
+    delete toolbar.dataset.mdexplorePdfHidden;
+  }
+  for (const viewport of Array.from(document.querySelectorAll(".mdexplore-mermaid-viewport[data-mdexplore-pdf-viewport-hidden='1']"))) {
+    if (!(viewport instanceof HTMLElement)) {
+      continue;
+    }
+    viewport.style.removeProperty("overflow");
+    viewport.style.removeProperty("scrollbar-width");
+    viewport.style.removeProperty("-ms-overflow-style");
+    delete viewport.dataset.mdexplorePdfViewportHidden;
+  }
+  const reapplyAll = () => {
+    for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {
+      const fn = shell && shell.__mdexploreReapplySavedState;
+      if (typeof fn !== "function") {
+        continue;
+      }
+      try {
+        fn();
+      } catch (_error) {
+        // Ignore per-shell restore failures.
+      }
+    }
+  };
   if (window.__mdexploreRunClientRenderers) {
-    window.__mdexploreRunClientRenderers({ mermaidMode: "auto" });
+    const maybePromise = window.__mdexploreRunClientRenderers({ mermaidMode: "auto", forceMermaid: true });
+    Promise.resolve(maybePromise).then(() => reapplyAll()).catch(() => reapplyAll());
     return true;
   }
   if (window.__mdexploreRunMermaidWithMode) {
-    window.__mdexploreRunMermaidWithMode("auto", false);
+    const maybePromise = window.__mdexploreRunMermaidWithMode("auto", false);
+    Promise.resolve(maybePromise).then(() => reapplyAll()).catch(() => reapplyAll());
     return true;
   }
+  reapplyAll();
   return false;
 })();
 """
         self.preview.page().runJavaScript(js)
+        if source_key:
+            self._reapply_diagram_view_state_for(source_key)
+            QTimer.singleShot(120, lambda key=source_key: self._reapply_diagram_view_state_for(key))
+            QTimer.singleShot(420, lambda key=source_key: self._reapply_diagram_view_state_for(key))
+            QTimer.singleShot(980, lambda key=source_key: self._reapply_diagram_view_state_for(key))
 
-    def _on_pdf_render_ready(self, output_path: Path, pdf_data) -> None:
+    def _on_pdf_render_ready(self, output_path: Path, source_key: str, pdf_data) -> None:
         """Receive raw PDF bytes from WebEngine and start footer stamping."""
         try:
             raw_pdf = bytes(pdf_data)
@@ -7968,7 +8854,7 @@ class MdExploreWindow(QMainWindow):
 
         if not raw_pdf:
             self._set_pdf_export_busy(False)
-            self._restore_preview_mermaid_palette()
+            self._restore_preview_mermaid_palette(source_key)
             message = "Qt WebEngine returned an empty PDF payload"
             QMessageBox.critical(self, "PDF export failed", message)
             self.statusBar().showMessage(f"PDF export failed: {message}", 5000)
@@ -7977,20 +8863,24 @@ class MdExploreWindow(QMainWindow):
         worker = PdfExportWorker(output_path, raw_pdf)
         self._active_pdf_workers.add(worker)
         worker.signals.finished.connect(
-            lambda path_text, error_text, current_worker=worker: self._on_pdf_export_finished(
+            lambda path_text, error_text, current_worker=worker, key=source_key: self._on_pdf_export_finished(
                 current_worker,
                 path_text,
                 error_text,
+                key,
             )
         )
         self._pdf_pool.start(worker)
         self.statusBar().showMessage(f"Writing numbered PDF: {output_path.name}...")
 
-    def _on_pdf_export_finished(self, worker: PdfExportWorker, output_path_text: str, error_text: str) -> None:
+    def _on_pdf_export_finished(
+        self, worker: PdfExportWorker, output_path_text: str, error_text: str, source_key: str
+    ) -> None:
         """Finalize async PDF export and report result."""
         self._active_pdf_workers.discard(worker)
         self._set_pdf_export_busy(False)
-        self._restore_preview_mermaid_palette()
+        self._restore_preview_mermaid_palette(source_key)
+        self._pdf_export_source_key = None
 
         if error_text:
             short_error = self._truncate_error_text(error_text, 500)

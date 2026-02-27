@@ -396,8 +396,9 @@ User -> Win : click PDF
 Win -> Win : _export_current_preview_pdf()
 Win -> Win : set busy state + disable PDF button
 Win -> Web : _prepare_preview_for_pdf_export()
+Web -> JsRuntime : enter PDF print mode\n(force print CSS + Mermaid monochrome path)
 
-loop precheck attempts (max 20)
+loop precheck attempts (max 60)
   Web -> JsRuntime : check mathReady/mermaidReady/fontsReady
   JsRuntime --> Web : readiness flags
   Web --> Win : _on_pdf_precheck_result(...)
@@ -477,3 +478,5 @@ MultiView --> [*] : window close (persist effective root)
   - PlantUML pool (diagram jobs),
   - PDF pool (post-processing/stamping).
 - PlantUML rendering is non-blocking in UI flow: placeholders are rendered first, then patched in place as jobs finish.
+- TODO (known issue): diagram zoom/pan restore (Mermaid and PlantUML) is not
+  yet consistently reliable when leaving a document and returning in the same app run.

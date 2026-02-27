@@ -127,11 +127,19 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Output path is the previewed file path with `.pdf` extension in the same directory.
 - Export is based on the active rendered preview (markdown + math + Mermaid + PlantUML state).
 - Export waits briefly for math/diagram/font readiness to reduce rendering artifacts.
-- During PDF export, Mermaid is temporarily re-rendered with a light-page palette for readability.
+- During PDF export, Mermaid is re-rendered in a PDF-specific monochrome/grayscale mode.
 - Export auto-scales page content into a print-style layout with top/side margins
   and an uncluttered footer band.
 - Footer number font size is matched to the document's dominant scaled body text size.
 - Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
+
+## Known TODOs
+
+- Diagram interaction state restore is not yet reliable across document switches:
+  - Mermaid zoom/pan state may not restore consistently when returning to a file.
+  - PlantUML zoom/pan state may not restore consistently when returning to a file.
+- This is tracked as an explicit TODO for future maintenance; core markdown rendering,
+  search, highlighting, and PDF export remain functional.
 
 ### Multiple Views
 

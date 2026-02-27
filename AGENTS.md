@@ -146,8 +146,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   preview background is dark.
 - Mermaid SVG render results should be cached in-memory (by diagram hash and
   render mode) for the current app run so revisiting documents avoids rerender.
-- PDF export should temporarily switch Mermaid to a light-background-friendly
-  palette, then restore preview palette after export.
+- PDF export currently forces a print-safe monochrome/grayscale Mermaid path,
+  then restores preview Mermaid rendering mode after export.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.
@@ -160,6 +160,24 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   (line numbers when available).
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
+
+## Known TODO: Diagram View State Restore
+
+- Open issue: Mermaid and PlantUML zoom/pan state is not yet reliably restored
+  when switching away from a document and then returning during the same app run.
+- Treat this as a known TODO. Do not remove this note until behavior is
+  verified end-to-end and documented with a reproducible test.
+
+### Attempts Tried That Did Not Fully Resolve It
+
+- Frequent JS-side state capture timers plus explicit capture on file-switch.
+- Per-diagram state keys and in-page reapply hooks (`__mdexploreReapplySavedState`).
+- Multi-pass deferred restore reapply from Python (`QTimer` at staggered delays).
+- Reapplying restore after Mermaid palette reset and after async renderer completion.
+- Forcing PDF-mode normalization/reset before print and restoring interaction state afterward.
+
+These approaches improved behavior in some cases but did not make restore reliable
+across all navigation sequences.
 
 ## Launcher Rules
 
