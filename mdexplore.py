@@ -1396,6 +1396,23 @@ class MarkdownRenderer:
       return window.__mdexploreMermaidLoadPromise;
     }};
 
+    window.__mdexploreClearPdfExportMode = () => {{
+      try {{
+        if (document.documentElement) {{
+          document.documentElement.classList.remove("mdexplore-pdf-export-mode");
+        }}
+        if (document.body) {{
+          document.body.classList.remove("mdexplore-pdf-export-mode");
+        }}
+        const pdfMermaidOverride = document.getElementById("__mdexplore_pdf_mermaid_light_override");
+        if (pdfMermaidOverride && pdfMermaidOverride.parentNode) {{
+          pdfMermaidOverride.parentNode.removeChild(pdfMermaidOverride);
+        }}
+      }} catch (_error) {{
+        // Best-effort cleanup only.
+      }}
+    }};
+
     window.__mdexploreParseCssRgb = (colorText) => {{
       const text = String(colorText || "").trim();
       const match = text.match(/^rgba?\\(([^)]+)\\)$/i);
@@ -2682,7 +2699,15 @@ class MarkdownRenderer:
       }}
       const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
       if (document.body && document.body.classList.contains("mdexplore-pdf-export-mode")) {{
+        // Defensive recovery: stale PDF mode should never suppress normal
+        // Mermaid controls in interactive preview mode.
+        if (normalizedMode !== "pdf" && window.__mdexploreClearPdfExportMode) {{
+          window.__mdexploreClearPdfExportMode();
+        }}
         window.__mdexploreApplyMermaidZoomControls(block, "pdf");
+        if (normalizedMode !== "pdf") {{
+          window.__mdexploreApplyMermaidZoomControls(block, normalizedMode);
+        }}
         return;
       }}
       window.__mdexploreApplyMermaidZoomControls(block, normalizedMode);
@@ -3811,6 +3836,7 @@ class MarkdownRenderer:
           const modeCache = window.__mdexploreMermaidSvgCacheByMode[normalizedMode];
           const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
           let hasRenderTargets = false;
+          let renderFailures = 0;
           const cachedHydrateTargets = [];
           for (const block of mermaidBlocks) {{
             if (!(block instanceof HTMLElement)) {{
@@ -3852,7 +3878,6 @@ class MarkdownRenderer:
           if (hasRenderTargets) {{
             const mermaidConfig = window.__mdexploreMermaidInitConfig(normalizedMode);
             mermaid.initialize(mermaidConfig);
-            await mermaid.run({{ querySelector: '.mermaid[data-mdexplore-mermaid-render="1"]' }});
             for (const block of mermaidBlocks) {{
               if (!(block instanceof HTMLElement)) {{
                 continue;
@@ -3860,19 +3885,40 @@ class MarkdownRenderer:
               if (block.getAttribute("data-mdexplore-mermaid-render") !== "1") {{
                 continue;
               }}
-              block.removeAttribute("data-mdexplore-mermaid-render");
-              block.classList.remove("mermaid-pending");
-              block.classList.add("mermaid-ready");
-              window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+              const sourceText = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
               const hashKey = (block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
-              if (!hashKey) {{
-                continue;
+              try {{
+                const renderId = `mdexplore_mermaid_${{Date.now()}}_${{Math.random().toString(36).slice(2)}}`;
+                const renderResult = await mermaid.render(renderId, sourceText);
+                const svgMarkup =
+                  renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
+                    ? renderResult.svg
+                    : String(renderResult || "");
+                if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {{
+                  throw new Error("Mermaid returned empty SVG");
+                }}
+                block.innerHTML = svgMarkup;
+                block.removeAttribute("data-mdexplore-mermaid-render");
+                block.classList.remove("mermaid-pending", "mermaid-error");
+                block.classList.add("mermaid-ready");
+                window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+                if (!hashKey) {{
+                  continue;
+                }}
+                const svgNode = block.querySelector("svg");
+                if (!svgNode || typeof svgNode.outerHTML !== "string") {{
+                  continue;
+                }}
+                modeCache[hashKey] = svgNode.outerHTML;
+              }} catch (renderError) {{
+                renderFailures += 1;
+                block.removeAttribute("data-mdexplore-mermaid-render");
+                block.classList.remove("mermaid-pending", "mermaid-ready");
+                block.classList.add("mermaid-error");
+                const message =
+                  renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
+                block.textContent = `Mermaid render failed: ${{message}}`;
               }}
-              const svgNode = block.querySelector("svg");
-              if (!svgNode || typeof svgNode.outerHTML !== "string") {{
-                continue;
-              }}
-              modeCache[hashKey] = svgNode.outerHTML;
             }}
           }}
           await cachedHydratePromise;
@@ -3884,6 +3930,9 @@ class MarkdownRenderer:
           window.__mdexploreMermaidSvgCacheByMode[normalizedMode] = modeCache;
           window.__mdexploreMermaidReady = true;
           window.__mdexploreMermaidPaletteMode = normalizedMode;
+          if (renderFailures > 0) {{
+            console.error(`mdexplore Mermaid render completed with ${{renderFailures}} error(s)`);
+          }}
         }} catch (error) {{
           window.__mdexploreMermaidReady = false;
           window.__mdexploreMermaidPaletteMode = normalizedMode;
@@ -3950,6 +3999,9 @@ class MarkdownRenderer:
         options && typeof options === "object" && String(options.mermaidMode || "").toLowerCase() === "pdf"
           ? "pdf"
           : "auto";
+      if (mermaidMode === "auto" && window.__mdexploreClearPdfExportMode) {{
+        window.__mdexploreClearPdfExportMode();
+      }}
       const forceMermaid = !!(
         options &&
         typeof options === "object" &&
@@ -8224,17 +8276,111 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     }
   };
 
-  const forceMermaidSvgMonochromeForPdf = (svgNode) => {
-    if (!(svgNode instanceof SVGElement)) {
-      return;
-    }
-    const SHAPE_FILL = "#e0e0e0";
-    const SHAPE_STROKE = "#555555";
-    const TEXT_DARK = "#1a1a1a";
-    const LABEL_BG = "#f2f2f2";
+    const forceMermaidSvgMonochromeForPdf = (svgNode) => {
+      if (!(svgNode instanceof SVGElement)) {
+        return;
+      }
+      const TEXT_DARK = "#1a1a1a";
     const TRANSPARENT_VALUES = new Set(["none", "transparent", "rgba(0, 0, 0, 0)", "rgba(0,0,0,0)"]);
     const textTags = new Set(["text", "tspan"]);
     const paintableSelector = "path, line, polyline, polygon, rect, circle, ellipse, text, tspan, g, stop, marker";
+    const clampByte = (value) => Math.max(0, Math.min(255, Math.round(value)));
+    const parseRgbaText = (raw) => {
+      const text = String(raw || "").trim().toLowerCase();
+      const rgbMatch = text.match(/^rgba?\\(([^)]+)\\)$/);
+      if (!(rgbMatch && rgbMatch[1])) {
+        return null;
+      }
+      const parts = rgbMatch[1]
+        .split(",")
+        .map((part) => Number.parseFloat(String(part).trim()))
+        .filter((part) => Number.isFinite(part));
+      if (parts.length < 3) {
+        return null;
+      }
+      return {
+        r: clampByte(parts[0]),
+        g: clampByte(parts[1]),
+        b: clampByte(parts[2]),
+        a: parts.length >= 4 ? Math.max(0, Math.min(1, parts[3])) : 1,
+      };
+    };
+    const parseColorToRgba = (value) => {
+      const raw = String(value || "").trim().toLowerCase();
+      if (!raw || TRANSPARENT_VALUES.has(raw) || raw.startsWith("url(")) {
+        return null;
+      }
+      const rgbaDirect = parseRgbaText(raw);
+      if (rgbaDirect) {
+        return rgbaDirect;
+      }
+      const hex = raw.startsWith("#") ? raw.slice(1) : "";
+      if (hex.length === 3 || hex.length === 4) {
+        const r = parseInt(hex[0] + hex[0], 16);
+        const g = parseInt(hex[1] + hex[1], 16);
+        const b = parseInt(hex[2] + hex[2], 16);
+        const a = hex.length === 4 ? parseInt(hex[3] + hex[3], 16) / 255 : 1;
+        if ([r, g, b, a].every((v) => Number.isFinite(v))) {
+          return { r, g, b, a };
+        }
+      }
+      if (hex.length === 6 || hex.length === 8) {
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+        if ([r, g, b, a].every((v) => Number.isFinite(v))) {
+          return { r, g, b, a };
+        }
+      }
+      // Fallback to browser color parser for color functions we don't parse.
+      try {
+        if (!window.__mdexploreColorProbeEl || !(window.__mdexploreColorProbeEl instanceof HTMLElement)) {
+          const probe = document.createElement("span");
+          probe.style.position = "absolute";
+          probe.style.left = "-10000px";
+          probe.style.top = "-10000px";
+          probe.style.visibility = "hidden";
+          probe.style.pointerEvents = "none";
+          probe.textContent = ".";
+          document.body.appendChild(probe);
+          window.__mdexploreColorProbeEl = probe;
+        }
+        const probe = window.__mdexploreColorProbeEl;
+        probe.style.color = raw;
+        const resolved = window.getComputedStyle(probe).color;
+        const rgbaResolved = parseRgbaText(resolved);
+        if (rgbaResolved) {
+          return rgbaResolved;
+        }
+      } catch (_error) {
+        // Ignore parser fallback failures and use static fallback gray.
+      }
+      return null;
+    };
+    const rgbToLuma = (r, g, b) => (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+    const rgbSaturation = (r, g, b) => {
+      const maxV = Math.max(r, g, b);
+      const minV = Math.min(r, g, b);
+      if (maxV <= 0.0001) {
+        return 0;
+      }
+      return (maxV - minV) / maxV;
+    };
+    const grayRgbFromSource = (sourceColor, grayMin, grayMax, fallbackGray) => {
+      const parsed = parseColorToRgba(sourceColor);
+      if (!parsed || parsed.a <= 0.001) {
+        const f = clampByte(fallbackGray);
+        return `rgb(${f}, ${f}, ${f})`;
+      }
+      const luma = rgbToLuma(parsed.r, parsed.g, parsed.b);
+      // Slightly lower high-saturation colors so colored fills with similar
+      // luminance don't collapse into the same gray band.
+      const sat = rgbSaturation(parsed.r, parsed.g, parsed.b);
+      const adjustedLuma = Math.max(0, Math.min(255, luma - (sat * 26)));
+      const mapped = clampByte(grayMin + ((grayMax - grayMin) * (adjustedLuma / 255)));
+      return `rgb(${mapped}, ${mapped}, ${mapped})`;
+    };
     const colorIsTransparent = (value) => {
       const normalized = String(value || "").trim().toLowerCase();
       return !normalized || TRANSPARENT_VALUES.has(normalized);
@@ -8255,7 +8401,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const computedStroke = String(computed.stroke || "").trim();
 
       if (tag === "stop") {
-        node.style.setProperty("stop-color", SHAPE_FILL, "important");
+        const stopGray = grayRgbFromSource(computed.stopColor || computedFill, 125, 246, 212);
+        node.style.setProperty("stop-color", stopGray, "important");
         node.style.setProperty("stop-opacity", "1", "important");
         continue;
       }
@@ -8271,14 +8418,18 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
 
       if (!colorIsTransparent(computedFill)) {
         const inLabel = !!node.closest(".edgeLabel, .labelBkg, .messageText");
-        node.style.setProperty("fill", inLabel ? LABEL_BG : SHAPE_FILL, "important");
+        const fillGray = inLabel
+          ? grayRgbFromSource(computedFill, 204, 250, 234)
+          : grayRgbFromSource(computedFill, 88, 242, 206);
+        node.style.setProperty("fill", fillGray, "important");
         node.style.setProperty("fill-opacity", "1", "important");
       } else if (node.hasAttribute("fill")) {
         node.style.setProperty("fill", "none", "important");
       }
 
       if (!colorIsTransparent(computedStroke)) {
-        node.style.setProperty("stroke", SHAPE_STROKE, "important");
+        const strokeGray = grayRgbFromSource(computedStroke, 28, 168, 96);
+        node.style.setProperty("stroke", strokeGray, "important");
         node.style.setProperty("stroke-opacity", "1", "important");
       } else if (node.hasAttribute("stroke")) {
         node.style.setProperty("stroke", "none", "important");
