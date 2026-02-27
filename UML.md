@@ -3,6 +3,11 @@
 This document provides a comprehensive PlantUML view of the current `mdexplore` implementation.
 All diagrams are embedded so they can be rendered directly by mdexplore (or any Markdown viewer with PlantUML support).
 
+Detailed render/caching forks (GUI vs PDF, JS Mermaid vs Rust Mermaid, cache mode
+ownership, and restore behavior) are intentionally documented in `RENDER-PATHS.md`.
+This UML file keeps those areas abstracted at system/class boundaries to avoid
+duplicating low-level render logic across two docs.
+
 ## 1. System Architecture
 
 ```plantuml
@@ -238,64 +243,38 @@ MdExploreWindow ..> QApplication
 @enduml
 ```
 
-## 4. Preview Load + Progressive Diagram Restore
+## 4. Preview Pipeline (Abstracted)
+
+The detailed render/cache branches are covered in `RENDER-PATHS.md`.
+This section intentionally keeps an architectural boundary view only.
 
 ```plantuml
 @startuml
 actor User
 participant "QTreeView" as Tree
 participant "MdExploreWindow" as Win
-participant "Preview Cache" as Cache
-participant "Markdown File" as File
+participant "Preview Cache\nmtime+size+html" as Cache
 participant "MarkdownRenderer" as Renderer
 participant "QWebEngineView" as Web
-participant "PlantUmlRenderWorker" as PumlWorker
-participant "java -jar plantuml.jar" as PlantJar
-participant "In-page Mermaid Runtime" as MermaidJs
+participant "Worker Pools\n(PlantUML/PDF/optional render)" as Pools
 
-User -> Tree : click *.md file
+User -> Tree : click *.md
 Tree -> Win : _on_tree_selection_changed(path)
-Win -> Win : _load_preview(path)
-Win -> File : stat + read (mtime,size,text)
-Win -> Cache : lookup(path_key)
+Win -> Cache : lookup by resolved path + stat
 
-alt cache hit (same mtime+size)
-  Cache --> Win : html_doc (contains placeholders + hash metadata)
-  Win -> Web : setHtml(cached_html)
-  par progressive restore (non-blocking)
-    Win -> Web : apply ready PlantUML results in small batches
-    Web -> MermaidJs : mark cached Mermaid blocks as "Mermaid rendering..."
-    MermaidJs -> MermaidJs : hydrate cached Mermaid SVG in small batches
-  end
+alt cache hit
+  Cache --> Win : html
+  Win -> Web : setHtml(injected cache seed)
 else cache miss/stale
-  Win -> Renderer : render_document(text,title, plantuml_resolver)
-  loop each PlantUML fence
-    Renderer -> Win : plantuml_resolver(code, index, attrs)
-    Win -> Win : register placeholder ids by hash/doc
-    alt not already completed
-      Win -> PumlWorker : start(hash, prepared_code)
-    end
-    Win --> Renderer : always emit "PlantUML rendering..." placeholder
-  end
-  Renderer --> Win : html_doc with placeholders
-  Win -> Cache : store(path_key,mtime,size,html)
-  Win -> Web : setHtml(html_doc)
+  Win -> Renderer : render_document(...)
+  Renderer --> Win : html (+ diagram metadata)
+  Win -> Cache : store html snapshot
+  Win -> Web : setHtml(injected cache seed)
 end
 
-par background diagram completion
-  note over Win,PumlWorker
-    PlantUML worker pool runs in parallel
-    (cpu-aware cap, up to 6 workers)
-  end note
-  PumlWorker -> PlantJar : subprocess run -pipe -tsvg
-  PlantJar --> PumlWorker : svg or stderr
-  PumlWorker --> Win : finished(hash,status,payload)
-  Win -> Win : update plantuml result cache
-  Win -> Cache : invalidate docs using this hash
-  Win -> Web : runJavaScript patch placeholder nodes in-place
-end
-
-Win -> Win : show status progress\n(ready/pending/failed counts)
+Win -> Pools : async diagram/export jobs as needed
+Pools --> Win : completion signals
+Win -> Web : in-place JS patch updates
 @enduml
 ```
 
@@ -379,49 +358,31 @@ Win -> User : status message (exact/fuzzy/full fallback)
 @enduml
 ```
 
-## 7. PDF Export Pipeline
+## 7. PDF Export Pipeline (Abstracted)
+
+Detailed PDF mode branching (JS Mermaid grayscale path vs Rust Mermaid default-themed
+PDF cache path) is documented in `RENDER-PATHS.md`.
 
 ```plantuml
 @startuml
 actor User
 participant "MdExploreWindow" as Win
 participant "QWebEngineView" as Web
-participant "Preview JS Runtime\n(MathJax/Mermaid/fonts)" as JsRuntime
+participant "Preview JS Runtime" as JsRuntime
 participant "Qt printToPdf" as QtPdf
 participant "PdfExportWorker" as PdfWorker
 participant "pypdf + reportlab" as PdfLib
-participant "output *.pdf" as OutPdf
 
 User -> Win : click PDF
-Win -> Win : _export_current_preview_pdf()
-Win -> Win : set busy state + disable PDF button
-Win -> Web : _prepare_preview_for_pdf_export()
-Web -> JsRuntime : enter PDF print mode\n(force print CSS + Mermaid monochrome path)
-
-loop precheck attempts (max 60)
-  Web -> JsRuntime : check mathReady/mermaidReady/fontsReady
-  JsRuntime --> Web : readiness flags
-  Web --> Win : _on_pdf_precheck_result(...)
-  alt all ready
-    break
-  else not ready and attempts remain
-    Win -> Win : wait 140ms and retry
-  end
-end
-
-Win -> QtPdf : printToPdf(callback)
-QtPdf --> Win : raw pdf bytes
-
-alt empty/invalid bytes
-  Win -> Win : show error + clear busy
-else bytes ok
-  Win -> PdfWorker : start(output_path, raw_bytes)
-  PdfWorker -> PdfLib : stamp "N of M" footer
-  PdfLib -> OutPdf : write final numbered PDF
-  PdfWorker --> Win : finished(path,error?)
-  Win -> Win : restore Mermaid auto palette
-  Win -> Win : clear busy + status/update dialog
-end
+Win -> Web : prepare preview for print snapshot
+Web -> JsRuntime : apply print mode + readiness checks
+JsRuntime --> Win : ready/not-ready loop result
+Win -> QtPdf : printToPdf
+QtPdf --> Win : raw PDF bytes
+Win -> PdfWorker : stamp page numbers
+PdfWorker -> PdfLib : page footer processing
+PdfWorker --> Win : export result
+Win -> Web : restore GUI render mode
 @enduml
 ```
 
@@ -473,6 +434,8 @@ MultiView --> [*] : window close (persist effective root)
 ## Notes
 
 - Diagrams are based on current code in `mdexplore.py` and `mdexplore.sh`.
+- Render/caching branch internals are intentionally abstracted here and documented in
+  `RENDER-PATHS.md` to keep a single authoritative deep map.
 - Worker/threadpool usage is intentionally separated by concern:
   - render pool (preview HTML jobs),
   - PlantUML pool (diagram jobs),

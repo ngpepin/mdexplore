@@ -24,6 +24,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Mermaid SVGs are cached in-memory per app run to avoid re-rendering when returning to previously viewed files.
+- Mermaid keeps separate in-memory cache modes for GUI (`auto`) and PDF (`pdf`) rendering.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
@@ -128,9 +129,12 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 - Click `PDF` (between `Refresh` and `Add View`) to export the currently previewed file.
 - Output path is the previewed file path with `.pdf` extension in the same directory.
-- Export is based on the active rendered preview (markdown + math + Mermaid + PlantUML state).
+- Export is based on the active document content and print-prepared preview state
+  (markdown + math + Mermaid + PlantUML).
 - Export waits briefly for math/diagram/font readiness to reduce rendering artifacts.
-- During PDF export, Mermaid is re-rendered in a PDF-specific monochrome/grayscale mode.
+- Mermaid PDF behavior is backend-specific:
+  - JS backend: Mermaid is rendered through a print-safe monochrome/grayscale path.
+  - Rust backend: Mermaid uses a dedicated PDF SVG set rendered by `mmdr` with default theming (no GUI post-processing).
 - Export auto-scales page content into a print-style layout with top/side margins
   and an uncluttered footer band.
 - Footer number font size is matched to the document's dominant scaled body text size.
@@ -309,6 +313,14 @@ Rust backend executable override:
 MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh --mermaid-backend rust
 ```
 
+## Render Architecture Map
+
+- See `RENDER-PATHS.md` for the detailed render/caching architecture:
+  - GUI vs PDF render flow.
+  - Mermaid JS vs Rust backend branches.
+  - Cache ownership and data flow between Python and in-page JavaScript.
+  - Restore path after PDF export and why separate Mermaid cache modes exist.
+
 ## Project Structure
 
 ```text
@@ -318,6 +330,7 @@ mdexplore.desktop.sample # sample desktop launcher entry for user customization
 mdexplor-icon.png  # primary app icon asset (preferred)
 requirements.txt   # Python runtime dependencies
 README.md          # project docs
+RENDER-PATHS.md    # detailed render/caching path diagrams + maintenance narrative
 AGENTS.md          # coding-agent maintenance guide
 DESCRIPTION.md     # repository description + suggested topic tags
 LICENSE            # MIT license

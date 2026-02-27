@@ -19,6 +19,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `requirements.txt`: Python runtime dependencies.
 - `README.md`: user-facing setup and usage documentation.
+- `RENDER-PATHS.md`: detailed render/caching architecture map (Mermaid diagrams + prose).
 - `mdexplore.desktop.sample`: user-adaptable `.desktop` launcher template.
 - `mdexplor-icon.png`: primary app icon asset (preferred).
 - `DESCRIPTION.md`: short repository summary and suggested topic tags.
@@ -150,8 +151,13 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   preview background is dark.
 - Mermaid SVG render results should be cached in-memory (by diagram hash and
   render mode) for the current app run so revisiting documents avoids rerender.
-- PDF export currently forces a print-safe monochrome/grayscale Mermaid path,
-  then restores preview Mermaid rendering mode after export.
+- Mermaid cache modes are:
+  - `auto`: GUI/interactive preview mode.
+  - `pdf`: print/export mode.
+- PDF Mermaid behavior is backend-specific:
+  - JS backend: uses PDF clean render + print-safe monochrome/grayscale transform.
+  - Rust backend: uses separate PDF SVGs rendered by `mmdr` with default theming;
+    GUI-only post-processing must not be applied to Rust PDF SVGs.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - `MDEXPLORE_MERMAID_RS_BIN` can be used to force a specific `mmdr` executable path.
 - MathJax loading order is local-first, then CDN fallback.
@@ -165,6 +171,55 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   (line numbers when available).
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
+
+## Mermaid Render/Caching Architecture (Read Before Changes)
+
+This code has multiple render forks. Preserve these boundaries.
+For practical, symptom-driven troubleshooting, also read section
+`10. Debugging Playbook (Human + Agent)` in `RENDER-PATHS.md`.
+
+### Python-side responsibilities
+
+- `MarkdownRenderer` parses markdown fences and renders Mermaid differently by backend.
+- When backend is `rust`:
+  - Preview SVG is rendered using Rust preview profile and embedded in HTML.
+  - A second PDF-profile SVG (default `mmdr` theming) is rendered per Mermaid hash and
+    stored in `env["mermaid_pdf_svg_by_hash"]`.
+- `render_document()` captures this per-document Rust PDF map and exposes it through
+  `take_last_mermaid_pdf_svg_by_hash()`.
+- `MdExploreWindow._merge_renderer_pdf_mermaid_cache_seed()` merges that map into
+  runtime Mermaid cache mode `pdf`.
+- `_inject_mermaid_cache_seed()` injects the full mode cache (`auto` + `pdf`) into page JS.
+
+### In-page JS responsibilities
+
+- `window.__mdexploreMermaidSvgCacheByMode` stores mode-specific SVG caches.
+- GUI path:
+  - JS backend renders Mermaid through Mermaid JS and stores SVGs in `auto`.
+  - Rust backend prefers pre-rendered Rust SVG already in DOM; if missing, may fallback
+    to Mermaid JS (unless explicitly disabled for that operation).
+  - GUI post-processing/tuning is applied only in GUI mode.
+- PDF preflight path:
+  - JS backend runs PDF-mode Mermaid render and then monochrome/grayscale transform.
+  - Rust backend swaps `.mermaid` blocks to cached Rust `pdf` SVGs and skips JS
+    monochrome transform.
+
+### Critical invariant
+
+- Never reuse GUI-adjusted Mermaid SVG as Rust PDF output.
+- Never leave PDF-mode Rust SVG in place after export completes.
+- Restore path (`_restore_preview_mermaid_palette`) must force mode `auto` reapplication.
+  For Rust, this means replacing with cached `auto` SVGs (or regenerating if unavailable).
+
+### Practical maintenance guidance
+
+- If you change Mermaid DOM wrappers/toolbars/viewport behavior:
+  - Re-test GUI render, PDF export, and post-PDF return for both JS and Rust backends.
+- If you change cache keys:
+  - Keep mode separation (`auto` vs `pdf`) and hash normalization stable.
+- If you change preprint normalization:
+  - Ensure toolbars/scrollbars are hidden in PDF.
+  - Ensure width/height normalization does not break GUI restore.
 
 ## Known TODO: Diagram View State Restore
 
@@ -227,6 +282,7 @@ If behavior changes, also run manual smoke tests:
 When changing behavior:
 
 - Update `README.md` usage and examples.
+- Update `RENDER-PATHS.md` when render/caching/PDF/diagram control flow changes.
 - Update this file if agent-facing workflow or guarantees changed.
 
 ## Common Feature Patterns
