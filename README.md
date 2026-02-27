@@ -134,7 +134,9 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Export waits briefly for math/diagram/font readiness to reduce rendering artifacts.
 - Mermaid PDF behavior is backend-specific:
   - JS backend: Mermaid is rendered through a print-safe monochrome/grayscale path.
-  - Rust backend: Mermaid uses a dedicated PDF SVG set rendered by `mmdr` with default theming (no GUI post-processing).
+  - Rust backend: Mermaid starts from a dedicated PDF SVG set rendered by `mmdr`
+    (default theming), then applies print-safe grayscale normalization
+    (multi-shade, with readable dark text).
 - Export auto-scales page content into a print-style layout with top/side margins
   and an uncluttered footer band.
 - Footer number font size is matched to the document's dominant scaled body text size.

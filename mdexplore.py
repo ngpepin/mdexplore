@@ -2074,14 +2074,14 @@ class MarkdownRenderer:
         }}
         const widthGain = parsedViewBox.width / Math.max(1, bbox.width);
         const heightGain = parsedViewBox.height / Math.max(1, bbox.height);
-        if (widthGain < 1.08 && heightGain < 1.12) {{
+        if (widthGain < 1.03 && heightGain < 1.03) {{
           if (svgNode.dataset) {{
             svgNode.dataset.mdexploreViewBoxTightened = "1";
           }}
           return;
         }}
-        const padX = Math.max(4, bbox.width * 0.015);
-        const padY = Math.max(4, bbox.height * 0.02);
+        const padX = Math.max(6, bbox.width * 0.024);
+        const padY = Math.max(6, bbox.height * 0.03);
         const minX = parsedViewBox.x;
         const minY = parsedViewBox.y;
         const maxX = parsedViewBox.x + parsedViewBox.width;
@@ -8890,6 +8890,11 @@ class MdExploreWindow(QMainWindow):
     break-inside: auto !important;
     page-break-inside: auto !important;
   }
+  .mdexplore-fence .mermaid {
+    display: block;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
   .mdexplore-fence img.plantuml,
   .mdexplore-fence .mermaid svg {
     display: block;
@@ -9008,6 +9013,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       if (!(host instanceof HTMLElement)) {
         continue;
       }
+      host.style.setProperty("display", "block", "important");
+      host.style.setProperty("width", "100%", "important");
+      host.style.setProperty("max-width", "100%", "important");
       const viewport = shell.querySelector(".mdexplore-mermaid-viewport");
       const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
       const plantImg =
@@ -9059,11 +9067,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     }
   };
 
-    const forceMermaidSvgMonochromeForPdf = (svgNode) => {
+    const forceMermaidSvgMonochromeForPdf = (svgNode, options = null) => {
       if (!(svgNode instanceof SVGElement)) {
         return;
       }
       const TEXT_DARK = "#1a1a1a";
+    const isSequenceDiagram = !!(options && typeof options === "object" && options.isSequence === true);
     const TRANSPARENT_VALUES = new Set(["none", "transparent", "rgba(0, 0, 0, 0)", "rgba(0,0,0,0)"]);
     const textTags = new Set(["text", "tspan"]);
     const paintableSelector = "path, line, polyline, polygon, rect, circle, ellipse, text, tspan, g, stop, marker";
@@ -9168,6 +9177,111 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const normalized = String(value || "").trim().toLowerCase();
       return !normalized || TRANSPARENT_VALUES.has(normalized);
     };
+    const lightenTowardWhite = (colorText, ratio = 0.75, fallback = 240) => {
+      const parsed = parseColorToRgba(colorText);
+      if (!parsed || parsed.a <= 0.001) {
+        const f = clampByte(fallback);
+        return `rgb(${f}, ${f}, ${f})`;
+      }
+      const t = Math.max(0, Math.min(1, Number(ratio)));
+      const r = clampByte(parsed.r + ((255 - parsed.r) * t));
+      const g = clampByte(parsed.g + ((255 - parsed.g) * t));
+      const b = clampByte(parsed.b + ((255 - parsed.b) * t));
+      return `rgb(${r}, ${g}, ${b})`;
+    };
+    const resolveSvgBounds = () => {
+      const vb = String(svgNode.getAttribute("viewBox") || "").trim();
+      if (vb) {
+        const parts = vb.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+        if (parts.length === 4 && parts.every((part) => Number.isFinite(part))) {
+          return { x: parts[0], y: parts[1], width: Math.abs(parts[2]), height: Math.abs(parts[3]) };
+        }
+      }
+      try {
+        const bbox = svgNode.getBBox();
+        if (bbox && Number.isFinite(bbox.width) && Number.isFinite(bbox.height) && bbox.width > 0 && bbox.height > 0) {
+          return { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+        }
+      } catch (_error) {
+        // Ignore and use fallback below.
+      }
+      return null;
+    };
+    const isFullDiagramBackground = (node, svgBounds) => {
+      if (!(node instanceof SVGElement) || !svgBounds) {
+        return false;
+      }
+      const computed = window.getComputedStyle(node);
+      if (colorIsTransparent(computed.fill || "")) {
+        return false;
+      }
+      let bbox = null;
+      try {
+        bbox = node.getBBox();
+      } catch (_error) {
+        bbox = null;
+      }
+      if (!bbox || bbox.width <= 0 || bbox.height <= 0) {
+        return false;
+      }
+
+      const margin = Math.max(3, Math.min(svgBounds.width, svgBounds.height) * 0.012);
+      const touchesLeft = bbox.x <= (svgBounds.x + margin);
+      const touchesTop = bbox.y <= (svgBounds.y + margin);
+      const touchesRight = (bbox.x + bbox.width) >= (svgBounds.x + svgBounds.width - margin);
+      const touchesBottom = (bbox.y + bbox.height) >= (svgBounds.y + svgBounds.height - margin);
+      const coversWidth = bbox.width >= (svgBounds.width * 0.92);
+      const coversHeight = bbox.height >= (svgBounds.height * 0.92);
+      return touchesLeft && touchesTop && touchesRight && touchesBottom && coversWidth && coversHeight;
+    };
+
+    const tightenSvgCanvasToContent = () => {
+      let currentViewBox = null;
+      const vbText = String(svgNode.getAttribute("viewBox") || "").trim();
+      if (vbText) {
+        const parts = vbText
+          .split(/[\\s,]+/)
+          .map((part) => Number.parseFloat(part))
+          .filter((part) => Number.isFinite(part));
+        if (parts.length === 4 && parts[2] > 1 && parts[3] > 1) {
+          currentViewBox = { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+        }
+      }
+      let bbox = null;
+      try {
+        bbox = svgNode.getBBox();
+      } catch (_error) {
+        bbox = null;
+      }
+      if (!bbox || bbox.width <= 1 || bbox.height <= 1) {
+        return;
+      }
+      const widthGain = currentViewBox ? (currentViewBox.width / Math.max(1, bbox.width)) : 1;
+      const heightGain = currentViewBox ? (currentViewBox.height / Math.max(1, bbox.height)) : 1;
+      if (widthGain < 1.02 && heightGain < 1.02) {
+        return;
+      }
+      // Generic crop for all Mermaid diagrams in PDF mode with a small cushion.
+      // Sequence diagrams keep a bit more room for arrow heads/labels.
+      const padXRatio = isSequenceDiagram ? 0.05 : 0.028;
+      const padYRatio = isSequenceDiagram ? 0.055 : 0.034;
+      const padX = Math.max(7, bbox.width * padXRatio);
+      const padY = Math.max(7, bbox.height * padYRatio);
+      svgNode.setAttribute(
+        "viewBox",
+        `${bbox.x - padX} ${bbox.y - padY} ${bbox.width + (2 * padX)} ${bbox.height + (2 * padY)}`
+      );
+      svgNode.removeAttribute("width");
+      svgNode.removeAttribute("height");
+      svgNode.style.removeProperty("width");
+      svgNode.style.removeProperty("max-width");
+      svgNode.style.setProperty("width", "100%", "important");
+      svgNode.style.setProperty("max-width", "100%", "important");
+      svgNode.style.setProperty("height", "auto", "important");
+    };
+
+    // PDF must not inherit GUI viewport assumptions; re-fit canvas to content.
+    tightenSvgCanvasToContent();
 
     svgNode.style.setProperty("background", "#ffffff", "important");
     svgNode.style.setProperty("color", TEXT_DARK, "important");
@@ -9219,6 +9333,46 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       }
       node.style.setProperty("opacity", "1", "important");
     }
+
+    // Some Mermaid renderers emit labels via foreignObject HTML instead of
+    // pure SVG text nodes. Force readable print colors there as well.
+    for (const foreign of Array.from(svgNode.querySelectorAll("foreignObject"))) {
+      if (!(foreign instanceof SVGElement)) {
+        continue;
+      }
+      foreign.style.setProperty("color", TEXT_DARK, "important");
+      foreign.style.setProperty("opacity", "1", "important");
+      const htmlLabels = Array.from(foreign.querySelectorAll("*"));
+      for (const element of htmlLabels) {
+        if (!(element instanceof HTMLElement)) {
+          continue;
+        }
+        element.style.setProperty("color", TEXT_DARK, "important");
+        element.style.setProperty("fill", TEXT_DARK, "important");
+        // Keep fills transparent so grayscale shape treatment remains visible.
+        element.style.setProperty("background", "transparent", "important");
+        element.style.setProperty("border-color", "rgb(96, 96, 96)", "important");
+      }
+    }
+
+    // If a Mermaid diagram has an edge-to-edge shaded background panel,
+    // lighten that panel strongly (~75% toward white) to reduce page tint.
+    const svgBounds = resolveSvgBounds();
+    const backgroundCandidates = Array.from(
+      svgNode.querySelectorAll("rect, path, polygon, circle, ellipse")
+    );
+    for (const node of backgroundCandidates) {
+      if (!(node instanceof SVGElement)) {
+        continue;
+      }
+      if (!isFullDiagramBackground(node, svgBounds)) {
+        continue;
+      }
+      const computed = window.getComputedStyle(node);
+      const lighterFill = lightenTowardWhite(computed.fill || node.getAttribute("fill") || "", 0.75, 244);
+      node.style.setProperty("fill", lighterFill, "important");
+      node.style.setProperty("fill-opacity", "1", "important");
+    }
   };
 
   const forceAllMermaidMonochromeForPdf = () => {
@@ -9226,9 +9380,24 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       if (!(block instanceof HTMLElement)) {
         continue;
       }
+      const sourceText = String(
+        (block.dataset && block.dataset.mdexploreMermaidSource) ||
+          block.getAttribute("data-mdexplore-mermaid-source") ||
+          "",
+      );
+      const explicitKind = String((block.dataset && block.dataset.mdexploreMermaidKind) || "")
+        .trim()
+        .toLowerCase();
+      const detectedKind =
+        explicitKind ||
+        (typeof window.__mdexploreDetectMermaidKind === "function"
+          ? String(window.__mdexploreDetectMermaidKind(sourceText) || "").toLowerCase()
+          : "");
+      const isSequenceDiagram =
+        detectedKind === "sequence" || /^\\s*sequenceDiagram\\b/im.test(sourceText);
       const svg = block.querySelector("svg");
       if (svg instanceof SVGElement) {
-        forceMermaidSvgMonochromeForPdf(svg);
+        forceMermaidSvgMonochromeForPdf(svg, { isSequence: isSequenceDiagram });
       }
     }
   };
@@ -9445,9 +9614,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     window.__mdexploreApplyPlantUmlZoomControls("pdf");
   }
   normalizeDiagramStateForPdf();
-  if (String(window.__mdexploreMermaidBackend || "js").toLowerCase() !== "rust") {
-    forceAllMermaidMonochromeForPdf();
-  }
+  // Apply print-safe grayscale for both Mermaid backends. Rust still uses the
+  // dedicated PDF SVG source; this pass only normalizes print contrast.
+  forceAllMermaidMonochromeForPdf();
   // Ensure interactive zoom/pan toolbars never appear in PDF snapshots.
   for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
     if (!(toolbar instanceof HTMLElement)) {
@@ -9546,6 +9715,32 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       return /^H[1-6]$/.test(candidate.tagName) ? candidate : null;
     };
 
+    const detectMermaidKindForFence = (fence) => {
+      const block = fence.querySelector(".mermaid");
+      if (!(block instanceof HTMLElement)) {
+        return "";
+      }
+      const explicitKind = String((block.dataset && block.dataset.mdexploreMermaidKind) || "")
+        .trim()
+        .toLowerCase();
+      if (explicitKind) {
+        return explicitKind;
+      }
+      const sourceText = String(
+        (block.dataset && block.dataset.mdexploreMermaidSource) ||
+          block.getAttribute("data-mdexplore-mermaid-source") ||
+          "",
+      );
+      if (/^\\s*sequenceDiagram\\b/im.test(sourceText)) {
+        return "sequence";
+      }
+      const svg = block.querySelector("svg");
+      if (svg instanceof SVGElement && svg.querySelector(".messageLine0, .messageLine1, .loopLine, .actor")) {
+        return "sequence";
+      }
+      return "";
+    };
+
     const parseLength = (value) => {
       if (!value) return 0;
       const parsed = Number.parseFloat(String(value));
@@ -9601,6 +9796,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       if (!hasPlantUml && !hasMermaid) {
         continue;
       }
+      const mermaidKind = hasMermaid ? detectMermaidKindForFence(fence) : "";
+      const isSequenceMermaid = hasMermaid && mermaidKind === "sequence";
       diagramCount += 1;
       fence.classList.remove(
         "mdexplore-print-keep",
@@ -9642,8 +9839,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         180,
         printableHeight - (headingHeight > 0 ? headingHeight + HEADING_TO_DIAGRAM_GAP_PX : 0),
       );
-      let keepDiagram = true;
-      if (measuredHeight > availableDiagramHeight) {
+      let keepDiagram = !isSequenceMermaid;
+      if (!isSequenceMermaid && measuredHeight > availableDiagramHeight) {
         const shrinkRatio = availableDiagramHeight / measuredHeight;
         if (shrinkRatio >= MIN_KEEP_SHRINK_RATIO) {
           fence.style.setProperty("--mdexplore-print-diagram-max-height", `${Math.floor(availableDiagramHeight)}px`);
@@ -9737,6 +9934,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     if (!(host instanceof HTMLElement)) {
       continue;
     }
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("width", "100%", "important");
+    host.style.setProperty("max-width", "100%", "important");
     const viewport = shell.querySelector(".mdexplore-mermaid-viewport");
     const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
     const plantImg =

@@ -156,8 +156,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - `pdf`: print/export mode.
 - PDF Mermaid behavior is backend-specific:
   - JS backend: uses PDF clean render + print-safe monochrome/grayscale transform.
-  - Rust backend: uses separate PDF SVGs rendered by `mmdr` with default theming;
-    GUI-only post-processing must not be applied to Rust PDF SVGs.
+  - Rust backend: uses separate PDF SVGs rendered by `mmdr` with default theming,
+    then applies print-safe grayscale normalization (with gradation and readable text).
+    GUI preview post-processing must not leak into Rust PDF source SVG selection.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - `MDEXPLORE_MERMAID_RS_BIN` can be used to force a specific `mmdr` executable path.
 - MathJax loading order is local-first, then CDN fallback.
@@ -201,12 +202,13 @@ For practical, symptom-driven troubleshooting, also read section
   - GUI post-processing/tuning is applied only in GUI mode.
 - PDF preflight path:
   - JS backend runs PDF-mode Mermaid render and then monochrome/grayscale transform.
-  - Rust backend swaps `.mermaid` blocks to cached Rust `pdf` SVGs and skips JS
-    monochrome transform.
+  - Rust backend swaps `.mermaid` blocks to cached Rust `pdf` SVGs and then applies
+    the same print-safe monochrome/grayscale normalization pass.
 
 ### Critical invariant
 
 - Never reuse GUI-adjusted Mermaid SVG as Rust PDF output.
+- Never select Mermaid cache mode `auto` during Rust PDF export.
 - Never leave PDF-mode Rust SVG in place after export completes.
 - Restore path (`_restore_preview_mermaid_palette`) must force mode `auto` reapplication.
   For Rust, this means replacing with cached `auto` SVGs (or regenerating if unavailable).

@@ -149,7 +149,7 @@ the wrong SVG variant (for example reusing GUI-adjusted SVGs in PDF mode).
 | GUI | JS | Mermaid JS runtime (`mermaid.render`) | GUI contrast/style tuning | `auto` |
 | GUI | Rust | `mmdr` preview profile (Python) | GUI contrast/style tuning | `auto` |
 | PDF | JS | Mermaid JS runtime in PDF preflight | print monochrome/grayscale transform | `pdf` |
-| PDF | Rust | `mmdr` PDF profile (default theme, Python) | none (no GUI tuning, no monochrome transform) | `pdf` |
+| PDF | Rust | `mmdr` PDF profile (default theme, Python) | print-safe grayscale normalization (multi-shade) | `pdf` |
 
 ## 3. End-to-End Ownership
 
@@ -229,7 +229,8 @@ sequenceDiagram
     J->>J: force monochrome/grayscale transform
   else backend rust
     J->>J: swap .mermaid blocks from cache mode pdf
-    Note over J: Rust PDF path uses dedicated mmdr default-theme SVGs
+    J->>J: apply print-safe grayscale normalization
+    Note over J: Rust PDF path starts from dedicated mmdr default-theme SVGs
   end
 
   J->>J: hide toolbars + hide viewport scrollbars + normalize diagram sizing
@@ -268,6 +269,8 @@ flowchart TD
 - Keep Mermaid cache separation by mode (`auto` vs `pdf`).
 - Rust PDF output must come from the dedicated Rust PDF render profile, not GUI SVG.
 - GUI Mermaid post-processing must not run on Rust PDF SVGs.
+- Rust PDF path may apply print-safe grayscale normalization after selecting
+  the dedicated Rust PDF SVG source.
 - PDF preflight must hide interactive controls (toolbars/scrollbars) before snapshot.
 - Post-export restore must force a GUI-mode reapply.
 
@@ -316,7 +319,7 @@ Run these four cases on the same markdown file with Mermaid:
 | A | JS | GUI | dark-theme tuned Mermaid in preview |
 | B | JS | PDF | monochrome/grayscale Mermaid in PDF |
 | C | Rust | GUI | dark-theme tuned Mermaid in preview |
-| D | Rust | PDF | default-themed Rust Mermaid (no GUI tuning) |
+| D | Rust | PDF | dedicated Rust PDF SVG + print-safe grayscale normalization |
 
 If only one case fails, debug that branch first.  
 If all fail, suspect shared setup (asset loading, cache seed injection, or broken JS runtime).
@@ -352,6 +355,7 @@ Use these anchors in `mdexplore.py` while debugging:
 | GUI Mermaid labels too dark | post-style function missed selector class | inspect `__mdexploreApplyMermaidPostStyles` for diagram-kind-specific logic |
 | Random “Preview load failed” on heavy files | `setHtml` payload too large / transient web load issue | verify temp-file fallback path in `_set_preview_html` and check status/log output |
 | Rust fallback unexpectedly using JS in PDF | fallback guard missing in PDF stage | verify Rust PDF branch does not trigger JS fallback render path |
+| Sequence diagram labels invisible in PDF | label content not normalized to dark text | verify grayscale pass handles both SVG text and foreignObject HTML labels |
 
 ### 10.5 Runtime Inspection Steps (Inside Running App)
 
@@ -395,7 +399,7 @@ Use this exact sequence to reproduce and verify fixes:
   - one large multi-diagram file.
 4. For Rust, verify:
   - GUI returns to dark-tuned view after PDF export,
-  - PDF uses default-themed Rust output.
+  - PDF starts from dedicated Rust PDF SVGs and remains readable after grayscale normalization.
 5. Re-open the file in same app session and ensure cache path still behaves.
 
 ### 10.8 Logging and Instrumentation Strategy
@@ -417,7 +421,7 @@ A Mermaid/PDF fix is complete only when all are true:
 - No regression in JS GUI preview.
 - No regression in Rust GUI preview.
 - JS PDF still produces readable print-safe output.
-- Rust PDF uses dedicated Rust PDF SVG path.
+- Rust PDF uses dedicated Rust PDF SVG path before grayscale normalization.
 - GUI view restores correctly after PDF export.
 - Behavior holds for both small and large diagrams.
 - Documentation (`README.md`, `AGENTS.md`, `RENDER-PATHS.md`) reflects the final path.
