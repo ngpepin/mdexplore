@@ -573,6 +573,7 @@ class MarkdownRenderer:
         else:
             self._mermaid_backend = MERMAID_BACKEND_JS
         self._mermaid_svg_cache: dict[str, str] = {}
+        self._last_mermaid_pdf_svg_by_hash: dict[str, str] = {}
         self._mathjax_local_script = self._resolve_local_mathjax_script()
         self._mermaid_local_script = self._resolve_local_mermaid_script()
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
@@ -620,7 +621,13 @@ class MarkdownRenderer:
                     if isinstance(env, dict):
                         env["mermaid_index"] = mermaid_index + 1
                     if self._mermaid_backend == MERMAID_BACKEND_RUST:
-                        svg_markup, error_message = self._render_mermaid_svg_markup(prepared_source)
+                        svg_markup, error_message = self._render_mermaid_svg_markup(prepared_source, "preview")
+                        if isinstance(env, dict):
+                            pdf_svg_map = env.get("mermaid_pdf_svg_by_hash")
+                            if isinstance(pdf_svg_map, dict) and mermaid_hash not in pdf_svg_map:
+                                pdf_svg, _pdf_error = self._render_mermaid_svg_markup(prepared_source, "pdf")
+                                if pdf_svg:
+                                    pdf_svg_map[mermaid_hash] = pdf_svg
                         source_attr = html.escape(prepared_source, quote=True)
                         if svg_markup is not None:
                             return (
@@ -757,18 +764,32 @@ class MarkdownRenderer:
             )
         return None
 
-    def _render_mermaid_svg_markup(self, code: str) -> tuple[str | None, str | None]:
+    def _render_mermaid_svg_markup(self, code: str, render_profile: str = "preview") -> tuple[str | None, str | None]:
         """Render Mermaid source through Rust mmdr backend and return raw SVG."""
         if self._mermaid_rs_setup_issue is not None:
             return None, self._mermaid_rs_setup_issue
         if self._mermaid_rs_binary is None:
             return None, "mmdr executable not available"
 
+        profile = str(render_profile or "preview").strip().lower()
+        if profile not in {"preview", "pdf"}:
+            profile = "preview"
         prepared_source = self._prepare_mermaid_source(code)
-        rust_theme_config = self._rust_mermaid_theme_config()
-        config_signature = json.dumps(rust_theme_config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if profile == "preview":
+            rust_theme_config = self._rust_mermaid_theme_config()
+            config_signature = json.dumps(rust_theme_config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        else:
+            # PDF-mode Rust rendering should stay vanilla/default.
+            rust_theme_config = None
+            config_signature = "__MDEXPLORE_RUST_DEFAULT_THEME__"
         cache_key = hashlib.sha1(
-            (prepared_source + "\n__MDEXPLORE_RUST_CFG__\n" + config_signature).encode("utf-8", errors="replace")
+            (
+                profile
+                + "\n__MDEXPLORE_RUST_PROFILE__\n"
+                + prepared_source
+                + "\n__MDEXPLORE_RUST_CFG__\n"
+                + config_signature
+            ).encode("utf-8", errors="replace")
         ).hexdigest()
         cached = self._mermaid_svg_cache.get(cache_key)
         if cached is not None:
@@ -788,43 +809,68 @@ class MarkdownRenderer:
             tmp_output_path = Path(output_file.name)
             output_file.close()
 
-            config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
-            tmp_config_path = Path(config_file.name)
-            config_file.write(config_signature)
-            config_file.flush()
-            config_file.close()
+            candidate_commands = []
+            if profile == "preview":
+                config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+                tmp_config_path = Path(config_file.name)
+                config_file.write(config_signature)
+                config_file.flush()
+                config_file.close()
 
-            # `mmdr` CLI signatures vary by build. Prefer the current
-            # flag-based form (-i/-o/-e), then fall back to positional.
-            candidate_commands = [
-                [
-                    str(self._mermaid_rs_binary),
-                    "-i",
-                    str(tmp_input_path),
-                    "-o",
-                    str(tmp_output_path),
-                    "-e",
-                    "svg",
-                    "-c",
-                    str(tmp_config_path),
-                ],
-                [
-                    str(self._mermaid_rs_binary),
-                    "-i",
-                    str(tmp_input_path),
-                    "-o",
-                    str(tmp_output_path),
-                    "-e",
-                    "svg",
-                ],
-                [
-                    str(self._mermaid_rs_binary),
-                    str(tmp_input_path),
-                    str(tmp_output_path),
-                    "--output-format",
-                    "svg",
-                ],
-            ]
+                # `mmdr` CLI signatures vary by build. Prefer the current
+                # flag-based form (-i/-o/-e), then fall back to positional.
+                candidate_commands.extend(
+                    [
+                        [
+                            str(self._mermaid_rs_binary),
+                            "-i",
+                            str(tmp_input_path),
+                            "-o",
+                            str(tmp_output_path),
+                            "-e",
+                            "svg",
+                            "-c",
+                            str(tmp_config_path),
+                        ],
+                        [
+                            str(self._mermaid_rs_binary),
+                            "-i",
+                            str(tmp_input_path),
+                            "-o",
+                            str(tmp_output_path),
+                            "-e",
+                            "svg",
+                        ],
+                        [
+                            str(self._mermaid_rs_binary),
+                            str(tmp_input_path),
+                            str(tmp_output_path),
+                            "--output-format",
+                            "svg",
+                        ],
+                    ]
+                )
+            else:
+                candidate_commands.extend(
+                    [
+                        [
+                            str(self._mermaid_rs_binary),
+                            "-i",
+                            str(tmp_input_path),
+                            "-o",
+                            str(tmp_output_path),
+                            "-e",
+                            "svg",
+                        ],
+                        [
+                            str(self._mermaid_rs_binary),
+                            str(tmp_input_path),
+                            str(tmp_output_path),
+                            "--output-format",
+                            "svg",
+                        ],
+                    ]
+                )
             result = None
             for command in candidate_commands:
                 result = subprocess.run(
@@ -847,7 +893,11 @@ class MarkdownRenderer:
             svg_markup = tmp_output_path.read_text(encoding="utf-8", errors="replace").strip()
             if "<svg" not in svg_markup.casefold():
                 return None, "mmdr did not produce SVG output"
-            cleaned_svg = self._sanitize_rust_mermaid_svg_markup(svg_markup)
+            cleaned_svg = (
+                self._sanitize_rust_mermaid_svg_markup(svg_markup)
+                if profile == "preview"
+                else svg_markup
+            )
             self._mermaid_svg_cache[cache_key] = cleaned_svg
             return cleaned_svg, None
         except subprocess.TimeoutExpired:
@@ -1188,15 +1238,26 @@ class MarkdownRenderer:
         """Normalize Mermaid source for stable hashing/caching."""
         return code.replace("\r\n", "\n").strip("\n")
 
+    def take_last_mermaid_pdf_svg_by_hash(self) -> dict[str, str]:
+        """Return and clear PDF-mode Rust Mermaid SVG seed map for latest render."""
+        payload = dict(self._last_mermaid_pdf_svg_by_hash)
+        self._last_mermaid_pdf_svg_by_hash = {}
+        return payload
+
     def render_document(self, markdown_text: str, title: str, plantuml_resolver=None) -> str:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
         env = {}
         env["mermaid_index"] = 0
+        env["mermaid_pdf_svg_by_hash"] = {}
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
         body = self._md.render(markdown_text, env)
+        if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
+            self._last_mermaid_pdf_svg_by_hash = dict(env.get("mermaid_pdf_svg_by_hash") or {})
+        else:
+            self._last_mermaid_pdf_svg_by_hash = {}
         escaped_title = html.escape(title)
         mermaid_cache_token = MERMAID_CACHE_JSON_TOKEN
         diagram_state_token = DIAGRAM_VIEW_STATE_JSON_TOKEN
@@ -4269,11 +4330,17 @@ class MarkdownRenderer:
       if (backend === "rust") {{
         const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
         const fallbackBlocks = [];
-        const forceJsForPdf = normalizedMode === "pdf";
+        const disableRustJsFallback = !!window.__mdexploreDisableRustJsFallback;
+        const cacheByMode = window.__mdexploreMermaidSvgCacheByMode;
+        const modeCache =
+          cacheByMode && typeof cacheByMode === "object" && cacheByMode[normalizedMode] && typeof cacheByMode[normalizedMode] === "object"
+            ? cacheByMode[normalizedMode]
+            : null;
         for (const block of mermaidBlocks) {{
           if (!(block instanceof HTMLElement)) {{
             continue;
           }}
+          const hashKey = String(block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
           const sourceText = ((block.dataset && block.dataset.mdexploreMermaidSource) || (block.textContent || "").trim());
           const mermaidKind = sourceText ? window.__mdexploreDetectMermaidKind(sourceText) : "";
           if (block.dataset) {{
@@ -4283,34 +4350,68 @@ class MarkdownRenderer:
               delete block.dataset.mdexploreMermaidKind;
             }}
           }}
-          if (forceJsForPdf && sourceText) {{
-            block.dataset.mdexploreMermaidSource = sourceText;
-            block.classList.remove("mermaid-ready", "mermaid-error");
-            block.classList.add("mermaid-pending");
-            block.textContent = "Mermaid rendering...";
-            fallbackBlocks.push(block);
-            continue;
+          if (normalizedMode === "pdf" && hashKey && modeCache && typeof modeCache[hashKey] === "string") {{
+            const cachedSvg = modeCache[hashKey];
+            if (cachedSvg.indexOf("<svg") >= 0) {{
+              block.innerHTML = cachedSvg;
+              block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+              block.classList.add("mermaid-ready");
+              continue;
+            }}
+          }}
+          if (normalizedMode !== "pdf" && force && hashKey && modeCache && typeof modeCache[hashKey] === "string") {{
+            const cachedSvg = modeCache[hashKey];
+            if (cachedSvg.indexOf("<svg") >= 0) {{
+              block.innerHTML = cachedSvg;
+              block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+              block.classList.add("mermaid-ready");
+              window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+              continue;
+            }}
           }}
           const hasSvg = !!block.querySelector("svg");
           block.classList.remove("mermaid-pending");
           if (hasSvg) {{
             block.classList.remove("mermaid-error");
             block.classList.add("mermaid-ready");
-            window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+            if (normalizedMode !== "pdf") {{
+              window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+            }}
           }} else {{
             if (sourceText) {{
               block.dataset.mdexploreMermaidSource = sourceText;
-              block.classList.remove("mermaid-ready", "mermaid-error");
-              block.classList.add("mermaid-pending");
-              block.textContent = "Mermaid rendering...";
-              fallbackBlocks.push(block);
+              if (normalizedMode === "pdf") {{
+                block.classList.remove("mermaid-ready", "mermaid-pending");
+                block.classList.add("mermaid-error");
+                const rustError = (block.getAttribute("data-mdexplore-rust-error") || "").trim();
+                block.textContent = rustError
+                  ? `Mermaid render failed: Rust renderer: ${{rustError}}`
+                  : "Mermaid render failed: Rust PDF SVG unavailable";
+              }} else {{
+                block.classList.remove("mermaid-ready", "mermaid-error");
+                block.classList.add("mermaid-pending");
+                block.textContent = "Mermaid rendering...";
+                fallbackBlocks.push(block);
+              }}
             }} else {{
               block.classList.remove("mermaid-ready");
               block.classList.add("mermaid-error");
             }}
           }}
         }}
-        if (fallbackBlocks.length > 0) {{
+        if (fallbackBlocks.length > 0 && disableRustJsFallback) {{
+          for (const block of fallbackBlocks) {{
+            if (!(block instanceof HTMLElement)) {{
+              continue;
+            }}
+            const rustError = (block.getAttribute("data-mdexplore-rust-error") || "").trim();
+            block.classList.remove("mermaid-pending", "mermaid-ready", "mermaid-rust-fallback");
+            block.classList.add("mermaid-error");
+            block.textContent = rustError
+              ? `Mermaid render failed: Rust renderer: ${{rustError}}`
+              : "Mermaid render failed: Rust renderer did not produce SVG";
+          }}
+        }} else if (fallbackBlocks.length > 0) {{
           try {{
             const loaded = await window.__mdexploreLoadMermaidScript();
             if (!loaded || !window.mermaid) {{
@@ -5745,6 +5846,30 @@ class MdExploreWindow(QMainWindow):
             return json.dumps(self._mermaid_svg_cache_by_mode, separators=(",", ":"), ensure_ascii=False)
         except Exception:
             return "{}"
+
+    def _merge_renderer_pdf_mermaid_cache_seed(self) -> None:
+        """Merge latest renderer-produced Rust PDF Mermaid SVGs into runtime cache."""
+        try:
+            payload = self.renderer.take_last_mermaid_pdf_svg_by_hash()
+        except Exception:
+            return
+        if not isinstance(payload, dict) or not payload:
+            return
+
+        target = self._mermaid_svg_cache_by_mode.setdefault("pdf", {})
+        for raw_hash, raw_svg in payload.items():
+            if not isinstance(raw_hash, str) or not isinstance(raw_svg, str):
+                continue
+            hash_key = raw_hash.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", hash_key):
+                continue
+            if "<svg" not in raw_svg.casefold():
+                continue
+            if len(raw_svg) > MERMAID_SVG_MAX_CHARS:
+                continue
+            target[hash_key] = raw_svg
+        while len(target) > MERMAID_SVG_CACHE_MAX_ENTRIES:
+            target.pop(next(iter(target)))
 
     def _serialized_diagram_view_state_json(self, path_key: str | None) -> str:
         """Serialize per-document diagram view state for HTML seed injection."""
@@ -8654,6 +8779,7 @@ class MdExploreWindow(QMainWindow):
                 return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "", hash_key=hash_key)
 
             html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
+            self._merge_renderer_pdf_mermaid_cache_seed()
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
             self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
@@ -8767,6 +8893,7 @@ class MdExploreWindow(QMainWindow):
   .mdexplore-fence img.plantuml,
   .mdexplore-fence .mermaid svg {
     display: block;
+    width: 100% !important;
     max-width: 100% !important;
     height: auto !important;
   }
@@ -8824,10 +8951,6 @@ body.mdexplore-pdf-export-mode .mdexplore-mermaid-viewport {
   overflow: hidden !important;
   scrollbar-width: none !important;
   -ms-overflow-style: none !important;
-}
-body.mdexplore-pdf-export-mode .mermaid svg {
-  filter: grayscale(100%) !important;
-  -webkit-filter: grayscale(100%) !important;
 }
 html.mdexplore-pdf-export-mode,
 body.mdexplore-pdf-export-mode {
@@ -8891,7 +9014,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
       if (svg instanceof SVGElement) {
         svg.style.removeProperty("transform");
+        svg.removeAttribute("width");
+        svg.removeAttribute("height");
         svg.style.removeProperty("width");
+        svg.style.setProperty("width", "100%", "important");
         svg.style.setProperty("max-width", "100%", "important");
         svg.style.setProperty("height", "auto", "important");
         host.innerHTML = "";
@@ -8900,7 +9026,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       }
       if (plantImg instanceof HTMLImageElement) {
         plantImg.style.removeProperty("transform");
+        plantImg.removeAttribute("width");
+        plantImg.removeAttribute("height");
         plantImg.style.removeProperty("width");
+        plantImg.style.setProperty("width", "100%", "important");
         plantImg.style.setProperty("max-width", "100%", "important");
         plantImg.style.setProperty("height", "auto", "important");
         host.innerHTML = "";
@@ -9116,23 +9245,87 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       window.__mdexplorePdfMermaidInFlight = true;
       window.__mdexplorePdfMermaidReady = false;
       window.__mdexplorePdfMermaidError = "";
-      (async () => {
-        try {
-          if (window.__mdexploreRunMermaidWithMode) {
-            await window.__mdexploreRunMermaidWithMode("pdf", true);
-          }
-          forceAllMermaidMonochromeForPdf();
-          window.__mdexploreMermaidReady = true;
-          window.__mdexploreMermaidPaletteMode = "pdf";
-        } catch (error) {
-          window.__mdexplorePdfMermaidError =
-            error && error.message ? error.message : String(error || "Rust PDF Mermaid render failed");
-          window.__mdexploreMermaidReady = false;
-        } finally {
-          window.__mdexplorePdfMermaidInFlight = false;
-          window.__mdexplorePdfMermaidReady = true;
+      try {
+        // Rust PDF mode uses the dedicated PDF SVG cache produced by Python
+        // with default mmdr theming (no GUI post-processing).
+        const cacheByMode = window.__mdexploreMermaidSvgCacheByMode;
+        if (!cacheByMode || typeof cacheByMode !== "object") {
+          window.__mdexploreMermaidSvgCacheByMode = {};
         }
-      })();
+        if (
+          !window.__mdexploreMermaidSvgCacheByMode.auto ||
+          typeof window.__mdexploreMermaidSvgCacheByMode.auto !== "object"
+        ) {
+          window.__mdexploreMermaidSvgCacheByMode.auto = {};
+        }
+        if (
+          !window.__mdexploreMermaidSvgCacheByMode.pdf ||
+          typeof window.__mdexploreMermaidSvgCacheByMode.pdf !== "object"
+        ) {
+          window.__mdexploreMermaidSvgCacheByMode.pdf = {};
+        }
+        const autoCache = window.__mdexploreMermaidSvgCacheByMode.auto;
+        const pdfCache =
+          window.__mdexploreMermaidSvgCacheByMode.pdf &&
+          typeof window.__mdexploreMermaidSvgCacheByMode.pdf === "object"
+            ? window.__mdexploreMermaidSvgCacheByMode.pdf
+            : null;
+        let missingCount = 0;
+        for (const block of mermaidBlocks) {
+          if (!(block instanceof HTMLElement)) {
+            continue;
+          }
+          const hashKey = String(block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
+          if (hashKey) {
+            const existingSvg = block.querySelector("svg");
+            if (
+              existingSvg instanceof SVGElement &&
+              typeof existingSvg.outerHTML === "string" &&
+              existingSvg.outerHTML.indexOf("<svg") >= 0 &&
+              typeof autoCache[hashKey] !== "string"
+            ) {
+              // Snapshot preview SVG before replacing with PDF variant so
+              // post-export restore can reliably return to GUI styling.
+              autoCache[hashKey] = existingSvg.outerHTML;
+            }
+          }
+          const cachedSvg = hashKey && pdfCache && typeof pdfCache[hashKey] === "string" ? pdfCache[hashKey] : "";
+          if (cachedSvg && cachedSvg.indexOf("<svg") >= 0) {
+            block.removeAttribute("data-mdexplore-mermaid-render");
+            block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+            block.classList.add("mermaid-ready");
+            block.innerHTML = cachedSvg;
+            continue;
+          }
+          const existingSvg = block.querySelector("svg");
+          if (existingSvg instanceof SVGElement) {
+            block.removeAttribute("data-mdexplore-mermaid-render");
+            block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+            block.classList.add("mermaid-ready");
+            continue;
+          }
+          missingCount += 1;
+          const rustError = (block.getAttribute("data-mdexplore-rust-error") || "").trim();
+          block.removeAttribute("data-mdexplore-mermaid-render");
+          block.classList.remove("mermaid-pending", "mermaid-ready", "mermaid-rust-fallback");
+          block.classList.add("mermaid-error");
+          block.textContent = rustError
+            ? `Mermaid render failed: Rust renderer: ${rustError}`
+            : "Mermaid render failed: Rust PDF SVG unavailable";
+        }
+        if (missingCount > 0) {
+          window.__mdexplorePdfMermaidError = `${missingCount} Rust Mermaid block(s) missing cached PDF SVG`;
+        }
+        window.__mdexploreMermaidReady = true;
+        window.__mdexploreMermaidPaletteMode = "pdf";
+      } catch (error) {
+        window.__mdexplorePdfMermaidError =
+          error && error.message ? error.message : String(error || "Rust PDF Mermaid render failed");
+        window.__mdexploreMermaidReady = false;
+      } finally {
+        window.__mdexplorePdfMermaidInFlight = false;
+        window.__mdexplorePdfMermaidReady = true;
+      }
       return;
     }
     if (mermaidBlocks.length === 0) {
@@ -9252,7 +9445,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     window.__mdexploreApplyPlantUmlZoomControls("pdf");
   }
   normalizeDiagramStateForPdf();
-  forceAllMermaidMonochromeForPdf();
+  if (String(window.__mdexploreMermaidBackend || "js").toLowerCase() !== "rust") {
+    forceAllMermaidMonochromeForPdf();
+  }
   // Ensure interactive zoom/pan toolbars never appear in PDF snapshots.
   for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
     if (!(toolbar instanceof HTMLElement)) {
@@ -9548,7 +9743,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
     if (svg instanceof SVGElement) {
       svg.style.removeProperty("transform");
+      svg.removeAttribute("width");
+      svg.removeAttribute("height");
       svg.style.removeProperty("width");
+      svg.style.setProperty("width", "100%", "important");
       svg.style.setProperty("max-width", "100%", "important");
       svg.style.setProperty("height", "auto", "important");
       host.innerHTML = "";
@@ -9557,7 +9755,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     }
     if (plantImg instanceof HTMLImageElement) {
       plantImg.style.removeProperty("transform");
+      plantImg.removeAttribute("width");
+      plantImg.removeAttribute("height");
       plantImg.style.removeProperty("width");
+      plantImg.style.setProperty("width", "100%", "important");
       plantImg.style.setProperty("max-width", "100%", "important");
       plantImg.style.setProperty("height", "auto", "important");
       host.innerHTML = "";
@@ -9587,7 +9788,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       continue;
     }
     img.style.removeProperty("transform");
+    img.removeAttribute("width");
+    img.removeAttribute("height");
     img.style.removeProperty("width");
+    img.style.setProperty("width", "100%", "important");
     img.style.setProperty("max-width", "100%", "important");
     img.style.setProperty("height", "auto", "important");
   }
