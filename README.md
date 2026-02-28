@@ -37,6 +37,10 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - A pin button before the copy-color buttons copies the currently previewed markdown file.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
+- While dragging the preview scrollbar, mdexplore shows an approximate
+  `current line / total lines` indicator beside the scrollbar handle.
+- When search is active, preview scrollbar markers show the vertical positions
+  of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 - Preview scroll position is remembered per markdown file for the current app session.
 - Right-click selected text in the preview pane to use:
   - `Copy Rendered Text` for plain rendered selection text.
@@ -189,6 +193,8 @@ Example:
   reruns automatically for that directory.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
+- Preview scrollbar markers show where highlighted hits occur within the
+  document; clicking a marker jumps to the nearest hit in that marker cluster.
 - For `CLOSE(...)` queries, preview highlighting is constrained to the matched
   CLOSE window (not every occurrence of those terms in the document).
 - Non-quoted terms are case-insensitive.

@@ -1725,10 +1725,10 @@ class MarkdownRenderer:
       position: fixed;
       top: 0;
       left: 0;
-      width: 7px;
+      width: 15px;
       height: 100vh;
       display: none;
-      pointer-events: none;
+      pointer-events: auto;
       z-index: 2147483646;
     }}
     .mdexplore-scroll-hit-overlay.mdexplore-visible {{
@@ -1738,13 +1738,15 @@ class MarkdownRenderer:
       position: absolute;
       left: 0;
       width: 100%;
-      min-height: 4px;
+      min-height: 5px;
       border-radius: 999px;
       pointer-events: auto;
       cursor: pointer;
       background: #f7dc63;
       box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.28);
       opacity: 0.98;
+      user-select: none;
+      touch-action: none;
     }}
     .mdexplore-scroll-hit-marker:hover {{
       background: #fde68a;
@@ -2081,10 +2083,9 @@ class MarkdownRenderer:
 
       const syncOverlayHorizontalPosition = () => {{
         const docClientWidth = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
-        const barWidth = Math.max(0, scrollbarWidth());
-        const gap = 1;
+        const gap = 0;
         const overlayWidth = Math.max(4, hitOverlay.offsetWidth || 6);
-        const overlayLeft = Math.max(0, docClientWidth - barWidth - overlayWidth - gap);
+        const overlayLeft = Math.max(0, docClientWidth - overlayWidth - gap);
         hitOverlay.style.left = `${{Math.round(overlayLeft)}}px`;
       }};
 
@@ -2127,6 +2128,20 @@ class MarkdownRenderer:
         indicator.style.top = `${{Math.round(handleCenterY)}}px`;
         indicator.style.left = `${{Math.round(indicatorLeft)}}px`;
         syncOverlayHorizontalPosition();
+      }};
+
+      const jumpToTarget = (target) => {{
+        if (!target || typeof target.getBoundingClientRect !== "function") {{
+          return;
+        }}
+        const rect = target.getBoundingClientRect();
+        const absoluteTop = window.scrollY + rect.top;
+        const targetCenter = absoluteTop + Math.max(0, rect.height * 0.5);
+        const desiredTop = Math.max(0, targetCenter - (window.innerHeight * 0.5));
+        window.scrollTo({{
+          top: desiredTop,
+          behavior: "auto",
+        }});
       }};
 
       const refreshSearchHitMarkers = () => {{
@@ -2200,11 +2215,16 @@ class MarkdownRenderer:
           const marker = document.createElement("div");
           marker.className = "mdexplore-scroll-hit-marker";
           marker.style.top = `${{item.top}}px`;
-          marker.style.height = `${{Math.max(4, item.bottom - item.top)}}px`;
-          marker.title = "Jump to search hit";
-          marker.addEventListener("click", (event) => {{
+          marker.style.height = `${{Math.max(5, item.bottom - item.top)}}px`;
+          const activateMarker = (event) => {{
+            if (typeof event.button === "number" && event.button !== 0) {{
+              return;
+            }}
             event.preventDefault();
             event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === "function") {{
+              event.stopImmediatePropagation();
+            }}
             const clickY = Number.isFinite(event.clientY) ? event.clientY : (item.top + item.bottom) * 0.5;
             const targetInfo = Array.isArray(item.targets) && item.targets.length
               ? item.targets.reduce((best, candidate) => {{
@@ -2213,15 +2233,13 @@ class MarkdownRenderer:
                 }}, null)
               : null;
             const target = targetInfo && targetInfo.element ? targetInfo.element : null;
-            if (!target || typeof target.scrollIntoView !== "function") {{
+            if (!target) {{
               return;
             }}
-            target.scrollIntoView({{
-              behavior: "auto",
-              block: "center",
-              inline: "nearest",
-            }});
-          }});
+            jumpToTarget(target);
+          }};
+          marker.addEventListener("mousedown", activateMarker);
+          marker.addEventListener("pointerdown", activateMarker);
           hitOverlay.appendChild(marker);
         }}
         syncOverlayHorizontalPosition();

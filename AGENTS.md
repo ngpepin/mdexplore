@@ -60,6 +60,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   file shows completed diagrams without restarting work.
 - Preview scroll position should be remembered per markdown file for the
   current application run.
+- While dragging the preview pane's vertical scrollbar, the preview should show
+  an approximate `current line / total lines` indicator beside the scrollbar handle.
 - `^` navigates one directory level up and re-roots the tree.
 - User-adjusted splitter width between tree and preview should persist across
   root changes for the current application run.
@@ -129,6 +131,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   the full source file.
 - While search is active, opening a matched markdown file should highlight
   matched terms in yellow in preview and scroll to the first match.
+- While search is active, the preview should show yellow scrollbar-side markers
+  for highlighted hits, and clicking a marker should jump to the nearest
+  underlying hit represented by that marker cluster.
 
 ## Editing Rules
 
