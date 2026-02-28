@@ -32,6 +32,8 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
+- View-tab state persists per directory in `.mdexplore-views.json` files for
+  documents that have more than one saved view or a custom tab label.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
 - Top-right color buttons copy matching highlighted files to clipboard.
 - A pin button before the copy-color buttons copies the currently previewed markdown file.
@@ -158,13 +160,34 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 - Click `Add View` to create another tab for the same currently previewed document.
 - New tabs inherit the current view's top visible line/scroll position.
-- Tab labels show the current top-most visible source line number for that tab.
+- By default, tab labels show the current top-most visible source line number for that tab.
 - Tabs show a small left-side position bargraph indicating where that view sits within the document.
 - Tabs use a fixed soft-pastel color sequence based on the order each view was opened.
 - Tabs can be dragged to reorder without changing each tab's assigned color.
+- Right-click a tab to assign a custom label (including spaces) up to 24 characters.
+- Entering a blank custom label restores the default dynamic line-number label for that tab.
+- When a tab receives a custom label, mdexplore stores that tab's current scroll
+  position and top visible source line as the tab's saved beginning.
+- Right-click a custom-labeled tab to use `Return to beginning`, which jumps that
+  tab back to the stored label-time location.
+- Relabeling a custom-labeled tab with different text resets the saved beginning
+  to the scroll position at the time of relabeling.
 - When a new view is added and the palette wraps, mdexplore skips any color already used by open tabs.
 - If you switch to another markdown file and later return in the same app run, that file's tabs restore with their prior order and selected tab.
-- The tab strip is hidden when only one view exists.
+- View-tab state also persists across app restarts in `.mdexplore-views.json`
+  beside the document directory, keyed by markdown filename.
+- For custom-labeled tabs, `.mdexplore-views.json` also persists the stored
+  label-time beginning location used by `Return to beginning`.
+- If custom labels make the tab strip too wide for the window, tab scrolling
+  is enabled through the tab bar's built-in scroll buttons.
+- Only documents with more than one saved view, or with a custom tab label, are
+  written to `.mdexplore-views.json`; untouched single-view documents continue
+  to use the default one-tab state.
+- The tab strip is hidden when there is only one unlabeled default view.
+- If only one view remains and it has a custom label, its tab stays visible so
+  the custom label and `Return to beginning` action remain available.
+- Closing that sole remaining custom-labeled tab clears the custom label and
+  bookmark, then returns the document to the hidden default single-view state.
 - Tabs are closeable with `X`; at least one tab is always kept open.
 - Maximum views per document: `8`.
 

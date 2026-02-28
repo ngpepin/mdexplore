@@ -25,6 +25,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `DESCRIPTION.md`: short repository summary and suggested topic tags.
 - `LICENSE`: MIT license text.
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
+- Runtime view sidecars: per-directory `.mdexplore-views.json` files for
+  persisted view-tab state (multi-view sessions and custom tab labels).
 
 ## Runtime Assumptions
 
@@ -73,19 +75,44 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `Edit` opens currently selected file with `code`.
 - `Add View` creates another tabbed view of the same current document, starting
   from the current top-visible line/scroll position.
-- View tabs show top-visible source line numbers, are closeable, and capped at
-  8 tabs per document.
+- View tabs default to top-visible source line numbers, are closeable, and are
+  capped at 8 tabs per document.
 - View tabs include a left-side mini bargraph indicating each view's position in
   the current document.
 - View tabs should keep a stable soft-pastel color sequence based on open order.
 - View tabs are draggable/reorderable; moving tabs must not change their assigned
   color.
+- Right-clicking a view tab should allow editing a custom tab label up to
+  24 characters, including spaces.
+- If a custom tab label is cleared back to blank, that tab should resume using
+  the default dynamic line-number label.
+- When a tab receives a custom label, the app should capture that tab's current
+  scroll position and top visible source line as the saved label-time beginning.
+- Right-clicking a custom-labeled tab should also offer `Return to beginning`,
+  which restores that saved label-time location for the tab.
+- Relabeling a custom-labeled tab with different text should reset the saved
+  beginning to the tab's current scroll position/top line at relabel time.
 - When assigning a new tab color and wrapping the palette, skip any color already
   used by open tabs.
 - Per-document tabs should persist for the app run: switching to another markdown
   file and back must restore prior tabs, their order, and the previously selected
   tab.
-- The tab strip should remain hidden when there is only one view.
+- View-tab state should also persist across app restarts via per-directory
+  `.mdexplore-views.json`, keyed by markdown filename.
+- For custom-labeled tabs, `.mdexplore-views.json` should also persist the
+  saved label-time beginning location used by `Return to beginning`.
+- If custom labels make the tab strip wider than the available space, the tab
+  bar should scroll rather than truncating the tab set.
+- Only documents with explicit multi-view state or custom tab labels should be
+  written to `.mdexplore-views.json`; untouched single-view documents should
+  fall back to the default one-tab state without sidecar entries.
+- The tab strip should remain hidden when there is only one unlabeled default
+  view.
+- If only one view remains and it has a custom label, its tab should stay
+  visible so the custom label and `Return to beginning` action remain
+  available.
+- Closing that sole remaining custom-labeled tab should clear the custom label
+  and saved beginning, then fall back to the hidden default single-view state.
 - `Refresh` button and `F5` both refresh the current directory tree view
   (new files appear, deleted files disappear) without requiring app restart.
 - `PDF` exports the currently previewed markdown rendering to

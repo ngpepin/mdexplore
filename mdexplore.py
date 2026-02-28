@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileSystemModel,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -5382,6 +5383,7 @@ class ViewTabBar(QTabBar):
         "#e8c6a7",
     ]
     WIDTH_TEMPLATE_TEXT = "999999"
+    MAX_LABEL_CHARS = 24
     WIDTH_SIDE_PADDING = 10
     POSITION_BAR_WIDTH = 26
     POSITION_BAR_HEIGHT = 8
@@ -5639,15 +5641,30 @@ class ViewTabBar(QTabBar):
             + close_width
         )
 
+    def _tab_width_for_text(self, text: str) -> int:
+        """Return tab width for one label, bounded below by the default width."""
+        text_width = self.fontMetrics().horizontalAdvance(text or self.WIDTH_TEMPLATE_TEXT)
+        close_width = 0
+        if self.tabsClosable():
+            close_width = self.style().pixelMetric(QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self) + 8
+        dynamic_width = (
+            text_width
+            + (self.WIDTH_SIDE_PADDING * 2)
+            + self.POSITION_BAR_WIDTH
+            + self.POSITION_BAR_TEXT_GAP
+            + close_width
+        )
+        return max(self._constant_tab_width(), dynamic_width)
+
     def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
-        """Return fixed-width tab sizing so all view tabs align uniformly."""
+        """Return per-tab width, expanding for custom labels when needed."""
         base = super().tabSizeHint(index)
-        return QSize(self._constant_tab_width(), base.height())
+        return QSize(self._tab_width_for_text(self.tabText(index)), base.height())
 
     def minimumTabSizeHint(self, index: int) -> QSize:  # noqa: N802
-        """Enforce same fixed width as minimum to prevent style shrink."""
+        """Match minimum width to the rendered label width."""
         base = super().minimumTabSizeHint(index)
-        return QSize(self._constant_tab_width(), base.height())
+        return QSize(self._tab_width_for_text(self.tabText(index)), base.height())
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """Draw rounded pastel tabs while preserving built-in tab close buttons."""
@@ -5691,6 +5708,7 @@ class ViewTabBar(QTabBar):
 
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
+    VIEWS_FILE_NAME = ".mdexplore-views.json"
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -5751,6 +5769,9 @@ class MdExploreWindow(QMainWindow):
         self._diagram_view_state_by_doc: dict[str, dict[str, dict[str, float | bool]]] = {}
         # In-memory per-document tab/view sessions for this app run only.
         self._document_view_sessions: dict[str, dict] = {}
+        # Per-directory disk-backed view session cache loaded on demand from
+        # .mdexplore-views.json files.
+        self._persisted_view_sessions_by_dir: dict[str, dict[str, dict]] = {}
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
         self._preview_html_temp_files: deque[Path] = deque()
@@ -5843,11 +5864,13 @@ class MdExploreWindow(QMainWindow):
         self.view_tabs.setMovable(False)
         self.view_tabs.setDrawBase(False)
         self.view_tabs.setExpanding(False)
-        self.view_tabs.setUsesScrollButtons(False)
+        self.view_tabs.setUsesScrollButtons(True)
         self.view_tabs.setTabsClosable(True)
         self.view_tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        self.view_tabs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.view_tabs.tabCloseRequested.connect(self._on_view_tab_close_requested)
+        self.view_tabs.customContextMenuRequested.connect(self._show_view_tab_context_menu)
         self.view_tabs.setVisible(False)
         self._reset_document_views()
 
@@ -6200,6 +6223,55 @@ class MdExploreWindow(QMainWindow):
         return str(max(1, int(line_number)))
 
     @staticmethod
+    def _normalize_custom_view_label(raw_value) -> str | None:
+        """Validate a custom tab label; blank resets to dynamic line-number mode."""
+        if not isinstance(raw_value, str):
+            return None
+        if not raw_value.strip():
+            return None
+        cleaned = raw_value.replace("\r", " ").replace("\n", " ")
+        if len(cleaned) > ViewTabBar.MAX_LABEL_CHARS:
+            return None
+        return cleaned
+
+    def _display_label_for_view(self, line_number: int, custom_label: str | None = None) -> str:
+        """Return visible tab label, preferring a validated custom label override."""
+        normalized = self._normalize_custom_view_label(custom_label)
+        if normalized is not None:
+            return normalized
+        return self._view_tab_label_for_line(line_number)
+
+    def _tab_custom_label(self, tab_index: int) -> str | None:
+        """Read a tab's persisted custom label override from tab metadata."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return None
+        data = self.view_tabs.tabData(tab_index)
+        if not isinstance(data, dict):
+            return None
+        return self._normalize_custom_view_label(data.get("custom_label"))
+
+    def _tab_label_anchor(self, tab_index: int) -> tuple[float, int] | None:
+        """Read the saved custom-label bookmark for one tab, if present."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return None
+        data = self.view_tabs.tabData(tab_index)
+        if not isinstance(data, dict):
+            return None
+        if self._normalize_custom_view_label(data.get("custom_label")) is None:
+            return None
+        try:
+            scroll_y = float(data.get("custom_label_anchor_scroll_y", 0.0))
+        except Exception:
+            scroll_y = 0.0
+        try:
+            top_line = max(1, int(data.get("custom_label_anchor_top_line", 1)))
+        except Exception:
+            top_line = 1
+        if not math.isfinite(scroll_y):
+            scroll_y = 0.0
+        return scroll_y, top_line
+
+    @staticmethod
     def _count_markdown_lines(markdown_text: str) -> int:
         """Return total source lines, treating empty content as one line."""
         return max(1, markdown_text.count("\n") + 1)
@@ -6274,14 +6346,20 @@ class MdExploreWindow(QMainWindow):
             return None
         return self._view_states.get(self._active_view_id)
 
-    def _save_document_view_session(self, path_key: str | None = None) -> None:
+    def _save_document_view_session(
+        self,
+        path_key: str | None = None,
+        *,
+        capture_current: bool = True,
+    ) -> None:
         """Snapshot current tab/view state for one document path key."""
         if path_key is None:
             path_key = self._current_preview_path_key()
         if not path_key:
             return
 
-        self._capture_current_preview_scroll(force=True)
+        if capture_current:
+            self._capture_current_preview_scroll(force=True)
 
         sanitized_states: dict[int, dict[str, float | int]] = {}
         for raw_view_id, raw_state in self._view_states.items():
@@ -6304,7 +6382,7 @@ class MdExploreWindow(QMainWindow):
             sanitized_states[view_id] = {"scroll_y": scroll_y, "top_line": top_line}
 
         palette_size = max(1, len(ViewTabBar.PASTEL_SEQUENCE))
-        tabs: list[dict[str, int]] = []
+        tabs: list[dict[str, int | float | str]] = []
         max_sequence = 0
         max_view_id = 0
         for index in range(self.view_tabs.count()):
@@ -6317,6 +6395,15 @@ class MdExploreWindow(QMainWindow):
             if isinstance(data, dict):
                 raw_sequence = data.get("sequence")
                 raw_color_slot = data.get("color_slot")
+                custom_label = self._normalize_custom_view_label(data.get("custom_label"))
+                try:
+                    custom_label_anchor_scroll_y = float(data.get("custom_label_anchor_scroll_y", 0.0))
+                except Exception:
+                    custom_label_anchor_scroll_y = 0.0
+                try:
+                    custom_label_anchor_top_line = max(1, int(data.get("custom_label_anchor_top_line", 1)))
+                except Exception:
+                    custom_label_anchor_top_line = 1
                 try:
                     sequence = max(1, int(raw_sequence))
                 except Exception:
@@ -6325,13 +6412,24 @@ class MdExploreWindow(QMainWindow):
                     color_slot = int(raw_color_slot)
                 except Exception:
                     color_slot = (sequence - 1) % palette_size
+            else:
+                custom_label = None
+                custom_label_anchor_scroll_y = 0.0
+                custom_label_anchor_top_line = 1
             if color_slot < 0 or color_slot >= palette_size:
                 color_slot = (sequence - 1) % palette_size
             state = sanitized_states.get(view_id)
             if state is None:
                 state = {"scroll_y": 0.0, "top_line": 1}
                 sanitized_states[view_id] = state
-            tabs.append({"view_id": view_id, "sequence": sequence, "color_slot": color_slot})
+            tab_entry: dict[str, int | float | str] = {"view_id": view_id, "sequence": sequence, "color_slot": color_slot}
+            if custom_label is not None:
+                tab_entry["custom_label"] = custom_label
+                if not math.isfinite(custom_label_anchor_scroll_y):
+                    custom_label_anchor_scroll_y = 0.0
+                tab_entry["custom_label_anchor_scroll_y"] = custom_label_anchor_scroll_y
+                tab_entry["custom_label_anchor_top_line"] = custom_label_anchor_top_line
+            tabs.append(tab_entry)
             max_sequence = max(max_sequence, sequence)
             max_view_id = max(max_view_id, view_id)
 
@@ -6357,6 +6455,155 @@ class MdExploreWindow(QMainWindow):
             "next_view_sequence": next_sequence,
             "next_tab_color_index": next_color_index,
         }
+
+    @staticmethod
+    def _clone_json_compatible_dict(payload: dict) -> dict:
+        """Return a detached copy of a JSON-compatible dictionary."""
+        try:
+            cloned = json.loads(json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            return {}
+        return cloned if isinstance(cloned, dict) else {}
+
+    @staticmethod
+    def _path_directory_and_name(path_key: str | None) -> tuple[Path, str] | None:
+        """Resolve a persisted path key into its directory and markdown filename."""
+        if not isinstance(path_key, str) or not path_key:
+            return None
+        path = Path(path_key)
+        name = path.name
+        if not name:
+            return None
+        directory = path.parent
+        try:
+            directory = directory.resolve()
+        except Exception:
+            pass
+        return directory, name
+
+    def _views_file_path(self, directory: Path) -> Path:
+        """Return the sidecar JSON path that stores persisted document views."""
+        return directory / self.VIEWS_FILE_NAME
+
+    def _directory_view_sessions(self, directory: Path) -> dict[str, dict]:
+        """Load or return cached persisted view sessions for one directory."""
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        directory_key = str(resolved_directory)
+        cached = self._persisted_view_sessions_by_dir.get(directory_key)
+        if cached is not None:
+            return cached
+
+        sessions: dict[str, dict] = {}
+        file_path = self._views_file_path(resolved_directory)
+        try:
+            raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except Exception:
+            raw_payload = None
+
+        file_map = raw_payload.get("files") if isinstance(raw_payload, dict) else raw_payload
+        if isinstance(file_map, dict):
+            for raw_name, raw_session in file_map.items():
+                if not isinstance(raw_name, str) or not isinstance(raw_session, dict):
+                    continue
+                file_name = Path(raw_name).name
+                if not file_name.lower().endswith(".md"):
+                    continue
+                cloned = self._clone_json_compatible_dict(raw_session)
+                if cloned:
+                    sessions[file_name] = cloned
+
+        self._persisted_view_sessions_by_dir[directory_key] = sessions
+        return sessions
+
+    def _save_directory_view_sessions(self, directory: Path) -> None:
+        """Persist one directory's view-session sidecar, failing quietly on IO errors."""
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        directory_key = str(resolved_directory)
+        sessions = self._persisted_view_sessions_by_dir.get(directory_key, {})
+        file_path = self._views_file_path(resolved_directory)
+
+        serializable_files: dict[str, dict] = {}
+        if isinstance(sessions, dict):
+            for file_name in sorted(sessions):
+                raw_session = sessions.get(file_name)
+                if not isinstance(file_name, str) or not isinstance(raw_session, dict):
+                    continue
+                cloned = self._clone_json_compatible_dict(raw_session)
+                if cloned:
+                    serializable_files[file_name] = cloned
+
+        try:
+            if not serializable_files:
+                if file_path.exists():
+                    file_path.unlink()
+                return
+            payload = {"files": serializable_files}
+            file_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception:
+            # View persistence is best-effort only and must not interrupt UI flow.
+            pass
+
+    @staticmethod
+    def _should_persist_document_view_session(session: dict | None) -> bool:
+        """Persist documents that have multi-view or custom-label state to restore."""
+        if not isinstance(session, dict):
+            return False
+        tabs = session.get("tabs")
+        if not isinstance(tabs, list):
+            return False
+        if len(tabs) > 1:
+            return True
+        for entry in tabs:
+            if isinstance(entry, dict) and isinstance(entry.get("custom_label"), str) and entry.get("custom_label").strip():
+                return True
+        return False
+
+    def _load_persisted_document_view_session(self, path_key: str) -> None:
+        """Populate in-memory session cache from directory sidecar when needed."""
+        if not path_key or path_key in self._document_view_sessions:
+            return
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return
+        directory, file_name = resolved
+        session = self._directory_view_sessions(directory).get(file_name)
+        if not isinstance(session, dict):
+            return
+        cloned = self._clone_json_compatible_dict(session)
+        if cloned:
+            self._document_view_sessions[path_key] = cloned
+
+    def _persist_document_view_session(
+        self,
+        path_key: str | None = None,
+        *,
+        capture_current: bool = True,
+    ) -> None:
+        """Flush one document's in-memory view session snapshot into its directory sidecar."""
+        if path_key is None:
+            path_key = self._current_preview_path_key()
+        if not path_key:
+            return
+
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return
+        directory, file_name = resolved
+
+        self._save_document_view_session(path_key, capture_current=capture_current)
+        sessions = self._directory_view_sessions(directory)
+        session = self._document_view_sessions.get(path_key)
+        if self._should_persist_document_view_session(session):
+            sessions[file_name] = self._clone_json_compatible_dict(session)
+        else:
+            sessions.pop(file_name, None)
+        self._save_directory_view_sessions(directory)
 
     def _serialized_mermaid_cache_json(self) -> str:
         """Serialize in-memory Mermaid SVG cache for template injection."""
@@ -6647,7 +6894,7 @@ class MdExploreWindow(QMainWindow):
             view_states[view_id] = {"scroll_y": scroll_y, "top_line": top_line}
 
         palette_size = max(1, len(ViewTabBar.PASTEL_SEQUENCE))
-        normalized_tabs: list[dict[str, int]] = []
+        normalized_tabs: list[dict[str, int | float | str]] = []
         seen_view_ids: set[int] = set()
         max_sequence = 0
         max_view_id = 0
@@ -6673,7 +6920,23 @@ class MdExploreWindow(QMainWindow):
                 color_slot = (sequence - 1) % palette_size
             if color_slot < 0 or color_slot >= palette_size:
                 color_slot = (sequence - 1) % palette_size
-            normalized_tabs.append({"view_id": view_id, "sequence": sequence, "color_slot": color_slot})
+            normalized_entry: dict[str, int | float | str] = {"view_id": view_id, "sequence": sequence, "color_slot": color_slot}
+            custom_label = self._normalize_custom_view_label(entry.get("custom_label"))
+            if custom_label is not None:
+                try:
+                    custom_label_anchor_scroll_y = float(entry.get("custom_label_anchor_scroll_y", 0.0))
+                except Exception:
+                    custom_label_anchor_scroll_y = 0.0
+                if not math.isfinite(custom_label_anchor_scroll_y):
+                    custom_label_anchor_scroll_y = 0.0
+                try:
+                    custom_label_anchor_top_line = max(1, int(entry.get("custom_label_anchor_top_line", 1)))
+                except Exception:
+                    custom_label_anchor_top_line = 1
+                normalized_entry["custom_label"] = custom_label
+                normalized_entry["custom_label_anchor_scroll_y"] = custom_label_anchor_scroll_y
+                normalized_entry["custom_label_anchor_top_line"] = custom_label_anchor_top_line
+            normalized_tabs.append(normalized_entry)
             max_sequence = max(max_sequence, sequence)
             max_view_id = max(max_view_id, view_id)
 
@@ -6693,8 +6956,9 @@ class MdExploreWindow(QMainWindow):
                 top_line = max(1, int(state.get("top_line", 1)))
             except Exception:
                 top_line = 1
+            custom_label = self._normalize_custom_view_label(tab_entry.get("custom_label"))
             progress = self._line_progress(top_line, total_lines)
-            index = self.view_tabs.addTab(self._view_tab_label_for_line(top_line))
+            index = self.view_tabs.addTab(self._display_label_for_view(top_line, custom_label))
             self.view_tabs.setTabData(
                 index,
                 {
@@ -6702,6 +6966,9 @@ class MdExploreWindow(QMainWindow):
                     "sequence": tab_entry["sequence"],
                     "color_slot": tab_entry["color_slot"],
                     "progress": progress,
+                    "custom_label": custom_label,
+                    "custom_label_anchor_scroll_y": float(tab_entry.get("custom_label_anchor_scroll_y", 0.0)),
+                    "custom_label_anchor_top_line": max(1, int(tab_entry.get("custom_label_anchor_top_line", top_line))),
                 },
             )
             self.view_tabs.setTabToolTip(index, f"Top visible line: {top_line} / {total_lines}")
@@ -6746,14 +7013,15 @@ class MdExploreWindow(QMainWindow):
     def _set_view_tab_line(self, view_id: int, line_number: int) -> None:
         """Update one tab label/tooltip to match its top visible line."""
         line_value = max(1, int(line_number))
-        label = self._view_tab_label_for_line(line_value)
         total_lines = max(1, int(self._current_document_total_lines))
         progress = self._line_progress(line_value, total_lines)
         for index in range(self.view_tabs.count()):
             if self._tab_view_id(index) != view_id:
                 continue
-            if self.view_tabs.tabText(index) != label:
-                self.view_tabs.setTabText(index, label)
+            display_label = self._display_label_for_view(line_value, self._tab_custom_label(index))
+            if self.view_tabs.tabText(index) != display_label:
+                self.view_tabs.setTabText(index, display_label)
+                self.view_tabs.updateGeometry()
             data = self.view_tabs.tabData(index)
             if isinstance(data, dict):
                 updated_data = dict(data)
@@ -6780,11 +7048,15 @@ class MdExploreWindow(QMainWindow):
                     line_value = 1
             progress = self._line_progress(line_value, total_lines)
             data = self.view_tabs.tabData(index)
+            display_label = self._display_label_for_view(line_value, self._tab_custom_label(index))
+            if self.view_tabs.tabText(index) != display_label:
+                self.view_tabs.setTabText(index, display_label)
             if isinstance(data, dict):
                 updated_data = dict(data)
                 updated_data["progress"] = progress
                 self.view_tabs.setTabData(index, updated_data)
             self.view_tabs.setTabToolTip(index, f"Top visible line: {line_value} / {total_lines}")
+        self.view_tabs.updateGeometry()
         self.view_tabs.update()
 
     def _current_preview_scroll_key(self) -> str | None:
@@ -6805,10 +7077,16 @@ class MdExploreWindow(QMainWindow):
         self.add_view_btn.setEnabled(can_add)
 
     def _update_view_tabs_visibility(self) -> None:
-        """Show tab strip only when there are multiple views for an open file."""
+        """Show tab strip for multi-view docs, or for a single custom-labeled view."""
         if not hasattr(self, "view_tabs"):
             return
-        self.view_tabs.setVisible(self.current_file is not None and self.view_tabs.count() > 1)
+        visible = False
+        if self.current_file is not None:
+            if self.view_tabs.count() > 1:
+                visible = True
+            elif self.view_tabs.count() == 1 and self._tab_custom_label(0) is not None:
+                visible = True
+        self.view_tabs.setVisible(visible)
 
     def _create_document_view(self, scroll_y: float, top_line: int, *, make_current: bool) -> int:
         """Create a new view tab/state entry and optionally activate it."""
@@ -6831,7 +7109,15 @@ class MdExploreWindow(QMainWindow):
         tab_index = self.view_tabs.addTab(self._view_tab_label_for_line(safe_line))
         self.view_tabs.setTabData(
             tab_index,
-            {"view_id": view_id, "sequence": sequence, "color_slot": color_slot, "progress": progress},
+            {
+                "view_id": view_id,
+                "sequence": sequence,
+                "color_slot": color_slot,
+                "progress": progress,
+                "custom_label": None,
+                "custom_label_anchor_scroll_y": 0.0,
+                "custom_label_anchor_top_line": safe_line,
+            },
         )
         self.view_tabs.setTabToolTip(tab_index, f"Top visible line: {safe_line} / {total_lines}")
 
@@ -6892,6 +7178,28 @@ class MdExploreWindow(QMainWindow):
     def _on_view_tab_close_requested(self, tab_index: int) -> None:
         """Close one saved view tab while keeping at least one active view."""
         if self.view_tabs.count() <= 1:
+            if self._tab_custom_label(tab_index) is not None:
+                view_id = self._tab_view_id(tab_index)
+                if view_id is None:
+                    return
+                state = self._view_states.get(view_id) or {"scroll_y": 0.0, "top_line": 1}
+                try:
+                    top_line = max(1, int(state.get("top_line", 1)))
+                except Exception:
+                    top_line = 1
+                data = self.view_tabs.tabData(tab_index)
+                updated_data = dict(data) if isinstance(data, dict) else {"view_id": view_id}
+                updated_data["custom_label"] = None
+                updated_data["custom_label_anchor_scroll_y"] = 0.0
+                updated_data["custom_label_anchor_top_line"] = top_line
+                self.view_tabs.setTabData(tab_index, updated_data)
+                self.view_tabs.setTabText(tab_index, self._display_label_for_view(top_line, None))
+                self.view_tabs.updateGeometry()
+                self.view_tabs.update()
+                self._update_view_tabs_visibility()
+                self._persist_document_view_session()
+                self.statusBar().showMessage("Closed labeled tab and returned to hidden default view", 3000)
+                return
             self.statusBar().showMessage("At least one view must remain open", 2500)
             return
 
@@ -6939,6 +7247,117 @@ class MdExploreWindow(QMainWindow):
         QTimer.singleShot(900, lambda key=expected_key: self._enable_preview_scroll_capture_for(key))
         self._request_active_view_top_line_update(force=True)
         self._update_add_view_button_state()
+
+    def _show_view_tab_context_menu(self, pos) -> None:
+        """Offer custom-label editing for document view tabs."""
+        tab_index = self.view_tabs.tabAt(pos)
+        if tab_index < 0:
+            return
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit Tab Label...")
+        return_action = None
+        if self._tab_label_anchor(tab_index) is not None:
+            return_action = menu.addAction("Return to beginning")
+        chosen = menu.exec(self.view_tabs.mapToGlobal(pos))
+        if chosen != edit_action:
+            if chosen == return_action:
+                self._return_view_tab_to_beginning(tab_index)
+            return
+        self._edit_view_tab_label(tab_index)
+
+    def _edit_view_tab_label(self, tab_index: int) -> None:
+        """Prompt for a custom tab label; blank restores the dynamic line number."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return
+
+        current_custom = self._tab_custom_label(tab_index) or ""
+        label_text, accepted = QInputDialog.getText(
+            self,
+            "Edit Tab Label",
+            "Enter a custom tab label (blank restores the line number):",
+            text=current_custom,
+        )
+        if not accepted:
+            return
+        if len(label_text) > ViewTabBar.MAX_LABEL_CHARS:
+            self.statusBar().showMessage(
+                f"Tab labels are limited to {ViewTabBar.MAX_LABEL_CHARS} characters",
+                3500,
+            )
+            return
+
+        custom_label = self._normalize_custom_view_label(label_text)
+        view_id = self._tab_view_id(tab_index)
+        if view_id is None:
+            return
+
+        data = self.view_tabs.tabData(tab_index)
+        updated_data = dict(data) if isinstance(data, dict) else {"view_id": view_id}
+        previous_custom_label = self._normalize_custom_view_label(updated_data.get("custom_label"))
+        anchor_scroll_y, anchor_top_line = self._tab_label_anchor(tab_index) or (0.0, 1)
+        state = self._view_states.get(view_id) or {"scroll_y": 0.0, "top_line": 1}
+        try:
+            current_scroll_y = float(state.get("scroll_y", 0.0))
+        except Exception:
+            current_scroll_y = 0.0
+        if not math.isfinite(current_scroll_y):
+            current_scroll_y = 0.0
+        try:
+            current_top_line = max(1, int(state.get("top_line", 1)))
+        except Exception:
+            current_top_line = 1
+        if custom_label is None:
+            anchor_scroll_y = 0.0
+            anchor_top_line = current_top_line
+        elif previous_custom_label != custom_label:
+            anchor_scroll_y = current_scroll_y
+            anchor_top_line = current_top_line
+        updated_data["custom_label"] = custom_label
+        updated_data["custom_label_anchor_scroll_y"] = anchor_scroll_y
+        updated_data["custom_label_anchor_top_line"] = anchor_top_line
+        self.view_tabs.setTabData(tab_index, updated_data)
+
+        try:
+            top_line = max(1, int(state.get("top_line", 1)))
+        except Exception:
+            top_line = 1
+        self.view_tabs.setTabText(tab_index, self._display_label_for_view(top_line, custom_label))
+        self.view_tabs.updateGeometry()
+        self.view_tabs.update()
+        self._persist_document_view_session()
+        if custom_label is None:
+            self.statusBar().showMessage("Restored dynamic line-number tab label", 2500)
+        else:
+            self.statusBar().showMessage(f"Tab label updated to '{custom_label}'", 2500)
+
+    def _return_view_tab_to_beginning(self, tab_index: int) -> None:
+        """Restore a custom-labeled view to the scroll position captured when labeled."""
+        anchor = self._tab_label_anchor(tab_index)
+        view_id = self._tab_view_id(tab_index)
+        path_key = self._current_preview_path_key()
+        if anchor is None or view_id is None or path_key is None:
+            return
+
+        anchor_scroll_y, anchor_top_line = anchor
+        state = self._view_states.setdefault(view_id, {"scroll_y": 0.0, "top_line": 1})
+        state["scroll_y"] = anchor_scroll_y
+        state["top_line"] = anchor_top_line
+        self._preview_scroll_positions[f"{path_key}::view:{view_id}"] = anchor_scroll_y
+        self._set_view_tab_line(view_id, anchor_top_line)
+        self._persist_document_view_session(path_key, capture_current=False)
+
+        if self._active_view_id != view_id:
+            self.view_tabs.setCurrentIndex(tab_index)
+        expected_key = self._current_preview_path_key()
+        if expected_key is not None:
+            self._preview_capture_enabled = False
+            self._scroll_restore_block_until = time.monotonic() + 0.8
+            QTimer.singleShot(0, lambda key=expected_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(180, lambda key=expected_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(520, lambda key=expected_key: self._restore_current_preview_scroll(key))
+            QTimer.singleShot(850, lambda key=expected_key: self._enable_preview_scroll_capture_for(key))
+        self.statusBar().showMessage(f"Returned tab to labeled beginning at line {anchor_top_line}", 3000)
 
     def _request_active_view_top_line_update(self, force: bool = False) -> None:
         """Probe top-most visible source line and update active tab label."""
@@ -7178,7 +7597,7 @@ class MdExploreWindow(QMainWindow):
         """Re-root the tree view and reset file preview state."""
         self._stop_restore_overlay_monitor()
         self._capture_current_preview_scroll(force=True)
-        self._save_document_view_session()
+        self._persist_document_view_session()
         self._capture_splitter_sizes_for_session()
         self.root = new_root.resolve()
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
@@ -9181,6 +9600,7 @@ class MdExploreWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_restore_overlay_monitor()
+        self._persist_document_view_session()
         self._persist_effective_root()
         self._cleanup_preview_temp_files()
         super().closeEvent(event)
@@ -9648,11 +10068,12 @@ class MdExploreWindow(QMainWindow):
         self._capture_current_preview_scroll(force=True)
         if previous_path_key is not None and previous_path_key != next_path_key:
             self._capture_current_diagram_view_state_blocking(previous_path_key)
-            self._save_document_view_session(previous_path_key)
+            self._persist_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
         if previous_path_key != next_path_key:
+            self._load_persisted_document_view_session(next_path_key)
             restored = self._restore_document_view_session(next_path_key)
             if not restored:
                 self._reset_document_views(initial_scroll=0.0, initial_line=1)
