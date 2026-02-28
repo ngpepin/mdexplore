@@ -8028,11 +8028,44 @@ class MdExploreWindow(QMainWindow):
     return { start, end };
   }
 
+  function collectIntersectingRange(range) {
+    if (!(range instanceof Range)) return null;
+    let root = range.commonAncestorContainer;
+    if (root && root.nodeType === Node.TEXT_NODE) root = root.parentElement;
+    const scope =
+      root instanceof Element
+        ? root
+        : (document.body || document.documentElement || document);
+    const tagged = scope.querySelectorAll
+      ? scope.querySelectorAll('[data-md-line-start][data-md-line-end]')
+      : document.querySelectorAll('[data-md-line-start][data-md-line-end]');
+    let minStart = null;
+    let maxEnd = null;
+    for (const el of tagged) {
+      try {
+        if (!range.intersectsNode(el)) continue;
+      } catch (_err) {
+        continue;
+      }
+      const start = parseInt(el.getAttribute('data-md-line-start') || '', 10);
+      const end = parseInt(el.getAttribute('data-md-line-end') || '', 10);
+      if (Number.isNaN(start) || Number.isNaN(end)) continue;
+      minStart = minStart === null ? start : Math.min(minStart, start);
+      maxEnd = maxEnd === null ? end : Math.max(maxEnd, end);
+    }
+    if (minStart === null || maxEnd === null) return null;
+    return { start: minStart, end: Math.max(minStart + 1, maxEnd) };
+  }
+
   const hasSelection = !!(sel && sel.toString && sel.toString().trim());
   const selectedText = hasSelection ? sel.toString() : "";
   // Preferred path: map the active text selection to source line metadata.
   if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
     const range = sel.getRangeAt(0);
+    const intersecting = collectIntersectingRange(range);
+    if (intersecting) {
+      return { hasSelection: true, selectedText, ...intersecting, via: "selection-intersects" };
+    }
     const startInfo = lineInfo(range.startContainer);
     const endInfo = lineInfo(range.endContainer);
     if (startInfo || endInfo) {
@@ -8163,7 +8196,26 @@ class MdExploreWindow(QMainWindow):
                 )
                 return
 
-            if self._copy_source_by_fuzzy_lines(lines, query):
+            normalized_match = self._find_source_span_by_normalized_document_match(lines, query)
+            if normalized_match is not None:
+                start_idx, end_idx, label = normalized_match
+                snippet = "".join(lines[start_idx:end_idx])
+                self._set_plain_text_clipboard(snippet)
+                self.statusBar().showMessage(
+                    f"Copied source markdown lines {start_idx + 1}-{end_idx} ({label})",
+                    4000,
+                )
+                return
+
+            fuzzy_match = self._find_source_span_by_fuzzy_lines(lines, query)
+            if fuzzy_match is not None:
+                start_idx, end_idx = fuzzy_match
+                snippet = "".join(lines[start_idx:end_idx])
+                self._set_plain_text_clipboard(snippet)
+                self.statusBar().showMessage(
+                    f"Copied source markdown lines {start_idx + 1}-{end_idx} (fuzzy)",
+                    4000,
+                )
                 return
 
         self._set_plain_text_clipboard("".join(lines))
@@ -8174,24 +8226,366 @@ class MdExploreWindow(QMainWindow):
 
     @staticmethod
     def _normalize_for_fuzzy_match(text: str) -> str:
-        lowered = text.casefold()
-        stripped = re.sub(r"[`*_~>#\\[\\](){}|!+-]", " ", lowered)
+        lowered = (
+            text.casefold()
+            .replace("\\", " ")
+            .replace("—", " ")
+            .replace("–", " ")
+            .replace("\u00a0", " ")
+        )
+        stripped = re.sub(r"[`*_~>#\[\](){}|!+\-:;,.?/]", " ", lowered)
+        stripped = re.sub(r"^\s*[-*+]\s+", "", stripped, flags=re.MULTILINE)
+        stripped = re.sub(r"^\s*\d+[.)]\s+", "", stripped, flags=re.MULTILINE)
         return re.sub(r"\s+", " ", stripped).strip()
 
-    def _copy_source_by_fuzzy_lines(self, lines: list[str], query_text: str) -> bool:
+    @classmethod
+    def _meaningful_normalized_query_lines(cls, query_text: str) -> list[str]:
+        """Return non-empty normalized query lines for boundary refinement."""
+        normalized: list[str] = []
+        for raw_line in query_text.splitlines():
+            value = cls._normalize_for_fuzzy_match(raw_line)
+            if value:
+                normalized.append(value)
+        return normalized
+
+    @staticmethod
+    def _line_match_score(query_norm: str, candidate: str) -> float:
+        """Score how well a normalized query line matches a normalized source line."""
+        if not query_norm or not candidate:
+            return 0.0
+        if query_norm in candidate:
+            return 0.92 + min(0.08, len(query_norm) / max(len(candidate), 1))
+        if candidate in query_norm and len(candidate) >= 8:
+            return 0.65 + min(0.20, len(candidate) / max(len(query_norm), 1))
+        return SequenceMatcher(None, query_norm, candidate).ratio()
+
+    @classmethod
+    def _align_query_lines_to_source(
+        cls,
+        query_lines: list[str],
+        normalized_lines: list[str],
+        approx_start: int,
+        approx_end: int,
+    ) -> tuple[int, int] | None:
+        """Refine an approximate source span by matching query lines in order."""
+        if not query_lines:
+            return None
+
+        total_query_chars = sum(len(line) for line in query_lines)
+        if total_query_chars < 32:
+            return None
+
+        search_start = max(0, approx_start - 18)
+        search_end = min(
+            len(normalized_lines),
+            max(approx_end + max(48, len(query_lines) * 3), search_start + 1),
+        )
+        current_index = search_start
+        matched_indexes: list[int] = []
+        matched_chars = 0
+
+        for query_norm in query_lines:
+            if len(query_norm) < 3:
+                continue
+
+            best_idx = -1
+            best_score = 0.0
+            line_span_end = min(search_end, current_index + max(42, len(query_lines) * 2))
+            for idx in range(current_index, line_span_end):
+                candidate = normalized_lines[idx]
+                if not candidate:
+                    continue
+                score = cls._line_match_score(query_norm, candidate)
+                if score > best_score:
+                    best_idx = idx
+                    best_score = score
+                    if score >= 0.995:
+                        break
+
+            min_score = 0.52 if len(query_norm) >= 18 else 0.68
+            if best_idx >= 0 and best_score >= min_score:
+                matched_indexes.append(best_idx)
+                matched_chars += len(query_norm)
+                current_index = best_idx + 1
+            elif matched_indexes:
+                current_index = min(search_end, current_index + 4)
+
+        min_required_matches = max(3, min(len(query_lines), max(1, len(query_lines) // 3)))
+        if len(matched_indexes) < min_required_matches:
+            return None
+        if matched_chars / max(total_query_chars, 1) < 0.58:
+            return None
+
+        start_idx = matched_indexes[0]
+        end_idx = matched_indexes[-1] + 1
+        if end_idx <= start_idx:
+            return None
+        return max(0, start_idx), min(end_idx, len(normalized_lines))
+
+    @classmethod
+    def _best_span_from_line_start_candidates(
+        cls,
+        query_lines: list[str],
+        normalized_lines: list[str],
+        candidate_starts: list[int],
+        preferred_span_len: int,
+    ) -> tuple[int, int, float] | None:
+        """Score full spans from plausible line starts for long rendered selections."""
+        if not query_lines or not candidate_starts:
+            return None
+
+        normalized_query = " ".join(query_lines)
+        if len(normalized_query) < 48:
+            return None
+
+        target_len = max(len(query_lines), preferred_span_len, 1)
+        candidate_lengths = {
+            max(1, int(target_len * 0.85)),
+            target_len,
+            int(target_len * 1.05),
+            int(target_len * 1.15),
+            int(target_len * 1.30),
+            int(target_len * 1.50),
+            int(target_len * 1.75),
+        }
+
+        best_span: tuple[int, int, float] | None = None
+        best_score = 0.0
+        for start_idx in candidate_starts:
+            for span_len in sorted(candidate_lengths):
+                end_idx = min(len(normalized_lines), start_idx + span_len)
+                if end_idx <= start_idx:
+                    continue
+                candidate_text = " ".join(line for line in normalized_lines[start_idx:end_idx] if line)
+                if not candidate_text:
+                    continue
+                score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
+                relative_len = span_len / max(target_len, 1)
+                if relative_len > 1.80:
+                    score -= 0.14
+                elif relative_len > 1.45:
+                    score -= 0.07
+                elif relative_len < 0.75:
+                    score -= 0.10
+                elif relative_len < 0.90:
+                    score -= 0.04
+                if score > best_score:
+                    best_score = score
+                    best_span = (start_idx, end_idx, score)
+
+        return best_span
+
+    @classmethod
+    def _find_source_span_by_normalized_document_match(
+        cls, lines: list[str], query_text: str
+    ) -> tuple[int, int, str] | None:
+        """Match rendered selection against normalized source text across the whole document."""
+        normalized_query = cls._normalize_for_fuzzy_match(query_text)
+        if len(normalized_query) < 24:
+            return None
+
+        normalized_lines = [cls._normalize_for_fuzzy_match(line) for line in lines]
+        source_parts: list[str] = []
+        char_to_line: list[int] = []
+        for idx, line in enumerate(lines):
+            normalized_line = normalized_lines[idx]
+            if not normalized_line:
+                continue
+            if source_parts:
+                source_parts.append(" ")
+                char_to_line.append(idx)
+            source_parts.append(normalized_line)
+            char_to_line.extend([idx] * len(normalized_line))
+
+        if not source_parts or not char_to_line:
+            return None
+
+        normalized_source = "".join(source_parts)
+        query_lines = cls._meaningful_normalized_query_lines(query_text)
+
+        def map_char_span(start_char: int, end_char: int) -> tuple[int, int] | None:
+            if start_char < 0 or end_char <= start_char:
+                return None
+            if start_char >= len(char_to_line):
+                return None
+            end_char = min(end_char, len(char_to_line))
+            start_idx = char_to_line[start_char]
+            end_idx = char_to_line[max(start_char, end_char - 1)] + 1
+            if start_idx < 0 or end_idx <= start_idx:
+                return None
+            return start_idx, min(end_idx, len(lines))
+
+        def refine_span(start_idx: int, end_idx: int) -> tuple[int, int]:
+            if not query_lines:
+                return start_idx, end_idx
+
+            refined_start = start_idx
+            refined_end = end_idx
+            prefix_candidates = query_lines[: min(8, len(query_lines))]
+            suffix_candidates = list(reversed(query_lines[max(0, len(query_lines) - 8) :]))
+
+            def best_line_match(
+                candidates: list[str], range_start: int, range_end: int, min_score: float
+            ) -> tuple[int, float]:
+                best_idx = -1
+                best_score = 0.0
+                for query_norm in candidates:
+                    for idx in range(max(0, range_start), min(len(normalized_lines), range_end)):
+                        candidate = normalized_lines[idx]
+                        if not candidate:
+                            continue
+                        score = cls._line_match_score(query_norm, candidate)
+                        if score > best_score:
+                            best_idx = idx
+                            best_score = score
+                    if best_idx >= 0 and best_score >= min_score:
+                        return best_idx, best_score
+                return best_idx, best_score
+
+            start_match_idx, start_score = best_line_match(
+                prefix_candidates,
+                max(0, start_idx - 10),
+                min(len(lines), start_idx + 30),
+                0.48,
+            )
+            if start_match_idx >= 0 and start_score >= 0.48:
+                refined_start = start_match_idx
+
+            end_match_idx, end_score = best_line_match(
+                suffix_candidates,
+                max(refined_start, end_idx - 30),
+                min(len(lines), end_idx + 10),
+                0.45,
+            )
+            if end_match_idx >= refined_start and end_score >= 0.45:
+                refined_end = end_match_idx + 1
+
+            return refined_start, max(refined_start + 1, min(refined_end, len(lines)))
+
+        found_at = normalized_source.find(normalized_query)
+        if found_at != -1:
+            mapped = map_char_span(found_at, found_at + len(normalized_query))
+            if mapped is not None:
+                start_idx, end_idx = refine_span(*mapped)
+                aligned = cls._align_query_lines_to_source(query_lines, normalized_lines, start_idx, end_idx)
+                if aligned is not None:
+                    start_idx, end_idx = aligned
+                snippet = "".join(lines[start_idx:end_idx])
+                if snippet.strip():
+                    return start_idx, end_idx, "normalized"
+
+        # Rendered selections often differ slightly from source due to markdown
+        # punctuation stripping. Use multiple anchors from across the normalized
+        # selection, project candidate spans back into source space, and score
+        # the resulting slices. This is much more resilient than relying on a
+        # single prefix anchor.
+        anchor_lengths = (320, 240, 180, 120, 80, 48)
+        anchor_offsets = [
+            0,
+            max(0, len(normalized_query) // 4),
+            max(0, len(normalized_query) // 2),
+            max(0, (len(normalized_query) * 3) // 4),
+            max(0, len(normalized_query) - 320),
+        ]
+        candidate_positions: list[tuple[int, int, int]] = []
+        seen_positions: set[tuple[int, int]] = set()
+        for offset in anchor_offsets:
+            for size in anchor_lengths:
+                if len(normalized_query) < size or offset + size > len(normalized_query):
+                    continue
+                fragment = normalized_query[offset : offset + size]
+                search_at = normalized_source.find(fragment)
+                hits = 0
+                while search_at != -1 and hits < 8:
+                    key = (search_at, offset)
+                    if key not in seen_positions:
+                        seen_positions.add(key)
+                        candidate_positions.append((search_at, offset, size))
+                    hits += 1
+                    search_at = normalized_source.find(fragment, search_at + 1)
+
+        line_start_candidates: list[int] = []
+        seen_line_start_buckets: set[int] = set()
+        for query_offset, query_norm in enumerate(query_lines[: min(12, len(query_lines))]):
+            if len(query_norm) < 4:
+                continue
+            min_score = 0.52 if len(query_norm) >= 18 else 0.68
+            per_query_candidates: list[tuple[float, int]] = []
+            for idx, candidate in enumerate(normalized_lines):
+                if not candidate:
+                    continue
+                score = cls._line_match_score(query_norm, candidate)
+                if score >= min_score:
+                    estimated_start = max(0, idx - query_offset)
+                    per_query_candidates.append((score, estimated_start))
+            per_query_candidates.sort(key=lambda item: item[0], reverse=True)
+            for score, estimated_start in per_query_candidates[:6]:
+                bucket = estimated_start // 3
+                if bucket in seen_line_start_buckets:
+                    continue
+                seen_line_start_buckets.add(bucket)
+                line_start_candidates.append(estimated_start)
+
+        best_span: tuple[int, int, str] | None = None
+        best_score = 0.0
+        for position, offset, size in candidate_positions:
+            estimated_start = max(0, position - offset)
+            estimated_end = min(len(normalized_source), estimated_start + len(normalized_query))
+            candidate_text = normalized_source[estimated_start:estimated_end]
+            score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
+            if estimated_end - estimated_start < len(normalized_query) * 0.72:
+                score *= 0.82
+            score += min(0.05, size / 6400.0)
+            if score <= best_score:
+                continue
+            mapped = map_char_span(estimated_start, estimated_end)
+            if mapped is None:
+                continue
+            start_idx, end_idx = refine_span(*mapped)
+            aligned = cls._align_query_lines_to_source(query_lines, normalized_lines, start_idx, end_idx)
+            if aligned is not None:
+                start_idx, end_idx = aligned
+            snippet = "".join(lines[start_idx:end_idx])
+            if not snippet.strip():
+                continue
+            best_score = score
+            best_span = (start_idx, end_idx, "normalized anchor")
+
+        preferred_span_len = (best_span[1] - best_span[0]) if best_span is not None else max(1, len(query_lines))
+        candidate_span = cls._best_span_from_line_start_candidates(
+            query_lines,
+            normalized_lines,
+            line_start_candidates[:18],
+            preferred_span_len,
+        )
+        if candidate_span is not None:
+            start_idx, end_idx, score = candidate_span
+            if score >= 0.86 and score > best_score + 0.015:
+                best_score = score
+                best_span = (start_idx, end_idx, "normalized lines")
+
+        if best_span is not None and best_score >= 0.74:
+            return best_span
+
+        return None
+
+    @classmethod
+    def _find_source_span_by_fuzzy_lines(cls, lines: list[str], query_text: str) -> tuple[int, int] | None:
         """Fuzzy-match selected first/last lines against markdown source lines."""
         raw_query_lines = [line.strip() for line in query_text.splitlines() if line.strip()]
         if not raw_query_lines:
-            return False
+            return None
 
-        normalized_lines = [self._normalize_for_fuzzy_match(line) for line in lines]
+        normalized_lines = [cls._normalize_for_fuzzy_match(line) for line in lines]
         meaningful_query_lines: list[str] = []
         for line in raw_query_lines:
-            normalized = self._normalize_for_fuzzy_match(line)
+            normalized = cls._normalize_for_fuzzy_match(line)
             if normalized:
                 meaningful_query_lines.append(normalized)
         if not meaningful_query_lines:
-            return False
+            return None
+
+        normalized_query = " ".join(meaningful_query_lines)
 
         def best_line_match(query_norm: str, start_index: int = 0) -> tuple[int, float]:
             best_idx = -1
@@ -8200,12 +8594,7 @@ class MdExploreWindow(QMainWindow):
                 candidate = normalized_lines[idx]
                 if not candidate:
                     continue
-                if query_norm in candidate:
-                    score = 0.90 + min(0.10, len(query_norm) / max(len(candidate), 1))
-                elif candidate in query_norm and len(candidate) >= 8:
-                    score = 0.60 + min(0.30, len(candidate) / max(len(query_norm), 1))
-                else:
-                    score = SequenceMatcher(None, query_norm, candidate).ratio()
+                score = cls._line_match_score(query_norm, candidate)
                 if score > best_score:
                     best_score = score
                     best_idx = idx
@@ -8225,9 +8614,65 @@ class MdExploreWindow(QMainWindow):
                     return idx, score
             return best_idx, best_score
 
+        candidate_starts: list[tuple[float, int]] = []
+        seen_candidate_starts: set[int] = set()
+        anchor_queries = meaningful_query_lines[: min(8, len(meaningful_query_lines))]
+        for query_offset, query_norm in enumerate(anchor_queries):
+            if len(query_norm) < 4:
+                continue
+            min_score = 0.52 if len(query_norm) >= 18 else 0.68
+            per_query_candidates: list[tuple[float, int]] = []
+            for idx, candidate in enumerate(normalized_lines):
+                if not candidate:
+                    continue
+                score = cls._line_match_score(query_norm, candidate)
+                if score >= min_score:
+                    estimated_start = max(0, idx - query_offset)
+                    per_query_candidates.append((score, estimated_start))
+            per_query_candidates.sort(key=lambda item: item[0], reverse=True)
+            for score, estimated_start in per_query_candidates[:6]:
+                bucket = estimated_start // 3
+                if bucket in seen_candidate_starts:
+                    continue
+                seen_candidate_starts.add(bucket)
+                candidate_starts.append((score, estimated_start))
+
+        best_span: tuple[int, int] | None = None
+        best_span_score = 0.0
+        for anchor_score, estimated_start in sorted(candidate_starts, key=lambda item: item[0], reverse=True)[:18]:
+            approx_end = min(len(lines), estimated_start + len(meaningful_query_lines) + 24)
+            aligned = cls._align_query_lines_to_source(
+                meaningful_query_lines,
+                normalized_lines,
+                estimated_start,
+                approx_end,
+            )
+            if aligned is None:
+                continue
+            start_idx, end_idx = aligned
+            candidate_text = " ".join(line for line in normalized_lines[start_idx:end_idx] if line)
+            if not candidate_text:
+                continue
+            span_score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
+            span_len = max(1, end_idx - start_idx)
+            target_len = max(1, len(meaningful_query_lines))
+            if span_len > target_len * 1.6:
+                span_score -= 0.10
+            elif span_len > target_len * 1.25:
+                span_score -= 0.04
+            elif span_len < target_len * 0.60:
+                span_score -= 0.12
+            span_score += min(0.04, anchor_score * 0.04)
+            if span_score > best_span_score:
+                best_span_score = span_score
+                best_span = (start_idx, end_idx)
+
+        if best_span is not None and best_span_score >= 0.62:
+            return best_span
+
         start_idx, start_score = find_anchor(meaningful_query_lines, 0, 0.45)
         if start_idx < 0 or start_score < 0.45:
-            return False
+            return None
 
         end_idx = start_idx + 1
         if len(meaningful_query_lines) > 1:
@@ -8240,16 +8685,14 @@ class MdExploreWindow(QMainWindow):
                 end_idx = min(len(lines), start_idx + approx_span)
 
         end_idx = max(start_idx + 1, min(end_idx, len(lines)))
+        aligned = cls._align_query_lines_to_source(meaningful_query_lines, normalized_lines, start_idx, end_idx)
+        if aligned is not None:
+            start_idx, end_idx = aligned
         snippet = "".join(lines[start_idx:end_idx])
         if not snippet.strip():
-            return False
+            return None
 
-        self._set_plain_text_clipboard(snippet)
-        self.statusBar().showMessage(
-            f"Copied source markdown lines {start_idx + 1}-{end_idx} (fuzzy)",
-            4000,
-        )
-        return True
+        return start_idx, end_idx
 
     def _set_plain_text_clipboard(self, text: str) -> None:
         """Set clipboard text via Qt, with platform CLI fallback for reliability."""
