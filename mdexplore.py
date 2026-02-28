@@ -1328,7 +1328,13 @@ class MarkdownRenderer:
         self._last_mermaid_pdf_svg_by_hash = {}
         return payload
 
-    def render_document(self, markdown_text: str, title: str, plantuml_resolver=None) -> str:
+    def render_document(
+        self,
+        markdown_text: str,
+        title: str,
+        total_lines: int | None = None,
+        plantuml_resolver=None,
+    ) -> str:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
         env = {}
@@ -1348,6 +1354,7 @@ class MarkdownRenderer:
         mathjax_sources_json = json.dumps(self._mathjax_script_sources())
         mermaid_sources_json = json.dumps(self._mermaid_script_sources())
         mermaid_backend_json = json.dumps(self._mermaid_backend)
+        total_source_lines_json = json.dumps(max(1, int(total_lines or (markdown_text.count("\n") + 1))))
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1688,7 +1695,67 @@ class MarkdownRenderer:
       border-left-color: var(--callout-caution-border);
       background: var(--callout-caution-bg);
     }}
+    .mdexplore-scroll-line-indicator {{
+      position: fixed;
+      left: 0;
+      top: 18px;
+      z-index: 2147483647;
+      display: none;
+      pointer-events: none;
+      padding: 0.2rem 0.48rem;
+      border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      color: var(--fg);
+      font-family: "Noto Sans Mono", "DejaVu Sans Mono", monospace;
+      font-size: 0.76rem;
+      font-weight: 700;
+      line-height: 1.2;
+      white-space: nowrap;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+      transform: translateY(-50%);
+      opacity: 0;
+      transition: opacity 90ms ease-out;
+    }}
+    .mdexplore-scroll-line-indicator.mdexplore-visible {{
+      display: block;
+      opacity: 1;
+    }}
+    .mdexplore-scroll-hit-overlay {{
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 7px;
+      height: 100vh;
+      display: none;
+      pointer-events: none;
+      z-index: 2147483646;
+    }}
+    .mdexplore-scroll-hit-overlay.mdexplore-visible {{
+      display: block;
+    }}
+    .mdexplore-scroll-hit-marker {{
+      position: absolute;
+      left: 0;
+      width: 100%;
+      min-height: 4px;
+      border-radius: 999px;
+      pointer-events: auto;
+      cursor: pointer;
+      background: #f7dc63;
+      box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.28);
+      opacity: 0.98;
+    }}
+    .mdexplore-scroll-hit-marker:hover {{
+      background: #fde68a;
+    }}
     @media print {{
+      .mdexplore-scroll-line-indicator {{
+        display: none !important;
+      }}
+      .mdexplore-scroll-hit-overlay {{
+        display: none !important;
+      }}
       .mdexplore-mermaid-toolbar {{
         display: none !important;
       }}
@@ -1753,6 +1820,7 @@ class MarkdownRenderer:
     window.__mdexploreMermaidSource = "";
     window.__mdexploreMermaidSources = {mermaid_sources_json};
     window.__mdexploreMermaidBackend = {mermaid_backend_json};
+    window.__mdexploreSourceTotalLines = {total_source_lines_json};
     window.__mdexploreMermaidLoadPromise = null;
     window.__mdexploreMermaidAttempted = false;
     window.__mdexploreMermaidPaletteMode = "auto";
@@ -1948,6 +2016,336 @@ class MarkdownRenderer:
         // Fall through to media query fallback.
       }}
       return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    }};
+
+    window.__mdexploreApproxTopVisibleLine = () => {{
+      const probeX = Math.max(14, Math.floor(window.innerWidth * 0.42));
+      const probeYs = [10, 20, 34, 50, 72, 96];
+      for (const y of probeYs) {{
+        const el = document.elementFromPoint(probeX, y);
+        if (!el) continue;
+        const tagged = el.closest('[data-md-line-start]');
+        if (!tagged) continue;
+        const value = parseInt(tagged.getAttribute('data-md-line-start') || "", 10);
+        if (!Number.isNaN(value)) return value + 1;
+      }}
+      const taggedNodes = document.querySelectorAll('[data-md-line-start]');
+      for (const node of taggedNodes) {{
+        const rect = node.getBoundingClientRect();
+        if (rect.bottom < 0) continue;
+        const value = parseInt(node.getAttribute('data-md-line-start') || "", 10);
+        if (!Number.isNaN(value)) return value + 1;
+      }}
+      return 1;
+    }};
+
+    window.__mdexploreInstallScrollLineIndicator = () => {{
+      if (window.__mdexploreScrollLineIndicatorInstalled) {{
+        return;
+      }}
+      window.__mdexploreScrollLineIndicatorInstalled = true;
+
+      const indicator = document.createElement("div");
+      indicator.className = "mdexplore-scroll-line-indicator";
+      document.body.appendChild(indicator);
+      const hitOverlay = document.createElement("div");
+      hitOverlay.className = "mdexplore-scroll-hit-overlay";
+      document.body.appendChild(hitOverlay);
+
+      const state = {{
+        pointerX: window.innerWidth,
+        pointerY: 0,
+        leftMouseDown: false,
+        active: false,
+        hideTimer: null,
+        searchRefreshTimer: null,
+      }};
+
+      const clearHideTimer = () => {{
+        if (state.hideTimer) {{
+          window.clearTimeout(state.hideTimer);
+          state.hideTimer = null;
+        }}
+      }};
+
+      const viewportScrollableHeight = () =>
+        Math.max(
+          0,
+          (document.documentElement ? document.documentElement.scrollHeight : 0) - window.innerHeight
+        );
+
+      const scrollbarWidth = () => {{
+        const doc = document.documentElement;
+        return Math.max(0, window.innerWidth - (doc ? doc.clientWidth : window.innerWidth));
+      }};
+
+      const syncOverlayHorizontalPosition = () => {{
+        const docClientWidth = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
+        const barWidth = Math.max(0, scrollbarWidth());
+        const gap = 1;
+        const overlayWidth = Math.max(4, hitOverlay.offsetWidth || 6);
+        const overlayLeft = Math.max(0, docClientWidth - barWidth - overlayWidth - gap);
+        hitOverlay.style.left = `${{Math.round(overlayLeft)}}px`;
+      }};
+
+      const isNearVerticalScrollbar = () => {{
+        const width = Math.max(12, scrollbarWidth());
+        return state.pointerX >= window.innerWidth - width - 10;
+      }};
+
+      const updateIndicator = () => {{
+        if (!indicator.isConnected) {{
+          return;
+        }}
+        const totalLines = Math.max(1, Number(window.__mdexploreSourceTotalLines || 1));
+        const currentLine = Math.max(1, Math.min(totalLines, Number(window.__mdexploreApproxTopVisibleLine() || 1)));
+        indicator.textContent = `${{currentLine}} / ${{totalLines}}`;
+
+        const scrollable = viewportScrollableHeight();
+        const trackTop = 0;
+        const trackHeight = window.innerHeight;
+        let handleHeight = trackHeight;
+        let handleTop = trackTop;
+        if (scrollable > 0) {{
+          const visibleRatio = Math.max(0.06, Math.min(1, window.innerHeight / (scrollable + window.innerHeight)));
+          handleHeight = Math.max(26, Math.round(trackHeight * visibleRatio));
+          const handleTravel = Math.max(0, trackHeight - handleHeight);
+          const progress = Math.max(0, Math.min(1, window.scrollY / scrollable));
+          handleTop = trackTop + (handleTravel * progress);
+        }}
+        const handleCenterY = Math.max(
+          20,
+          Math.min(window.innerHeight - 20, handleTop + (handleHeight / 2))
+        );
+        const docClientWidth = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
+        const gap = 4;
+        const indicatorWidth = Math.max(1, indicator.offsetWidth || 0);
+        const indicatorLeft = Math.max(
+          4,
+          docClientWidth - Math.max(0, scrollbarWidth()) - indicatorWidth - gap
+        );
+        indicator.style.top = `${{Math.round(handleCenterY)}}px`;
+        indicator.style.left = `${{Math.round(indicatorLeft)}}px`;
+        syncOverlayHorizontalPosition();
+      }};
+
+      const refreshSearchHitMarkers = () => {{
+        if (!hitOverlay.isConnected) {{
+          return;
+        }}
+        hitOverlay.replaceChildren();
+        const marks = Array.from(document.querySelectorAll('[data-mdexplore-search-mark="1"]'));
+        const scrollHeight = Math.max(
+          1,
+          document.documentElement ? document.documentElement.scrollHeight : 0,
+          document.body ? document.body.scrollHeight : 0
+        );
+        if (!marks.length || scrollHeight <= window.innerHeight) {{
+          hitOverlay.classList.remove("mdexplore-visible");
+          syncOverlayHorizontalPosition();
+          return;
+        }}
+
+        const trackHeight = window.innerHeight;
+        const markerPositions = [];
+        for (const mark of marks) {{
+          const rect = mark.getBoundingClientRect();
+          if (!rect || rect.height <= 0) {{
+            continue;
+          }}
+          const absoluteTop = window.scrollY + rect.top;
+          const absoluteBottom = absoluteTop + rect.height;
+          const topPx = Math.max(0, Math.min(trackHeight - 4, (absoluteTop / scrollHeight) * trackHeight));
+          const bottomPx = Math.max(topPx + 3, Math.min(trackHeight, (absoluteBottom / scrollHeight) * trackHeight));
+          const centerPx = Math.max(topPx, Math.min(bottomPx, ((absoluteTop + absoluteBottom) * 0.5 / scrollHeight) * trackHeight));
+          markerPositions.push({{
+            top: topPx,
+            bottom: bottomPx,
+            target: mark,
+            center: centerPx,
+          }});
+        }}
+
+        if (!markerPositions.length) {{
+          hitOverlay.classList.remove("mdexplore-visible");
+          syncOverlayHorizontalPosition();
+          return;
+        }}
+
+        markerPositions.sort((a, b) => a.top - b.top);
+        const merged = [];
+        for (const item of markerPositions) {{
+          const top = Math.round(item.top);
+          const bottom = Math.round(item.bottom);
+          const previous = merged.length ? merged[merged.length - 1] : null;
+          if (previous && top <= previous.bottom + 2) {{
+            previous.bottom = Math.max(previous.bottom, bottom);
+            previous.targets.push({{
+              element: item.target,
+              center: item.center,
+            }});
+            continue;
+          }}
+          merged.push({{
+            top,
+            bottom,
+            targets: [{{
+              element: item.target,
+              center: item.center,
+            }}],
+          }});
+        }}
+
+        for (const item of merged) {{
+          const marker = document.createElement("div");
+          marker.className = "mdexplore-scroll-hit-marker";
+          marker.style.top = `${{item.top}}px`;
+          marker.style.height = `${{Math.max(4, item.bottom - item.top)}}px`;
+          marker.title = "Jump to search hit";
+          marker.addEventListener("click", (event) => {{
+            event.preventDefault();
+            event.stopPropagation();
+            const clickY = Number.isFinite(event.clientY) ? event.clientY : (item.top + item.bottom) * 0.5;
+            const targetInfo = Array.isArray(item.targets) && item.targets.length
+              ? item.targets.reduce((best, candidate) => {{
+                  if (!best) return candidate;
+                  return Math.abs(candidate.center - clickY) < Math.abs(best.center - clickY) ? candidate : best;
+                }}, null)
+              : null;
+            const target = targetInfo && targetInfo.element ? targetInfo.element : null;
+            if (!target || typeof target.scrollIntoView !== "function") {{
+              return;
+            }}
+            target.scrollIntoView({{
+              behavior: "auto",
+              block: "center",
+              inline: "nearest",
+            }});
+          }});
+          hitOverlay.appendChild(marker);
+        }}
+        syncOverlayHorizontalPosition();
+        hitOverlay.classList.add("mdexplore-visible");
+      }};
+
+      const scheduleSearchHitRefresh = (delayMs = 40) => {{
+        if (state.searchRefreshTimer) {{
+          window.clearTimeout(state.searchRefreshTimer);
+        }}
+        state.searchRefreshTimer = window.setTimeout(() => {{
+          state.searchRefreshTimer = null;
+          refreshSearchHitMarkers();
+        }}, delayMs);
+      }};
+
+      window.__mdexploreRefreshScrollHitMarkers = () => {{
+        scheduleSearchHitRefresh(0);
+      }};
+
+      const showIndicator = () => {{
+        clearHideTimer();
+        updateIndicator();
+        indicator.classList.add("mdexplore-visible");
+      }};
+
+      const hideIndicatorSoon = (delayMs = 150) => {{
+        clearHideTimer();
+        state.hideTimer = window.setTimeout(() => {{
+          state.active = false;
+          indicator.classList.remove("mdexplore-visible");
+        }}, delayMs);
+      }};
+
+      const trackPointer = (event) => {{
+        if (!event) {{
+          return;
+        }}
+        if (Number.isFinite(event.clientX)) {{
+          state.pointerX = event.clientX;
+        }}
+        if (Number.isFinite(event.clientY)) {{
+          state.pointerY = event.clientY;
+        }}
+        if (typeof event.buttons === "number") {{
+          state.leftMouseDown = (event.buttons & 1) === 1;
+        }}
+      }};
+
+      window.addEventListener("mousemove", (event) => {{
+        trackPointer(event);
+        if (state.active) {{
+          updateIndicator();
+        }}
+      }}, {{ passive: true }});
+
+      window.addEventListener("mousedown", (event) => {{
+        trackPointer(event);
+        if (event.button !== 0) {{
+          return;
+        }}
+        state.leftMouseDown = true;
+        if (viewportScrollableHeight() <= 0) {{
+          return;
+        }}
+        if (isNearVerticalScrollbar()) {{
+          state.active = true;
+          showIndicator();
+        }}
+      }}, {{ passive: true }});
+
+      window.addEventListener("mouseup", () => {{
+        state.leftMouseDown = false;
+        if (state.active) {{
+          hideIndicatorSoon(120);
+        }}
+      }}, {{ passive: true }});
+
+      window.addEventListener("blur", () => {{
+        state.leftMouseDown = false;
+        state.active = false;
+        clearHideTimer();
+        indicator.classList.remove("mdexplore-visible");
+      }});
+
+      window.addEventListener("scroll", () => {{
+        if (viewportScrollableHeight() <= 0) {{
+          state.active = false;
+          indicator.classList.remove("mdexplore-visible");
+          hitOverlay.classList.remove("mdexplore-visible");
+          return;
+        }}
+        if (state.active || (state.leftMouseDown && isNearVerticalScrollbar())) {{
+          state.active = true;
+          showIndicator();
+          if (!state.leftMouseDown) {{
+            hideIndicatorSoon(140);
+          }}
+        }}
+      }}, {{ passive: true }});
+
+      window.addEventListener("resize", () => {{
+        if (state.active) {{
+          updateIndicator();
+        }}
+        scheduleSearchHitRefresh(0);
+      }}, {{ passive: true }});
+
+      const searchObserver = new MutationObserver((mutationList) => {{
+        for (const mutation of mutationList) {{
+          if (mutation.type === "childList" || mutation.type === "attributes") {{
+            scheduleSearchHitRefresh();
+            return;
+          }}
+        }}
+      }});
+      searchObserver.observe(document.body, {{
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["data-mdexplore-search-mark"],
+      }});
+
+      scheduleSearchHitRefresh(0);
     }};
 
     window.__mdexploreMermaidInitConfig = (mode = "auto") => {{
@@ -4808,6 +5206,9 @@ class MarkdownRenderer:
   <main>{body}</main>
   <script>
     window.addEventListener('DOMContentLoaded', () => {{
+      if (window.__mdexploreInstallScrollLineIndicator) {{
+        window.__mdexploreInstallScrollLineIndicator();
+      }}
       // Start client-side renderers once content is mounted.
       if (window.__mdexploreRunClientRenderers) {{
         window.__mdexploreRunClientRenderers();
@@ -4841,7 +5242,8 @@ class PreviewRenderWorker(QRunnable):
             stat = resolved.stat()
             markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
             renderer = MarkdownRenderer()
-            html_doc = renderer.render_document(markdown_text, resolved.name)
+            total_lines = MdExploreWindow._count_markdown_lines(markdown_text)
+            html_doc = renderer.render_document(markdown_text, resolved.name, total_lines=total_lines)
             self.signals.finished.emit(
                 self.request_id,
                 str(resolved),
@@ -9319,7 +9721,12 @@ class MdExploreWindow(QMainWindow):
                 # the page mounts.
                 return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "", hash_key=hash_key)
 
-            html_doc = self.renderer.render_document(markdown_text, resolved.name, plantuml_resolver=plantuml_resolver)
+            html_doc = self.renderer.render_document(
+                markdown_text,
+                resolved.name,
+                total_lines=total_lines,
+                plantuml_resolver=plantuml_resolver,
+            )
             self._merge_renderer_pdf_mermaid_cache_seed()
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
