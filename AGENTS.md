@@ -83,7 +83,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - View tabs are draggable/reorderable; moving tabs must not change their assigned
   color.
 - Right-clicking a view tab should allow editing a custom tab label up to
-  24 characters, including spaces.
+  48 characters, including spaces.
+- If a longer tab label is entered, it should be truncated to the first
+  48 characters rather than rejected.
 - If a custom tab label is cleared back to blank, that tab should resume using
   the default dynamic line-number label.
 - When a tab receives a custom label, the app should capture that tab's current
@@ -161,6 +163,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - While search is active, the preview should show yellow scrollbar-side markers
   for highlighted hits, and clicking a marker should jump to the nearest
   underlying hit represented by that marker cluster.
+- While search is active, matching markdown files in the tree should also show
+  a small yellow right-pointing triangle marker beside the markdown icon.
+- Markdown files that currently have more than the default single view should
+  show a small tab badge beside the markdown icon in the tree.
 
 ## Editing Rules
 

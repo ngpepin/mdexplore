@@ -25,8 +25,9 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
-from PySide6.QtCore import QDir, QEventLoop, QMarginsF, QMimeData, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPageSize, QPen, QPixmap
+from PySide6.QtCore import QDir, QEventLoop, QMarginsF, QMimeData, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPageSize, QPen, QPixmap, QPolygon
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -480,19 +481,65 @@ def _build_clear_x_icon() -> QIcon:
     return QIcon(pixmap)
 
 
+def _load_svg_icon(filename: str, color: QColor, size: int = 16) -> QIcon:
+    """Load and recolor a local SVG icon to a fixed flat color."""
+    icon_path = Path(__file__).resolve().parent / filename
+    if icon_path.is_file():
+        renderer = QSvgRenderer(str(icon_path))
+        if not renderer.isValid():
+            return QIcon()
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(painter)
+        painter.end()
+
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        target = QColor(color)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixelColor(x, y)
+                alpha = pixel.alpha()
+                if alpha < 16:
+                    image.setPixelColor(x, y, QColor(0, 0, 0, 0))
+                    continue
+                image.setPixelColor(x, y, QColor(target.red(), target.green(), target.blue(), alpha))
+        return QIcon(QPixmap.fromImage(image))
+    return QIcon()
+
+
 class ColorizedMarkdownModel(QFileSystemModel):
     """Filesystem model with per-directory persisted file highlight colors."""
 
     COLOR_FILE_NAME = ".mdexplore-colors.json"
+    _ICON_SIZE = 16
+    _ICON_GAP = 2
+    _GUTTER_WIDTH = (_ICON_SIZE * 2) + (_ICON_GAP * 2)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._dir_color_map: dict[str, dict[str, str]] = {}
         self._loaded_dirs: set[str] = set()
         self._search_match_paths: set[str] = set()
+        self._multi_view_paths: set[str] = set()
+        self._markdown_icon = _load_svg_icon("markdown.svg", QColor("#bcc5d1"))
+        if self._markdown_icon.isNull():
+            self._markdown_icon = _build_markdown_icon()
+        self._views_icon = _load_svg_icon("views.svg", QColor("#bcc5d1"))
+        self._search_hit_icon = _load_svg_icon("search-hit.svg", QColor("#f5d34f"))
+        self._decorated_icon_cache: dict[tuple[bool, bool], QIcon] = {}
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         # Paint colorized markdown rows without affecting directories.
+        if role == Qt.ItemDataRole.DecorationRole:
+            info = self.fileInfo(index)
+            if info.isFile() and info.suffix().lower() == "md":
+                path_key = self._path_key(Path(info.filePath()))
+                has_search_match = path_key in self._search_match_paths
+                has_multi_view = path_key in self._multi_view_paths
+                return self._decorated_markdown_icon(has_multi_view, has_search_match)
         if role in (Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole):
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
@@ -593,6 +640,12 @@ class ColorizedMarkdownModel(QFileSystemModel):
     def clear_search_match_paths(self) -> None:
         self._search_match_paths.clear()
 
+    def set_multi_view_paths(self, paths: set[Path]) -> None:
+        self._multi_view_paths = {self._path_key(path) for path in paths}
+
+    def clear_multi_view_paths(self) -> None:
+        self._multi_view_paths.clear()
+
     def _path_key(self, path: Path) -> str:
         try:
             return str(path.resolve())
@@ -642,6 +695,39 @@ class ColorizedMarkdownModel(QFileSystemModel):
         except Exception:
             # Requested behavior: fail quietly when persistence can't be written.
             pass
+
+    @classmethod
+    def decorated_icon_size(cls) -> QSize:
+        return QSize(cls._GUTTER_WIDTH + cls._ICON_SIZE, cls._ICON_SIZE)
+
+    def _decorated_markdown_icon(self, has_multi_view: bool, has_search_match: bool) -> QIcon:
+        cache_key = (has_multi_view, has_search_match)
+        cached = self._decorated_icon_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        total_width = self._ICON_SIZE + self._GUTTER_WIDTH
+        total_height = self._ICON_SIZE
+        canvas = QPixmap(total_width, total_height)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        if has_search_match:
+            search_pixmap = self._search_hit_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
+            painter.drawPixmap(0, 0, search_pixmap)
+        if has_multi_view:
+            views_pixmap = self._views_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
+            painter.drawPixmap(self._ICON_SIZE + self._ICON_GAP, 0, views_pixmap)
+
+        icon_pixmap = self._markdown_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
+        painter.drawPixmap(self._GUTTER_WIDTH, 0, icon_pixmap)
+        painter.end()
+
+        decorated = QIcon(canvas)
+        self._decorated_icon_cache[cache_key] = decorated
+        return decorated
 
 
 class MarkdownRenderer:
@@ -5383,7 +5469,7 @@ class ViewTabBar(QTabBar):
         "#e8c6a7",
     ]
     WIDTH_TEMPLATE_TEXT = "999999"
-    MAX_LABEL_CHARS = 24
+    MAX_LABEL_CHARS = 48
     WIDTH_SIDE_PADDING = 10
     POSITION_BAR_WIDTH = 26
     POSITION_BAR_HEIGHT = 8
@@ -5834,6 +5920,7 @@ class MdExploreWindow(QMainWindow):
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
+        self.tree.setIconSize(ColorizedMarkdownModel.decorated_icon_size())
         self.tree.setHeaderHidden(True)
         self.tree.hideColumn(1)
         self.tree.hideColumn(2)
@@ -5873,6 +5960,7 @@ class MdExploreWindow(QMainWindow):
         self.view_tabs.customContextMenuRequested.connect(self._show_view_tab_context_menu)
         self.view_tabs.setVisible(False)
         self._reset_document_views()
+        self._refresh_tree_multi_view_markers()
 
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
@@ -6224,14 +6312,14 @@ class MdExploreWindow(QMainWindow):
 
     @staticmethod
     def _normalize_custom_view_label(raw_value) -> str | None:
-        """Validate a custom tab label; blank resets to dynamic line-number mode."""
+        """Normalize a custom tab label; blank resets, long labels are truncated."""
         if not isinstance(raw_value, str):
             return None
         if not raw_value.strip():
             return None
         cleaned = raw_value.replace("\r", " ").replace("\n", " ")
         if len(cleaned) > ViewTabBar.MAX_LABEL_CHARS:
-            return None
+            cleaned = cleaned[: ViewTabBar.MAX_LABEL_CHARS]
         return cleaned
 
     def _display_label_for_view(self, line_number: int, custom_label: str | None = None) -> str:
@@ -6604,6 +6692,7 @@ class MdExploreWindow(QMainWindow):
         else:
             sessions.pop(file_name, None)
         self._save_directory_view_sessions(directory)
+        self._refresh_tree_multi_view_markers()
 
     def _serialized_mermaid_cache_json(self) -> str:
         """Serialize in-memory Mermaid SVG cache for template injection."""
@@ -7170,6 +7259,7 @@ class MdExploreWindow(QMainWindow):
 
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
+        self._refresh_tree_multi_view_markers()
         self.statusBar().showMessage(
             f"Added view {self.view_tabs.count()} of {self.MAX_DOCUMENT_VIEWS} at line {top_line}",
             3000,
@@ -7198,6 +7288,7 @@ class MdExploreWindow(QMainWindow):
                 self.view_tabs.update()
                 self._update_view_tabs_visibility()
                 self._persist_document_view_session()
+                self._refresh_tree_multi_view_markers()
                 self.statusBar().showMessage("Closed labeled tab and returned to hidden default view", 3000)
                 return
             self.statusBar().showMessage("At least one view must remain open", 2500)
@@ -7219,6 +7310,7 @@ class MdExploreWindow(QMainWindow):
 
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
+        self._refresh_tree_multi_view_markers()
 
     def _on_view_tab_changed(self, tab_index: int) -> None:
         """Switch active view and restore its own saved scroll position."""
@@ -7280,13 +7372,7 @@ class MdExploreWindow(QMainWindow):
         )
         if not accepted:
             return
-        if len(label_text) > ViewTabBar.MAX_LABEL_CHARS:
-            self.statusBar().showMessage(
-                f"Tab labels are limited to {ViewTabBar.MAX_LABEL_CHARS} characters",
-                3500,
-            )
-            return
-
+        was_truncated = len(label_text) > ViewTabBar.MAX_LABEL_CHARS
         custom_label = self._normalize_custom_view_label(label_text)
         view_id = self._tab_view_id(tab_index)
         if view_id is None:
@@ -7328,6 +7414,11 @@ class MdExploreWindow(QMainWindow):
         self._persist_document_view_session()
         if custom_label is None:
             self.statusBar().showMessage("Restored dynamic line-number tab label", 2500)
+        elif was_truncated:
+            self.statusBar().showMessage(
+                f"Tab label updated and truncated to {ViewTabBar.MAX_LABEL_CHARS} characters",
+                3000,
+            )
         else:
             self.statusBar().showMessage(f"Tab label updated to '{custom_label}'", 2500)
 
@@ -7624,6 +7715,7 @@ class MdExploreWindow(QMainWindow):
         self._cancel_pending_preview_render()
         self._rerun_active_search_for_scope()
         self._update_add_view_button_state()
+        self._refresh_tree_multi_view_markers()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
@@ -7765,6 +7857,7 @@ class MdExploreWindow(QMainWindow):
         self.model.setRootPath("")
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
+        self._refresh_tree_multi_view_markers()
 
         if expanded_paths:
             self._restore_expanded_directory_paths(expanded_paths)
@@ -7940,6 +8033,66 @@ class MdExploreWindow(QMainWindow):
             if self._path_key(candidate) == target:
                 return True
         return False
+
+    @staticmethod
+    def _session_has_multiple_views(session: dict | None) -> bool:
+        """Return whether a persisted/in-memory session represents more than one view."""
+        if not isinstance(session, dict):
+            return False
+        tabs = session.get("tabs")
+        return isinstance(tabs, list) and len(tabs) > 1
+
+    def _refresh_tree_multi_view_markers(self) -> None:
+        """Update left-tree badges for markdown files that have multi-view state."""
+        if not hasattr(self, "model"):
+            return
+        root = getattr(self, "root", None)
+        if not isinstance(root, Path) or not root.exists():
+            self.model.clear_multi_view_paths()
+            if hasattr(self, "tree"):
+                self.tree.viewport().update()
+            return
+
+        marked_paths: set[Path] = set()
+        root_key = self._path_key(root)
+
+        for raw_path_key, session in self._document_view_sessions.items():
+            if not self._session_has_multiple_views(session):
+                continue
+            try:
+                path = Path(raw_path_key).resolve()
+            except Exception:
+                path = Path(raw_path_key)
+            path_key = self._path_key(path)
+            if path_key == root_key or not path_key.startswith(root_key + os.sep):
+                continue
+            marked_paths.add(path)
+
+        if self.current_file is not None and self.view_tabs.count() > 1:
+            try:
+                current_path = self.current_file.resolve()
+            except Exception:
+                current_path = self.current_file
+            current_path_key = self._path_key(current_path)
+            if current_path_key != root_key and current_path_key.startswith(root_key + os.sep):
+                marked_paths.add(current_path)
+
+        def on_walk_error(_err) -> None:
+            return
+
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=on_walk_error, followlinks=False):
+            if self.VIEWS_FILE_NAME not in filenames:
+                continue
+            directory = Path(dirpath)
+            sessions = self._directory_view_sessions(directory)
+            for file_name, session in sessions.items():
+                if not self._session_has_multiple_views(session):
+                    continue
+                marked_paths.add(directory / file_name)
+
+        self.model.set_multi_view_paths(marked_paths)
+        if hasattr(self, "tree"):
+            self.tree.viewport().update()
 
     def _current_search_terms(self) -> list[str]:
         """Extract searchable terms from the current query (operators excluded)."""
@@ -10083,6 +10236,7 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
+        self._refresh_tree_multi_view_markers()
         # Explicitly clear any stale overlay at document entry before
         # considering whether the new document needs one.
         self._stop_restore_overlay_monitor()

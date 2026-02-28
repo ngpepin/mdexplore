@@ -34,10 +34,13 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - View-tab state persists per directory in `.mdexplore-views.json` files for
   documents that have more than one saved view or a custom tab label.
+- Files in the tree show a small tab badge when they currently have more than
+  the default single view.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
 - Top-right color buttons copy matching highlighted files to clipboard.
 - A pin button before the copy-color buttons copies the currently previewed markdown file.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
+- Search-hit files in the tree show a small yellow right-pointing triangle marker.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
 - While dragging the preview scrollbar, mdexplore shows an approximate
   `current line / total lines` indicator beside the scrollbar handle.
@@ -164,7 +167,8 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Tabs show a small left-side position bargraph indicating where that view sits within the document.
 - Tabs use a fixed soft-pastel color sequence based on the order each view was opened.
 - Tabs can be dragged to reorder without changing each tab's assigned color.
-- Right-click a tab to assign a custom label (including spaces) up to 24 characters.
+- Right-click a tab to assign a custom label (including spaces) up to 48 characters.
+- If a longer label is entered, mdexplore truncates it to the first 48 characters.
 - Entering a blank custom label restores the default dynamic line-number label for that tab.
 - When a tab receives a custom label, mdexplore stores that tab's current scroll
   position and top visible source line as the tab's saved beginning.
