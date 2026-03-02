@@ -10467,12 +10467,19 @@ class MdExploreWindow(QMainWindow):
     width: 100% !important;
     max-width: 100% !important;
   }
-  .mdexplore-fence img.plantuml,
-  .mdexplore-fence .mermaid svg {
+  .mdexplore-fence img.plantuml {
     display: block;
     width: 100% !important;
     max-width: 100% !important;
     height: auto !important;
+    margin: 0 auto !important;
+  }
+  .mdexplore-fence .mermaid svg {
+    display: block;
+    width: var(--mdexplore-print-diagram-width, auto) !important;
+    max-width: var(--mdexplore-print-diagram-max-width, 100%) !important;
+    height: auto !important;
+    margin: 0 auto !important;
   }
   .mdexplore-fence.mdexplore-print-keep img.plantuml,
   .mdexplore-fence.mdexplore-print-keep .mermaid svg {
@@ -10655,8 +10662,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         svg.removeAttribute("width");
         svg.removeAttribute("height");
         svg.style.removeProperty("width");
-        svg.style.setProperty("width", "100%", "important");
-        svg.style.setProperty("max-width", "100%", "important");
+        svg.style.setProperty("width", "var(--mdexplore-print-diagram-width, auto)", "important");
+        svg.style.setProperty("max-width", "var(--mdexplore-print-diagram-max-width, 100%)", "important");
         svg.style.setProperty("height", "auto", "important");
         host.innerHTML = "";
         host.appendChild(svg);
@@ -10707,8 +10714,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       svg.style.removeProperty("max-width");
       svg.style.removeProperty("height");
       svg.style.setProperty("display", "block", "important");
-      svg.style.setProperty("width", "100%", "important");
-      svg.style.setProperty("max-width", "100%", "important");
+      svg.style.setProperty("width", "var(--mdexplore-print-diagram-width, auto)", "important");
+      svg.style.setProperty("max-width", "var(--mdexplore-print-diagram-max-width, 100%)", "important");
       svg.style.setProperty("height", "auto", "important");
     }
 
@@ -11484,6 +11491,29 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
     };
 
+    const intrinsicDiagramMaxFontPx = (fence) => {
+      const svg = fence.querySelector("svg");
+      if (!(svg instanceof SVGElement)) {
+        return 0;
+      }
+      let maxFontPx = 0;
+      const fontNodes = Array.from(svg.querySelectorAll("text, tspan, foreignObject, foreignObject *"));
+      for (const node of fontNodes) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const computedFontPx = parseLength(window.getComputedStyle(node).fontSize || "");
+        if (computedFontPx > maxFontPx) {
+          maxFontPx = computedFontPx;
+        }
+        const attrFontPx = parseLength(node.getAttribute("font-size"));
+        if (attrFontPx > maxFontPx) {
+          maxFontPx = attrFontPx;
+        }
+      }
+      return maxFontPx;
+    };
+
     const intrinsicDiagramWidth = (fence, measuredWidth) => {
       const svg = fence.querySelector("svg");
       if (svg instanceof SVGElement) {
@@ -11548,7 +11578,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         "mdexplore-print-landscape-page",
         "mdexplore-print-with-heading",
       );
+      fence.style.removeProperty("--mdexplore-print-diagram-width");
       fence.style.removeProperty("--mdexplore-print-diagram-max-height");
+      fence.style.removeProperty("--mdexplore-print-diagram-max-width");
       const rect = fence.getBoundingClientRect();
       const measuredWidth = Math.max(1, rect.width || 0, fence.scrollWidth || 0);
       const measuredHeight = Math.max(1, rect.height || 0, fence.scrollHeight || 0);
@@ -11599,8 +11631,24 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const targetBlock = printBlock || fence;
       const aspectWidth = Math.max(1, intrinsicWidth || measuredWidth || 1);
       const aspectHeight = Math.max(1, intrinsicHeight || measuredHeight || 1);
-      const effectiveWidthPortrait = Math.max(120, Math.min(printableWidthPortrait, intrinsicWidth || printableWidthPortrait));
-      const effectiveWidthLandscape = Math.max(120, Math.min(printableWidthLandscape, intrinsicWidth || printableWidthLandscape));
+      const maxSvgFontPx = hasMermaid ? intrinsicDiagramMaxFontPx(fence) : 0;
+      const maxPrintDiagramFontPx = 16;
+      const fontScaleCap =
+        maxSvgFontPx > 0.5
+          ? Math.max(0.25, maxPrintDiagramFontPx / maxSvgFontPx)
+          : Number.POSITIVE_INFINITY;
+      const cappedWidthFromFont =
+        Number.isFinite(fontScaleCap) && fontScaleCap > 0
+          ? Math.max(120, aspectWidth * fontScaleCap)
+          : Number.POSITIVE_INFINITY;
+      const effectiveWidthPortrait = Math.max(
+        120,
+        Math.min(printableWidthPortrait, intrinsicWidth || printableWidthPortrait, cappedWidthFromFont),
+      );
+      const effectiveWidthLandscape = Math.max(
+        120,
+        Math.min(printableWidthLandscape, intrinsicWidth || printableWidthLandscape, cappedWidthFromFont),
+      );
       const projectedHeightPortrait =
         Math.max(1, aspectHeight || measuredHeight || 1) * (effectiveWidthPortrait / Math.max(1, aspectWidth || measuredWidth || 1));
       const projectedHeightLandscape =
@@ -11666,6 +11714,16 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         180,
         printableHeight - (headingHeight > 0 ? headingHeight + HEADING_TO_DIAGRAM_GAP_PX : 0),
       );
+      const selectedEffectiveWidth = needsLandscapePage ? effectiveWidthLandscape : effectiveWidthPortrait;
+      if (hasMermaid) {
+        const diagramWidthPx = Math.floor(selectedEffectiveWidth);
+        targetBlock.style.setProperty("--mdexplore-print-diagram-width", `${diagramWidthPx}px`);
+        targetBlock.style.setProperty("--mdexplore-print-diagram-max-width", `${diagramWidthPx}px`);
+      } else if (
+        selectedEffectiveWidth < Math.min(aspectWidth, needsLandscapePage ? printableWidthLandscape : printableWidthPortrait) - 1
+      ) {
+        targetBlock.style.setProperty("--mdexplore-print-diagram-max-width", `${Math.floor(selectedEffectiveWidth)}px`);
+      }
       let keepDiagram = !isSequenceMermaid;
       const projectedHeight = needsLandscapePage ? projectedHeightLandscape : projectedHeightPortrait;
       const mermaidLooksTall =
@@ -11913,8 +11971,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       svg.removeAttribute("width");
       svg.removeAttribute("height");
       svg.style.removeProperty("width");
-      svg.style.setProperty("width", "100%", "important");
-      svg.style.setProperty("max-width", "100%", "important");
+      svg.style.setProperty("width", "var(--mdexplore-print-diagram-width, auto)", "important");
+      svg.style.setProperty("max-width", "var(--mdexplore-print-diagram-max-width, 100%)", "important");
       svg.style.setProperty("height", "auto", "important");
       host.innerHTML = "";
       host.appendChild(svg);
@@ -11973,8 +12031,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     svg.style.removeProperty("max-width");
     svg.style.removeProperty("height");
     svg.style.setProperty("display", "block", "important");
-    svg.style.setProperty("width", "100%", "important");
-    svg.style.setProperty("max-width", "100%", "important");
+    svg.style.setProperty("width", "var(--mdexplore-print-diagram-width, auto)", "important");
+    svg.style.setProperty("max-width", "var(--mdexplore-print-diagram-max-width, 100%)", "important");
     svg.style.setProperty("height", "auto", "important");
   }
   return true;
