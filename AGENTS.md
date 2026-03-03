@@ -122,6 +122,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   numbering at the bottom of each page.
 - PDF export should preflight preview readiness (MathJax/Mermaid/fonts) before
   snapshotting, and apply print-focused math styling to avoid cramped glyphs.
+- In PDF mode, headed Mermaid and PlantUML sections should attach the heading
+  to the diagram fence itself for pagination purposes, so Chromium cannot leave
+  the heading on one page and push the diagram to the next.
 - If the currently previewed markdown file changes on disk, preview should
   auto-refresh and report that via status bar message.
 - Status bar should show progress during long-running operations (preview

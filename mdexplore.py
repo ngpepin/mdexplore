@@ -9852,10 +9852,6 @@ class MdExploreWindow(QMainWindow):
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
-        current_key = self._current_preview_path_key()
-        next_key = self._path_key(path)
-        if current_key is not None and current_key != next_key:
-            self._capture_current_diagram_view_state_blocking(current_key, timeout_ms=450)
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
 
@@ -10220,7 +10216,9 @@ class MdExploreWindow(QMainWindow):
         next_path_key = self._path_key(path)
         self._capture_current_preview_scroll(force=True)
         if previous_path_key is not None and previous_path_key != next_path_key:
-            self._capture_current_diagram_view_state_blocking(previous_path_key)
+            # Best-effort capture only: file switching should stay responsive
+            # even if the embedded page is busy finishing diagram work.
+            self._capture_current_diagram_view_state_blocking(previous_path_key, timeout_ms=90)
             self._persist_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
@@ -10412,6 +10410,10 @@ class MdExploreWindow(QMainWindow):
     break-inside: avoid-page !important;
     page-break-inside: avoid !important;
   }
+  .mdexplore-print-block.mdexplore-print-break-before {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
   hr.mdexplore-print-skip {
     display: none !important;
   }
@@ -10430,8 +10432,17 @@ class MdExploreWindow(QMainWindow):
     break-after: avoid-page;
     page-break-after: avoid;
   }
+  .mdexplore-print-heading-break-before {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
   .mdexplore-print-heading-landscape {
     page: mdexploreLandscape;
+  }
+  .mdexplore-print-heading-landscape + .mdexplore-fence.mdexplore-print-landscape-page,
+  .mdexplore-print-heading-landscape + .mdexplore-print-block.mdexplore-print-landscape-page {
+    break-before: avoid-page !important;
+    page-break-before: avoid !important;
   }
   .mdexplore-fence.mdexplore-print-with-heading {
     break-before: avoid-page;
@@ -10454,6 +10465,7 @@ class MdExploreWindow(QMainWindow):
   }
   .mdexplore-fence.mdexplore-print-keep .mermaid,
   .mdexplore-fence.mdexplore-print-keep img.plantuml,
+  .mdexplore-fence.mdexplore-print-keep svg.mdexplore-plantuml-inline,
   .mdexplore-fence.mdexplore-print-keep .mermaid svg {
     break-inside: avoid-page !important;
     page-break-inside: avoid !important;
@@ -10466,27 +10478,36 @@ class MdExploreWindow(QMainWindow):
     display: block;
     width: 100% !important;
     max-width: 100% !important;
+    min-height: var(--mdexplore-print-diagram-reserved-height, auto);
   }
-  .mdexplore-fence img.plantuml {
+  .mdexplore-fence img.plantuml,
+  .mdexplore-fence svg.mdexplore-plantuml-inline {
     display: block;
-    width: 100% !important;
-    max-width: 100% !important;
-    height: auto !important;
+    width: var(--mdexplore-print-diagram-width, auto) !important;
+    max-width: var(--mdexplore-print-diagram-max-width, 100%) !important;
+    height: var(--mdexplore-print-diagram-height, auto) !important;
     margin: 0 auto !important;
+  }
+  .mdexplore-fence {
+    width: var(--mdexplore-print-section-width, auto) !important;
+    max-width: 100% !important;
+    min-height: var(--mdexplore-print-diagram-reserved-height, auto);
   }
   .mdexplore-fence .mermaid svg {
     display: block;
     width: var(--mdexplore-print-diagram-width, auto) !important;
     max-width: var(--mdexplore-print-diagram-max-width, 100%) !important;
-    height: auto !important;
+    height: var(--mdexplore-print-diagram-height, auto) !important;
     margin: 0 auto !important;
   }
   .mdexplore-fence.mdexplore-print-keep img.plantuml,
+  .mdexplore-fence.mdexplore-print-keep svg.mdexplore-plantuml-inline,
   .mdexplore-fence.mdexplore-print-keep .mermaid svg {
     max-height: var(--mdexplore-print-diagram-max-height, 86vh) !important;
     object-fit: contain;
   }
   .mdexplore-fence.mdexplore-print-allow-break img.plantuml,
+  .mdexplore-fence.mdexplore-print-allow-break svg.mdexplore-plantuml-inline,
   .mdexplore-fence.mdexplore-print-allow-break .mermaid svg {
     max-height: none !important;
   }
@@ -10640,6 +10661,98 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     document.head.appendChild(style);
   }
 
+  const decodeSvgDataUriForPdf = (src) => {
+    const raw = String(src || "");
+    if (!raw.startsWith("data:image/svg+xml")) {
+      return "";
+    }
+    const commaIndex = raw.indexOf(",");
+    if (commaIndex < 0) {
+      return "";
+    }
+    const meta = raw.slice(0, commaIndex).toLowerCase();
+    const payload = raw.slice(commaIndex + 1);
+    try {
+      if (meta.includes(";base64")) {
+        return atob(payload);
+      }
+      return decodeURIComponent(payload);
+    } catch (_error) {
+      return "";
+    }
+  };
+
+  const intrinsicSvgSizeFromNodeForPdf = (svg) => {
+    if (!(svg instanceof SVGElement)) {
+      return { width: 0, height: 0 };
+    }
+    const viewBox = String(svg.getAttribute("viewBox") || "").trim();
+    if (viewBox) {
+      const parts = viewBox.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+      if (parts.length === 4 && parts.every((num) => Number.isFinite(num))) {
+        const width = Math.abs(parts[2]);
+        const height = Math.abs(parts[3]);
+        if (width > 0 && height > 0) {
+          return { width, height };
+        }
+      }
+    }
+    const width = Number.parseFloat(String(svg.getAttribute("width") || "").replace(/px$/i, ""));
+    const height = Number.parseFloat(String(svg.getAttribute("height") || "").replace(/px$/i, ""));
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+    return { width: 0, height: 0 };
+  };
+
+  const normalizePlantUmlInlineSvgForPdf = (svg) => {
+    if (!(svg instanceof SVGElement)) {
+      return;
+    }
+    const intrinsic = intrinsicSvgSizeFromNodeForPdf(svg);
+    svg.classList.add("plantuml", "mdexplore-plantuml-inline");
+    svg.style.removeProperty("transform");
+    svg.style.setProperty("display", "block", "important");
+    svg.style.setProperty(
+      "width",
+      intrinsic.width > 0 ? `${Math.floor(intrinsic.width)}px` : "auto",
+      "important",
+    );
+    svg.style.setProperty("max-width", "100%", "important");
+    svg.style.setProperty("height", "auto", "important");
+    svg.style.setProperty("margin", "0 auto", "important");
+  };
+
+  const replacePlantUmlImageWithInlineSvgForPdf = (img) => {
+    if (!(img instanceof HTMLImageElement)) {
+      return null;
+    }
+    if (img.dataset.mdexplorePlantumlInline === "1") {
+      return null;
+    }
+    const markup = decodeSvgDataUriForPdf(img.currentSrc || img.src || "");
+    if (!markup) {
+      return null;
+    }
+    try {
+      const template = document.createElement("template");
+      template.innerHTML = markup.trim();
+      const svg = template.content.firstElementChild;
+      if (!(svg instanceof SVGElement) || String(svg.tagName || "").toLowerCase() !== "svg") {
+        return null;
+      }
+      const replacement = svg;
+      replacement.setAttribute("data-mdexplore-original-img", img.outerHTML);
+      replacement.setAttribute("data-mdexplorePlantumlInline", "1");
+      replacement.dataset.mdexplorePlantumlInline = "1";
+      normalizePlantUmlInlineSvgForPdf(replacement);
+      img.replaceWith(replacement);
+      return replacement;
+    } catch (_error) {
+      return null;
+    }
+  };
+
   const normalizeDiagramStateForPdf = () => {
     // Flatten interactive wrappers so current scroll/pan/zoom cannot leak into PDF.
     for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {
@@ -10657,6 +10770,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
       const plantImg =
         viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
+      const plantSvg =
+        viewport instanceof HTMLElement
+          ? viewport.querySelector("svg.mdexplore-plantuml-inline")
+          : shell.querySelector("svg.mdexplore-plantuml-inline");
       if (svg instanceof SVGElement) {
         svg.style.removeProperty("transform");
         svg.removeAttribute("width");
@@ -10669,16 +10786,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         host.appendChild(svg);
         continue;
       }
-      if (plantImg instanceof HTMLImageElement) {
-        plantImg.style.removeProperty("transform");
-        plantImg.removeAttribute("width");
-        plantImg.removeAttribute("height");
-        plantImg.style.removeProperty("width");
-        plantImg.style.setProperty("width", "100%", "important");
-        plantImg.style.setProperty("max-width", "100%", "important");
-        plantImg.style.setProperty("height", "auto", "important");
+      const normalizedPlant =
+        plantSvg instanceof SVGElement ? plantSvg : replacePlantUmlImageWithInlineSvgForPdf(plantImg);
+      if (normalizedPlant instanceof SVGElement) {
+        normalizePlantUmlInlineSvgForPdf(normalizedPlant);
         host.innerHTML = "";
-        host.appendChild(plantImg);
+        host.appendChild(normalizedPlant);
       }
     }
 
@@ -10697,10 +10810,11 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       if (!(img instanceof HTMLImageElement)) {
         continue;
       }
-      img.style.removeProperty("transform");
-      img.style.removeProperty("width");
-      img.style.setProperty("max-width", "100%", "important");
-      img.style.setProperty("height", "auto", "important");
+      replacePlantUmlImageWithInlineSvgForPdf(img);
+    }
+
+    for (const svg of Array.from(document.querySelectorAll("svg.mdexplore-plantuml-inline"))) {
+      normalizePlantUmlInlineSvgForPdf(svg);
     }
 
     for (const svg of Array.from(document.querySelectorAll(".mermaid svg"))) {
@@ -11334,6 +11448,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
   const markDiagramPrintLayout = () => {
     const HEADING_TO_DIAGRAM_GAP_PX = 16;
     const MIN_KEEP_SHRINK_RATIO = 0.72;
+    const MIN_PLANTUML_KEEP_SHRINK_RATIO = 0.45;
     // PDF page selection must be based on print-page geometry, not the live
     // GUI viewport. The export target is US Letter, so use Letter CSS-pixel
     // dimensions here; otherwise the keep/landscape classifier makes the wrong
@@ -11491,6 +11606,67 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
     };
 
+    const decodeSvgDataUri = (src) => {
+      const raw = String(src || "");
+      if (!raw.startsWith("data:image/svg+xml")) {
+        return "";
+      }
+      const commaIndex = raw.indexOf(",");
+      if (commaIndex < 0) {
+        return "";
+      }
+      const meta = raw.slice(0, commaIndex).toLowerCase();
+      const payload = raw.slice(commaIndex + 1);
+      try {
+        if (meta.includes(";base64")) {
+          return atob(payload);
+        }
+        return decodeURIComponent(payload);
+      } catch (_error) {
+        return "";
+      }
+    };
+
+    const intrinsicSvgSizeFromMarkup = (markup) => {
+      const text = String(markup || "");
+      if (!text) {
+        return { width: 0, height: 0 };
+      }
+      const viewBoxMatch = text.match(/viewBox\\s*=\\s*[\"']\\s*([-+0-9.eE]+)[\\s,]+([-+0-9.eE]+)[\\s,]+([-+0-9.eE]+)[\\s,]+([-+0-9.eE]+)\\s*[\"']/i);
+      if (viewBoxMatch) {
+        const width = Math.abs(Number.parseFloat(viewBoxMatch[3] || "0"));
+        const height = Math.abs(Number.parseFloat(viewBoxMatch[4] || "0"));
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+          return { width, height };
+        }
+      }
+      const widthMatch = text.match(/\\bwidth\\s*=\\s*[\"']\\s*([-+0-9.eE]+)(?:px)?\\s*[\"']/i);
+      const heightMatch = text.match(/\\bheight\\s*=\\s*[\"']\\s*([-+0-9.eE]+)(?:px)?\\s*[\"']/i);
+      const width = widthMatch ? Math.abs(Number.parseFloat(widthMatch[1] || "0")) : 0;
+      const height = heightMatch ? Math.abs(Number.parseFloat(heightMatch[1] || "0")) : 0;
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        return { width, height };
+      }
+      return { width: 0, height: 0 };
+    };
+
+    const intrinsicPlantUmlSize = (img) => {
+      if (!(img instanceof HTMLImageElement)) {
+        return { width: 0, height: 0 };
+      }
+      if (Number.isFinite(img.naturalWidth) && Number(img.naturalWidth) > 0 &&
+          Number.isFinite(img.naturalHeight) && Number(img.naturalHeight) > 0) {
+        return { width: Number(img.naturalWidth), height: Number(img.naturalHeight) };
+      }
+      const attrWidth = parseLength(img.getAttribute("width"));
+      const attrHeight = parseLength(img.getAttribute("height"));
+      if (attrWidth > 0 && attrHeight > 0) {
+        return { width: attrWidth, height: attrHeight };
+      }
+      const decoded = decodeSvgDataUri(img.currentSrc || img.src || "");
+      return intrinsicSvgSizeFromMarkup(decoded);
+    };
+
     const intrinsicDiagramMaxFontPx = (fence) => {
       const svg = fence.querySelector("svg");
       if (!(svg instanceof SVGElement)) {
@@ -11534,22 +11710,80 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       }
 
       const plantImg = fence.querySelector("img.plantuml");
-      if (plantImg instanceof HTMLImageElement) {
-        if (Number.isFinite(plantImg.naturalWidth) && plantImg.naturalWidth > 0) {
-          return Number(plantImg.naturalWidth);
+      const plantSvg = fence.querySelector("svg.mdexplore-plantuml-inline");
+      if (plantSvg instanceof SVGElement) {
+        const viewBox = String(plantSvg.getAttribute("viewBox") || "").trim();
+        if (viewBox) {
+          const parts = viewBox.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+          if (parts.length === 4 && parts.every((num) => Number.isFinite(num))) {
+            const width = Math.abs(parts[2]);
+            if (width > 0) {
+              return width;
+            }
+          }
         }
-        const imgWidth = parseLength(plantImg.getAttribute("width"));
-        if (imgWidth > 0) {
-          return imgWidth;
+      }
+      if (plantImg instanceof HTMLImageElement) {
+        const size = intrinsicPlantUmlSize(plantImg);
+        if (size.width > 0) {
+          return size.width;
         }
       }
 
       return measuredWidth;
     };
 
+    const estimateHeadingPrintHeight = (heading, printableWidth) => {
+      if (!(heading instanceof HTMLElement)) {
+        return 0;
+      }
+      const style = window.getComputedStyle(heading);
+      const fontPx = Math.max(10, parseLength(style.fontSize || "") || 24);
+      const linePx = Math.max(fontPx * 1.18, parseLength(style.lineHeight || "") || 0);
+      const marginTop = parseLength(style.marginTop || "");
+      const marginBottom = parseLength(style.marginBottom || "");
+      const horizontalPadding =
+        parseLength(style.paddingLeft || "") +
+        parseLength(style.paddingRight || "") +
+        parseLength(style.borderLeftWidth || "") +
+        parseLength(style.borderRightWidth || "");
+      const availableTextWidth = Math.max(180, printableWidth - horizontalPadding - 24);
+      const rawText = String(heading.textContent || "").replace(/\s+/g, " ").trim();
+      const approxCharsPerLine = Math.max(10, Math.floor(availableTextWidth / Math.max(6, fontPx * 0.58)));
+      const approxLineCount = Math.max(1, Math.ceil(Math.max(1, rawText.length) / approxCharsPerLine));
+      return Math.ceil(linePx * approxLineCount + marginTop + marginBottom);
+    };
+
+    const stableHeadingHeight = (heading, printableWidth) => {
+      if (!(heading instanceof HTMLElement)) {
+        return 0;
+      }
+      const rectHeight = Math.max(0, heading.getBoundingClientRect().height || 0);
+      const scrollHeight = Math.max(0, heading.scrollHeight || 0);
+      const measured = Math.max(rectHeight, scrollHeight);
+      const estimated = estimateHeadingPrintHeight(heading, printableWidth);
+      if (measured <= 0) {
+        return estimated;
+      }
+      if (estimated <= 0) {
+        return measured;
+      }
+      // Hidden/offscreen exports can report absurd heading heights when the
+      // live layout width collapses. Prefer a print-width estimate whenever the
+      // measured value is clearly out of family with the estimated block height.
+      if (measured > estimated * 1.55) {
+        return estimated;
+      }
+      return measured;
+    };
+
     for (const heading of Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))) {
       if (heading instanceof HTMLElement) {
-        heading.classList.remove("mdexplore-print-heading-anchor", "mdexplore-print-heading-landscape");
+        heading.classList.remove(
+          "mdexplore-print-heading-anchor",
+          "mdexplore-print-heading-landscape",
+          "mdexplore-print-heading-break-before",
+        );
       }
     }
     for (const rule of Array.from(document.querySelectorAll("hr"))) {
@@ -11563,7 +11797,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       if (!(fence instanceof HTMLElement)) {
         continue;
       }
-      const hasPlantUml = !!fence.querySelector("img.plantuml");
+      const hasPlantUml = !!fence.querySelector("img.plantuml, svg.mdexplore-plantuml-inline");
       const hasMermaid = !!fence.querySelector(".mermaid");
       if (!hasPlantUml && !hasMermaid) {
         continue;
@@ -11579,8 +11813,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         "mdexplore-print-with-heading",
       );
       fence.style.removeProperty("--mdexplore-print-diagram-width");
+      fence.style.removeProperty("--mdexplore-print-section-width");
       fence.style.removeProperty("--mdexplore-print-diagram-max-height");
       fence.style.removeProperty("--mdexplore-print-diagram-max-width");
+      fence.style.removeProperty("--mdexplore-print-diagram-height");
+      fence.style.removeProperty("--mdexplore-print-diagram-reserved-height");
+      fence.style.removeProperty("min-height");
       const rect = fence.getBoundingClientRect();
       const measuredWidth = Math.max(1, rect.width || 0, fence.scrollWidth || 0);
       const measuredHeight = Math.max(1, rect.height || 0, fence.scrollHeight || 0);
@@ -11603,32 +11841,71 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             return svgHeight;
           }
         }
+        const plantSvg = fence.querySelector("svg.mdexplore-plantuml-inline");
+        if (plantSvg instanceof SVGElement) {
+          const viewBox = String(plantSvg.getAttribute("viewBox") || "").trim();
+          if (viewBox) {
+            const parts = viewBox.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+            if (parts.length === 4 && parts.every((num) => Number.isFinite(num))) {
+              const height = Math.abs(parts[3]);
+              if (height > 0) {
+                return height;
+              }
+            }
+          }
+          const svgHeight = parseLength(plantSvg.getAttribute("height"));
+          if (svgHeight > 0) {
+            return svgHeight;
+          }
+        }
         const plantImg = fence.querySelector("img.plantuml");
         if (plantImg instanceof HTMLImageElement) {
-          if (Number.isFinite(plantImg.naturalHeight) && plantImg.naturalHeight > 0) {
-            return Number(plantImg.naturalHeight);
-          }
-          const imgHeight = parseLength(plantImg.getAttribute("height"));
-          if (imgHeight > 0) {
-            return imgHeight;
+          const size = intrinsicPlantUmlSize(plantImg);
+          if (size.height > 0) {
+            return size.height;
           }
         }
         return measuredHeight;
       })();
       const heading = headingBeforeFence(fence);
-      const headingHeight =
-        heading instanceof HTMLElement
-          ? Math.max(0, heading.getBoundingClientRect().height || heading.scrollHeight || 0)
-          : 0;
-      if (heading instanceof HTMLElement && heading.parentNode) {
-        printBlock = document.createElement("div");
-        printBlock.className = "mdexplore-print-block";
-        printBlock.dataset.mdexplorePrintBlock = "1";
-        heading.parentNode.insertBefore(printBlock, heading);
-        printBlock.appendChild(heading);
-        printBlock.appendChild(fence);
+      const printableWidthForHeading = Math.max(printableWidthPortrait, printableWidthLandscape);
+      const headingHeight = stableHeadingHeight(heading, printableWidthForHeading);
+      if (heading instanceof HTMLElement) {
+        const existingWrapper = heading.parentElement;
+        if (
+          existingWrapper instanceof HTMLElement &&
+          existingWrapper.classList.contains("mdexplore-print-block")
+        ) {
+          printBlock = existingWrapper;
+        } else if (heading.parentNode) {
+          printBlock = document.createElement("div");
+          printBlock.className = "mdexplore-print-block";
+          printBlock.dataset.mdexplorePrintBlock = "1";
+          heading.parentNode.insertBefore(printBlock, heading);
+          printBlock.appendChild(heading);
+          printBlock.appendChild(fence);
+        }
       }
-      const targetBlock = printBlock || fence;
+      let targetBlock = printBlock || fence;
+      if ((hasPlantUml || hasMermaid) && heading instanceof HTMLElement && printBlock instanceof HTMLElement) {
+        // Chromium is willing to split a generic wrapper before a tall
+        // diagram fence, which can strand the heading on the prior page.
+        // Make the fence itself own the heading in print mode so any
+        // break-before/keep decision applies to the combined section.
+        if (heading.parentNode !== fence) {
+          fence.insertBefore(heading, fence.firstChild);
+        }
+        const printParent = printBlock.parentNode;
+        if (printParent) {
+          printParent.insertBefore(fence, printBlock);
+          if (printBlock.parentNode === printParent) {
+            printParent.removeChild(printBlock);
+          }
+        }
+        printBlock = null;
+        targetBlock = fence;
+      }
+      targetBlock.classList.remove("mdexplore-print-break-before");
       const aspectWidth = Math.max(1, intrinsicWidth || measuredWidth || 1);
       const aspectHeight = Math.max(1, intrinsicHeight || measuredHeight || 1);
       const maxSvgFontPx = hasMermaid ? intrinsicDiagramMaxFontPx(fence) : 0;
@@ -11703,7 +11980,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       // landscape page if it does not fit portrait width but can fit landscape width.
       if (needsLandscapePage) {
         targetBlock.classList.add("mdexplore-print-landscape-page");
-        if (heading instanceof HTMLElement) {
+        if (heading instanceof HTMLElement && heading.parentNode !== targetBlock) {
           heading.classList.add("mdexplore-print-heading-landscape");
         }
         landscapeCount += 1;
@@ -11715,6 +11992,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         printableHeight - (headingHeight > 0 ? headingHeight + HEADING_TO_DIAGRAM_GAP_PX : 0),
       );
       const selectedEffectiveWidth = needsLandscapePage ? effectiveWidthLandscape : effectiveWidthPortrait;
+      fence.style.setProperty("--mdexplore-print-section-width", `${Math.floor(selectedEffectiveWidth)}px`);
       if (hasMermaid) {
         const diagramWidthPx = Math.floor(selectedEffectiveWidth);
         targetBlock.style.setProperty("--mdexplore-print-diagram-width", `${diagramWidthPx}px`);
@@ -11724,8 +12002,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       ) {
         targetBlock.style.setProperty("--mdexplore-print-diagram-max-width", `${Math.floor(selectedEffectiveWidth)}px`);
       }
-      let keepDiagram = !isSequenceMermaid;
       const projectedHeight = needsLandscapePage ? projectedHeightLandscape : projectedHeightPortrait;
+      let keepDiagram = !isSequenceMermaid;
       const mermaidLooksTall =
         hasMermaid &&
         (
@@ -11735,6 +12013,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         );
       if (mermaidLooksTall) {
         keepDiagram = false;
+      }
+      if (isSequenceMermaid && projectedHeight <= availableDiagramHeight) {
+        // A sequence diagram that already fits on one page should stay in the
+        // keep-together path; otherwise Chromium can leave the heading behind
+        // and push the actual diagram content to the next page.
+        keepDiagram = true;
       }
       if (
         isSequenceMermaid &&
@@ -11748,11 +12032,43 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       }
       if (!isSequenceMermaid && projectedHeight > availableDiagramHeight) {
         const shrinkRatio = availableDiagramHeight / projectedHeight;
-        if (shrinkRatio >= MIN_KEEP_SHRINK_RATIO) {
+        const minKeepShrinkRatio = hasPlantUml ? MIN_PLANTUML_KEEP_SHRINK_RATIO : MIN_KEEP_SHRINK_RATIO;
+        if (shrinkRatio >= minKeepShrinkRatio) {
           targetBlock.style.setProperty("--mdexplore-print-diagram-max-height", `${Math.floor(availableDiagramHeight)}px`);
+          targetBlock.style.setProperty("--mdexplore-print-diagram-height", `${Math.floor(availableDiagramHeight)}px`);
         } else {
           keepDiagram = false;
         }
+      }
+
+      if (hasPlantUml) {
+        const reservedHeight = Math.min(
+          projectedHeight,
+          keepDiagram ? availableDiagramHeight : availableDiagramHeight,
+        );
+        if (reservedHeight > 1) {
+          fence.style.setProperty(
+            "--mdexplore-print-diagram-reserved-height",
+            `${Math.ceil(reservedHeight)}px`,
+          );
+          fence.style.setProperty("min-height", `${Math.ceil(reservedHeight)}px`, "important");
+        }
+      }
+
+      if ((hasPlantUml || hasMermaid) && heading instanceof HTMLElement && !keepDiagram && printBlock instanceof HTMLElement) {
+        heading.classList.add("mdexplore-print-heading-anchor");
+        fence.classList.add("mdexplore-print-with-heading");
+        if (heading.parentNode !== fence) {
+          fence.insertBefore(heading, fence.firstChild);
+        }
+        const printParent = printBlock.parentNode;
+        if (printParent) {
+          printParent.insertBefore(fence, printBlock);
+          if (printBlock.parentNode === printParent) {
+            printParent.removeChild(printBlock);
+          }
+        }
+        targetBlock = fence;
       }
 
       if (keepDiagram) {
@@ -11765,6 +12081,51 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         targetBlock.classList.remove("mdexplore-print-with-heading");
         if (heading instanceof HTMLElement) {
           heading.classList.remove("mdexplore-print-heading-anchor", "mdexplore-print-heading-landscape");
+          const contentRoot =
+            document.querySelector("main") ||
+            document.body ||
+            document.documentElement;
+          const contentTop =
+            contentRoot instanceof HTMLElement
+              ? contentRoot.getBoundingClientRect().top + window.scrollY
+              : 0;
+          const targetTop = targetBlock.getBoundingClientRect().top + window.scrollY;
+          const pageHeight = Math.max(180, printableHeight);
+          const relativeTop = Math.max(0, targetTop - contentTop);
+          const pageOffset = relativeTop % pageHeight;
+          if (pageOffset > 1) {
+            // Breakable diagram sections should not strand the heading on the
+            // previous page. Start the whole headed block on a fresh page and
+            // allow the diagram itself to break only after that first page.
+            targetBlock.classList.add("mdexplore-print-break-before");
+          }
+        }
+      }
+
+      if (heading instanceof HTMLElement) {
+        const contentRoot =
+          document.querySelector("main") ||
+          document.body ||
+          document.documentElement;
+        const contentTop =
+          contentRoot instanceof HTMLElement
+            ? contentRoot.getBoundingClientRect().top + window.scrollY
+            : 0;
+        const targetTop = targetBlock.getBoundingClientRect().top + window.scrollY;
+        const pageHeight = Math.max(180, printableHeight);
+        const relativeTop = Math.max(0, targetTop - contentTop);
+        const pageOffset = relativeTop % pageHeight;
+        const remainingOnPage = Math.max(0, pageHeight - pageOffset);
+        const projectedBlockHeight = projectedHeight + headingHeight + HEADING_TO_DIAGRAM_GAP_PX;
+        if (pageOffset > 1 && projectedBlockHeight > remainingOnPage + 1) {
+          // Even for keep-together diagrams, move the whole headed section to
+          // the next page when the current page cannot hold the heading plus
+          // the projected diagram. Without this, Chromium can leave the
+          // heading behind and push only the image content.
+          targetBlock.classList.add("mdexplore-print-break-before");
+          if (heading.parentElement !== targetBlock) {
+            heading.classList.add("mdexplore-print-heading-break-before");
+          }
         }
       }
     }
@@ -11783,6 +12144,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
 
       const level = headingLevel(heading);
       if (level <= 0 || level > 6) {
+        continue;
+      }
+      if (heading.closest(".mdexplore-fence")) {
         continue;
       }
 
@@ -11816,12 +12180,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           nextBlock.parentElement.classList.contains("mdexplore-print-block")) &&
         !/^H[1-6]$/.test(nextBlock.tagName)
       ) {
-        const nextIsDiagramFence =
-          nextBlock.classList.contains("mdexplore-fence") &&
-          (!!nextBlock.querySelector("img.plantuml") || !!nextBlock.querySelector(".mermaid"));
-        if (!nextIsDiagramFence) {
-          cluster.push(nextBlock);
-        }
+        cluster.push(nextBlock);
       }
 
       if (cluster.length <= 1) {
@@ -11894,11 +12253,28 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
 
   const hasMath = !!document.querySelector("mjx-container, .MathJax");
   const hasMermaid = !!document.querySelector(".mermaid");
+  const plantumlImages = Array.from(document.querySelectorAll("img.plantuml"));
+  const inlinePlantumlSvgs = Array.from(document.querySelectorAll("svg.mdexplore-plantuml-inline"));
+  const hasPlantUml =
+    plantumlImages.length > 0 || inlinePlantumlSvgs.length > 0 || !!document.querySelector(".plantuml-pending");
+  const plantumlReady =
+    !hasPlantUml ||
+    (!!window.__mdexplorePdfPlantUmlReady) ||
+    (
+      !document.querySelector(".plantuml-pending") &&
+      plantumlImages.every((img) => {
+        if (!(img instanceof HTMLImageElement)) {
+          return true;
+        }
+        return !!img.complete && Number(img.naturalWidth || 0) > 1 && Number(img.naturalHeight || 0) > 1;
+      }) &&
+      inlinePlantumlSvgs.every((svg) => svg instanceof SVGElement)
+    );
   const mathReady = !hasMath || !!window.__mdexploreMathReady;
   const mermaidReady = !hasMermaid || !!window.__mdexplorePdfMermaidReady;
   const fontsReady = !document.fonts || document.fonts.status === "loaded";
 
-  return { mathReady, mermaidReady, fontsReady, hasMath, hasMermaid, diagramLayout };
+  return { mathReady, mermaidReady, plantumlReady, fontsReady, hasMath, hasMermaid, hasPlantUml, diagramLayout };
 })();
 """
         js = js.replace("__MDEXPLORE_FORCE_MERMAID__", "true" if attempt == 0 else "false")
@@ -11914,19 +12290,21 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         """Continue waiting until print assets are ready, then trigger print."""
         math_ready = False
         mermaid_ready = False
+        plantuml_ready = False
         fonts_ready = False
         if isinstance(result, dict):
             math_ready = bool(result.get("mathReady"))
             mermaid_ready = bool(result.get("mermaidReady"))
+            plantuml_ready = bool(result.get("plantumlReady"))
             fonts_ready = bool(result.get("fontsReady"))
 
-        if math_ready and mermaid_ready and fonts_ready:
+        if math_ready and mermaid_ready and plantuml_ready and fonts_ready:
             self._trigger_pdf_print(output_path, source_key)
             return
 
         if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
             if attempt == 0:
-                self.statusBar().showMessage("Waiting for math/Mermaid/fonts before PDF export...")
+                self.statusBar().showMessage("Waiting for math/Mermaid/PlantUML/fonts before PDF export...")
             QTimer.singleShot(
                 PDF_EXPORT_PRECHECK_INTERVAL_MS,
                 lambda target=output_path, tries=attempt + 1, key=source_key: self._prepare_preview_for_pdf_export(
@@ -11947,6 +12325,98 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         self.statusBar().showMessage(f"Rendering PDF snapshot: {output_path.name}...")
         preprint_js = """
 (() => {
+  const decodeSvgDataUriForPdf = (src) => {
+    const raw = String(src || "");
+    if (!raw.startsWith("data:image/svg+xml")) {
+      return "";
+    }
+    const commaIndex = raw.indexOf(",");
+    if (commaIndex < 0) {
+      return "";
+    }
+    const meta = raw.slice(0, commaIndex).toLowerCase();
+    const payload = raw.slice(commaIndex + 1);
+    try {
+      if (meta.includes(";base64")) {
+        return atob(payload);
+      }
+      return decodeURIComponent(payload);
+    } catch (_error) {
+      return "";
+    }
+  };
+
+  const intrinsicSvgSizeFromNodeForPdf = (svg) => {
+    if (!(svg instanceof SVGElement)) {
+      return { width: 0, height: 0 };
+    }
+    const viewBox = String(svg.getAttribute("viewBox") || "").trim();
+    if (viewBox) {
+      const parts = viewBox.split(/[\\s,]+/).map((part) => Number.parseFloat(part));
+      if (parts.length === 4 && parts.every((num) => Number.isFinite(num))) {
+        const width = Math.abs(parts[2]);
+        const height = Math.abs(parts[3]);
+        if (width > 0 && height > 0) {
+          return { width, height };
+        }
+      }
+    }
+    const width = Number.parseFloat(String(svg.getAttribute("width") || "").replace(/px$/i, ""));
+    const height = Number.parseFloat(String(svg.getAttribute("height") || "").replace(/px$/i, ""));
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+    return { width: 0, height: 0 };
+  };
+
+  const normalizePlantUmlInlineSvgForPdf = (svg) => {
+    if (!(svg instanceof SVGElement)) {
+      return;
+    }
+    const intrinsic = intrinsicSvgSizeFromNodeForPdf(svg);
+    svg.classList.add("plantuml", "mdexplore-plantuml-inline");
+    svg.style.removeProperty("transform");
+    svg.style.setProperty("display", "block", "important");
+    svg.style.setProperty(
+      "width",
+      intrinsic.width > 0 ? `${Math.floor(intrinsic.width)}px` : "auto",
+      "important",
+    );
+    svg.style.setProperty("max-width", "100%", "important");
+    svg.style.setProperty("height", "auto", "important");
+    svg.style.setProperty("margin", "0 auto", "important");
+  };
+
+  const replacePlantUmlImageWithInlineSvgForPdf = (img) => {
+    if (!(img instanceof HTMLImageElement)) {
+      return null;
+    }
+    if (img.dataset.mdexplorePlantumlInline === "1") {
+      return null;
+    }
+    const markup = decodeSvgDataUriForPdf(img.currentSrc || img.src || "");
+    if (!markup) {
+      return null;
+    }
+    try {
+      const template = document.createElement("template");
+      template.innerHTML = markup.trim();
+      const svg = template.content.firstElementChild;
+      if (!(svg instanceof SVGElement) || String(svg.tagName || "").toLowerCase() !== "svg") {
+        return null;
+      }
+      const replacement = svg;
+      replacement.setAttribute("data-mdexplore-original-img", img.outerHTML);
+      replacement.setAttribute("data-mdexplorePlantumlInline", "1");
+      replacement.dataset.mdexplorePlantumlInline = "1";
+      normalizePlantUmlInlineSvgForPdf(replacement);
+      img.replaceWith(replacement);
+      return replacement;
+    } catch (_error) {
+      return null;
+    }
+  };
+
   if (document.documentElement) {
     document.documentElement.classList.add("mdexplore-pdf-export-mode");
   }
@@ -11966,6 +12436,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     const svg = viewport instanceof HTMLElement ? viewport.querySelector("svg") : shell.querySelector("svg");
     const plantImg =
       viewport instanceof HTMLElement ? viewport.querySelector("img.plantuml") : shell.querySelector("img.plantuml");
+    const plantSvg =
+      viewport instanceof HTMLElement
+        ? viewport.querySelector("svg.mdexplore-plantuml-inline")
+        : shell.querySelector("svg.mdexplore-plantuml-inline");
     if (svg instanceof SVGElement) {
       svg.style.removeProperty("transform");
       svg.removeAttribute("width");
@@ -11978,16 +12452,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       host.appendChild(svg);
       continue;
     }
-    if (plantImg instanceof HTMLImageElement) {
-      plantImg.style.removeProperty("transform");
-      plantImg.removeAttribute("width");
-      plantImg.removeAttribute("height");
-      plantImg.style.removeProperty("width");
-      plantImg.style.setProperty("width", "100%", "important");
-      plantImg.style.setProperty("max-width", "100%", "important");
-      plantImg.style.setProperty("height", "auto", "important");
+    const normalizedPlant =
+      plantSvg instanceof SVGElement ? plantSvg : replacePlantUmlImageWithInlineSvgForPdf(plantImg);
+    if (normalizedPlant instanceof SVGElement) {
+      normalizePlantUmlInlineSvgForPdf(normalizedPlant);
       host.innerHTML = "";
-      host.appendChild(plantImg);
+      host.appendChild(normalizedPlant);
     }
   }
   for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
@@ -12012,13 +12482,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     if (!(img instanceof HTMLImageElement)) {
       continue;
     }
-    img.style.removeProperty("transform");
-    img.removeAttribute("width");
-    img.removeAttribute("height");
-    img.style.removeProperty("width");
-    img.style.setProperty("width", "100%", "important");
-    img.style.setProperty("max-width", "100%", "important");
-    img.style.setProperty("height", "auto", "important");
+    replacePlantUmlImageWithInlineSvgForPdf(img);
+  }
+  for (const svg of Array.from(document.querySelectorAll("svg.mdexplore-plantuml-inline"))) {
+    normalizePlantUmlInlineSvgForPdf(svg);
   }
   for (const svg of Array.from(document.querySelectorAll(".mermaid svg"))) {
     if (!(svg instanceof SVGElement)) {
@@ -12087,6 +12554,31 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     viewport.style.removeProperty("scrollbar-width");
     viewport.style.removeProperty("-ms-overflow-style");
     delete viewport.dataset.mdexplorePdfViewportHidden;
+  }
+  for (const svg of Array.from(document.querySelectorAll("svg.mdexplore-plantuml-inline[data-mdexplore-original-img]"))) {
+    if (!(svg instanceof SVGElement)) {
+      continue;
+    }
+    const original = String(svg.getAttribute("data-mdexplore-original-img") || "");
+    if (!original) {
+      continue;
+    }
+    try {
+      const container = document.createElement("div");
+      container.innerHTML = original;
+      const replacement = container.firstElementChild;
+      if (replacement instanceof HTMLImageElement) {
+        svg.replaceWith(replacement);
+      }
+    } catch (_error) {
+      // Ignore restore failures; a later preview rerender will recover.
+    }
+  }
+  for (const fence of Array.from(document.querySelectorAll(".mdexplore-fence"))) {
+    if (!(fence instanceof HTMLElement)) {
+      continue;
+    }
+    fence.style.removeProperty("min-height");
   }
   for (const block of Array.from(document.querySelectorAll(".mdexplore-print-block[data-mdexplore-print-block='1']"))) {
     if (!(block instanceof HTMLElement)) {

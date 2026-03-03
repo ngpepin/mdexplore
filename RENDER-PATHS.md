@@ -269,6 +269,10 @@ flowchart TD
 - Keep Mermaid cache separation by mode (`auto` vs `pdf`).
 - Rust PDF output must come from the dedicated Rust PDF render profile, not GUI SVG.
 - GUI Mermaid post-processing must not run on Rust PDF SVGs.
+- For PDF pagination, headed Mermaid and PlantUML sections are classified on
+  the diagram fence itself rather than on an outer wrapper. This avoids the
+  Chromium behavior where a heading can be left behind on the prior page while
+  the diagram starts on the next page.
 - Rust PDF path may apply print-safe grayscale normalization after selecting
   the dedicated Rust PDF SVG source.
 - PDF preflight must hide interactive controls (toolbars/scrollbars) before snapshot.
