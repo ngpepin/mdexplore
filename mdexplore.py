@@ -126,6 +126,19 @@ def _letter_pdf_page_layout() -> QPageLayout:
     )
 
 
+def _configure_qt_graphics_fallback() -> None:
+    """Prefer software rendering defaults when GPU context creation is unstable."""
+    if not os.environ.get("QT_QUICK_BACKEND"):
+        os.environ["QT_QUICK_BACKEND"] = "software"
+    if not os.environ.get("QSG_RHI_BACKEND"):
+        os.environ["QSG_RHI_BACKEND"] = "software"
+    if not os.environ.get("QT_OPENGL"):
+        os.environ["QT_OPENGL"] = "software"
+    chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    if "--disable-gpu" not in chromium_flags.split():
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{chromium_flags} --disable-gpu".strip()
+
+
 def _pdf_print_layout_knobs() -> dict[str, float | int]:
     """Expose PDF print-layout policy knobs to the in-page preflight JS.
 
@@ -13068,6 +13081,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
 
 
 def main() -> int:
+    _configure_qt_graphics_fallback()
+
     parser = argparse.ArgumentParser(
         prog="mdexplore",
         description="Browse and preview markdown files with rich rendering.",

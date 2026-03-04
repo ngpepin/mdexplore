@@ -203,6 +203,34 @@ configure_mermaid_rs_override() {
   fi
 }
 
+configure_qt_graphics_fallback() {
+  # Some desktop/driver combinations fail to create an OpenGL context for
+  # QtWebEngine. Prefer software rendering defaults unless the user has
+  # explicitly configured these variables.
+  if [[ -z "${QT_QUICK_BACKEND:-}" ]]; then
+    export QT_QUICK_BACKEND="software"
+    echo "Using QT_QUICK_BACKEND=software"
+  fi
+  if [[ -z "${QSG_RHI_BACKEND:-}" ]]; then
+    export QSG_RHI_BACKEND="software"
+    echo "Using QSG_RHI_BACKEND=software"
+  fi
+  if [[ -z "${QT_OPENGL:-}" ]]; then
+    export QT_OPENGL="software"
+    echo "Using QT_OPENGL=software"
+  fi
+
+  # Keep any user-provided Chromium flags and append GPU disable only if absent.
+  local chromium_flags="${QTWEBENGINE_CHROMIUM_FLAGS:-}"
+  if [[ " ${chromium_flags} " != *" --disable-gpu "* ]]; then
+    chromium_flags="${chromium_flags} --disable-gpu"
+    chromium_flags="${chromium_flags#"${chromium_flags%%[![:space:]]*}"}"
+    chromium_flags="${chromium_flags%"${chromium_flags##*[![:space:]]}"}"
+    export QTWEBENGINE_CHROMIUM_FLAGS="${chromium_flags}"
+    echo "Using QTWEBENGINE_CHROMIUM_FLAGS=${QTWEBENGINE_CHROMIUM_FLAGS}"
+  fi
+}
+
 TARGET_PATH=""
 APP_ARGS=()
 MERMAID_BACKEND_EXPLICIT=0
@@ -347,6 +375,7 @@ fi
 
 configure_local_renderer_overrides
 configure_mermaid_rs_override
+configure_qt_graphics_fallback
 
 # Default to Rust Mermaid renderer for launcher-driven debugging, unless the
 # caller explicitly selected a backend on the command line.
