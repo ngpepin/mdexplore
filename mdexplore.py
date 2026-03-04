@@ -26,7 +26,7 @@ from pathlib import Path
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from PySide6.QtCore import QDir, QEventLoop, QMarginsF, QMimeData, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPageSize, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPageSize, QPalette, QPen, QPixmap, QPolygon
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabBar,
     QTreeView,
     QVBoxLayout,
@@ -806,15 +808,13 @@ class ColorizedMarkdownModel(QFileSystemModel):
                 has_search_match = path_key in self._search_match_paths
                 has_multi_view = path_key in self._multi_view_paths
                 return self._decorated_markdown_icon(has_multi_view, has_search_match)
-        if role in (Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole):
+        if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
                 color_name = self._color_for_file(Path(info.filePath()))
                 if color_name:
                     color = QColor(color_name)
                     if color.isValid():
-                        if role == Qt.ItemDataRole.BackgroundRole:
-                            return QBrush(color)
                         luminance = (0.299 * color.redF()) + (0.587 * color.greenF()) + (0.114 * color.blueF())
                         return QBrush(QColor("#101418") if luminance > 0.6 else QColor("#f8fafc"))
         if role == Qt.ItemDataRole.FontRole:
@@ -843,8 +843,26 @@ class ColorizedMarkdownModel(QFileSystemModel):
             self.dataChanged.emit(
                 index,
                 index,
-                [Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole],
+                [Qt.ItemDataRole.ForegroundRole],
             )
+
+    def highlight_background_for_path(self, path: Path) -> QColor | None:
+        color_name = self._color_for_file(path)
+        if not color_name:
+            return None
+        color = QColor(color_name)
+        return color if color.isValid() else None
+
+    def highlight_foreground_for_path(self, path: Path) -> QColor | None:
+        background = self.highlight_background_for_path(path)
+        if background is None:
+            return None
+        luminance = (
+            (0.299 * background.redF())
+            + (0.587 * background.greenF())
+            + (0.114 * background.blueF())
+        )
+        return QColor("#101418") if luminance > 0.6 else QColor("#f8fafc")
 
     def collect_files_with_color(self, root: Path, color_name: str) -> list[Path]:
         """Return files under root that are persisted with the requested color."""
@@ -1000,6 +1018,52 @@ class ColorizedMarkdownModel(QFileSystemModel):
         decorated = QIcon(canvas)
         self._decorated_icon_cache[cache_key] = decorated
         return decorated
+
+
+class MarkdownTreeItemDelegate(QStyledItemDelegate):
+    """Paint filename-only highlight backgrounds for markdown rows."""
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        model = index.model()
+        if not isinstance(model, ColorizedMarkdownModel):
+            super().paint(painter, option, index)
+            return
+
+        info = model.fileInfo(index)
+        if not (info.isFile() and info.suffix().lower() == "md"):
+            super().paint(painter, option, index)
+            return
+
+        file_path = Path(info.filePath())
+        background = model.highlight_background_for_path(file_path)
+        if background is None:
+            super().paint(painter, option, index)
+            return
+
+        super().paint(painter, option, index)
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+
+        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        highlight_rect = text_rect.adjusted(-2, 1, 2, -1)
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRect(highlight_rect)
+        painter.restore()
+
+        foreground = model.highlight_foreground_for_path(file_path)
+        text_color = foreground if foreground is not None else opt.palette.color(QPalette.ColorRole.Text)
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(text_color)
+        elided_text = opt.fontMetrics.elidedText(opt.text, opt.textElideMode, text_rect.width())
+        alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(text_rect, alignment, elided_text)
+        painter.restore()
 
 
 class MarkdownRenderer:
@@ -6279,6 +6343,7 @@ class MdExploreWindow(QMainWindow):
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
+        self.tree.setItemDelegate(MarkdownTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedMarkdownModel.decorated_icon_size())
         self.tree.setHeaderHidden(True)
         self.tree.hideColumn(1)
