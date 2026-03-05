@@ -144,6 +144,8 @@ PDF_PRINT_PLANTUML_LANDSCAPE_ASPECT_RATIO = 1.18  # 1.18
 # limits; large inline-SVG documents can fail to load. Use file-based loading
 # above this threshold.
 PREVIEW_SETHTML_MAX_BYTES = 650_000
+SVG_ICON_RENDER_OVERSAMPLE = 4
+SVG_ICON_ALPHA_CUTOFF = 1
 
 
 def _config_file_path() -> Path:
@@ -881,26 +883,43 @@ def _build_clear_x_icon() -> QIcon:
 
 def _load_svg_icon(filename: str, color: QColor, size: int = 16) -> QIcon:
     """Load and recolor a local SVG icon to a fixed flat color."""
+    def _render_svg_icon_image(renderer: QSvgRenderer, icon_size: int) -> QImage:
+        """Render SVG through a supersampled surface to reduce jagged edges."""
+        target_size = max(1, int(icon_size))
+        oversample = max(1, int(SVG_ICON_RENDER_OVERSAMPLE))
+        render_size = target_size * oversample
+
+        render_pixmap = QPixmap(render_size, render_size)
+        render_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(render_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(painter)
+        painter.end()
+
+        if oversample > 1:
+            render_pixmap = render_pixmap.scaled(
+                target_size,
+                target_size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        return render_pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+
     icon_path = Path(__file__).resolve().parent / filename
     if icon_path.is_file():
         renderer = QSvgRenderer(str(icon_path))
         if not renderer.isValid():
             return QIcon()
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        renderer.render(painter)
-        painter.end()
-
-        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        image = _render_svg_icon_image(renderer, size)
         target = QColor(color)
         for y in range(image.height()):
             for x in range(image.width()):
                 pixel = image.pixelColor(x, y)
                 alpha = pixel.alpha()
-                if alpha < 16:
+                if alpha < SVG_ICON_ALPHA_CUTOFF:
                     image.setPixelColor(x, y, QColor(0, 0, 0, 0))
                     continue
                 image.setPixelColor(
@@ -917,29 +936,45 @@ def _load_svg_icon_two_tone(
     size: int = 16,
 ) -> QIcon:
     """Load local SVG and recolor dark/light tones while preserving alpha edges."""
+    def _render_svg_icon_image(renderer: QSvgRenderer, icon_size: int) -> QImage:
+        """Render SVG through a supersampled surface to reduce jagged edges."""
+        target_size = max(1, int(icon_size))
+        oversample = max(1, int(SVG_ICON_RENDER_OVERSAMPLE))
+        render_size = target_size * oversample
+
+        render_pixmap = QPixmap(render_size, render_size)
+        render_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(render_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(painter)
+        painter.end()
+
+        if oversample > 1:
+            render_pixmap = render_pixmap.scaled(
+                target_size,
+                target_size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        return render_pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+
     icon_path = Path(__file__).resolve().parent / filename
     if not icon_path.is_file():
         return QIcon()
     renderer = QSvgRenderer(str(icon_path))
     if not renderer.isValid():
         return QIcon()
-
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    renderer.render(painter)
-    painter.end()
-
-    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    image = _render_svg_icon_image(renderer, size)
     dark = QColor(dark_color)
     light = QColor(light_color)
     for y in range(image.height()):
         for x in range(image.width()):
             pixel = image.pixelColor(x, y)
             alpha = pixel.alpha()
-            if alpha < 16:
+            if alpha < SVG_ICON_ALPHA_CUTOFF:
                 image.setPixelColor(x, y, QColor(0, 0, 0, 0))
                 continue
             # Interpolate between dark and light targets by source luminance so
@@ -962,6 +997,81 @@ def _load_svg_icon_two_tone(
             )
             image.setPixelColor(x, y, QColor(red, green, blue, alpha))
     return QIcon(QPixmap.fromImage(image))
+
+
+def _load_png_icon_two_tone(
+    filename: str,
+    dark_color: QColor,
+    light_color: QColor,
+    size: int = 16,
+) -> QIcon:
+    """Load local PNG and map dark/light tones while preserving alpha edges."""
+    icon_path = Path(__file__).resolve().parent / filename
+    if not icon_path.is_file():
+        return QIcon()
+
+    source = QImage(str(icon_path)).convertToFormat(QImage.Format.Format_ARGB32)
+    if source.isNull():
+        return QIcon()
+
+    target_size = max(1, int(size))
+    # Raster assets benefit most from keeping a larger working canvas before
+    # final downscale so edge antialiasing stays smooth at tiny tab-icon sizes.
+    oversample = max(1, int(SVG_ICON_RENDER_OVERSAMPLE))
+    working_size = target_size * oversample
+
+    working = QPixmap(working_size, working_size)
+    working.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(working)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    fitted = QPixmap.fromImage(source).scaled(
+        working_size,
+        working_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    x = (working_size - fitted.width()) // 2
+    y = (working_size - fitted.height()) // 2
+    painter.drawPixmap(x, y, fitted)
+    painter.end()
+
+    image = working.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    dark = QColor(dark_color)
+    light = QColor(light_color)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            pixel = image.pixelColor(x, y)
+            alpha = pixel.alpha()
+            if alpha < SVG_ICON_ALPHA_CUTOFF:
+                image.setPixelColor(x, y, QColor(0, 0, 0, 0))
+                continue
+
+            luminance = (
+                (0.299 * pixel.redF())
+                + (0.587 * pixel.greenF())
+                + (0.114 * pixel.blueF())
+            )
+            luminance = max(0.0, min(1.0, luminance))
+            red = int(
+                round((dark.red() * (1.0 - luminance)) + (light.red() * luminance))
+            )
+            green = int(
+                round((dark.green() * (1.0 - luminance)) + (light.green() * luminance))
+            )
+            blue = int(
+                round((dark.blue() * (1.0 - luminance)) + (light.blue() * luminance))
+            )
+            image.setPixelColor(x, y, QColor(red, green, blue, alpha))
+
+    final_pixmap = QPixmap.fromImage(image).scaled(
+        target_size,
+        target_size,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    return QIcon(final_pixmap)
 
 
 class ColorizedMarkdownModel(QFileSystemModel):
@@ -6218,17 +6328,21 @@ class ViewTabBar(QTabBar):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._home_icon = _load_svg_icon_two_tone(
-            "home2.svg",
+        self._home_icon = _load_png_icon_two_tone(
+            "home3.png",
             QColor("#425066"),
-            QColor("#425066"),
-            # QColor("#f8fafc"),
-            # QColor("#f8fafc"),
+            QColor("#f8fafc"),
+            size=64,
         )
         if self._home_icon.isNull():
-            self._home_icon = self.style().standardIcon(
-                QStyle.StandardPixmap.SP_DirHomeIcon
+            self._home_icon = _load_svg_icon_two_tone(
+                "home3.svg",
+                QColor("#425066"),
+                QColor("#f8fafc"),
+                size=64,
             )
+        if self._home_icon.isNull():
+            self._home_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirHomeIcon)
         # Drag state is tracked here instead of relying on Qt's default drag
         # ghost so the whole tab, not just the close button, appears to move.
         self._drag_candidate_index = -1
@@ -6606,6 +6720,8 @@ class ViewTabBar(QTabBar):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         for tab_index in range(self.count()):
             if self._dragging_index >= 0 and tab_index == self._dragging_index:
