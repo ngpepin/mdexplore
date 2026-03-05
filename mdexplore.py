@@ -25,8 +25,41 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
-from PySide6.QtCore import QDir, QEventLoop, QMarginsF, QMimeData, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QOffscreenSurface, QOpenGLContext, QPainter, QPageLayout, QPageSize, QPalette, QPen, QPixmap, QPolygon, QSurfaceFormat
+from PySide6.QtCore import (
+    QDir,
+    QEventLoop,
+    QMarginsF,
+    QMimeData,
+    QObject,
+    QPoint,
+    QRect,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QClipboard,
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QOffscreenSurface,
+    QOpenGLContext,
+    QPainter,
+    QPageLayout,
+    QPageSize,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygon,
+    QSurfaceFormat,
+)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -73,7 +106,7 @@ MERMAID_BACKEND_RUST = "rust"
 # resulting largest diagram font would fall below this floor, the diagram is
 # allowed to spill across pages instead. Lower this only if a smaller single-
 # page rendering is preferable to a multi-page spill.
-MIN_PRINT_DIAGRAM_FONT_PT = 3 # 2.4
+MIN_PRINT_DIAGRAM_FONT_PT = 3  # 2.4
 # The corresponding upper cap for print scaling. Diagrams may be shrunk more,
 # but they should never be enlarged beyond roughly this text size.
 MAX_PRINT_DIAGRAM_FONT_PT = 12.0
@@ -86,27 +119,27 @@ PDF_PRINT_LAYOUT_SAFETY_PX = 40
 # single page before immediately falling back to spill mode.
 PDF_PRINT_KEEP_MIN_HEIGHT_PX = 120
 # Letter page size expressed in CSS pixels for Chromium print layout math.
-PDF_PRINT_PORTRAIT_LETTER_WIDTH_PX = 1000 # 816
-PDF_PRINT_PORTRAIT_LETTER_HEIGHT_PX = 1310 # 1056
-PDF_PRINT_LANDSCAPE_LETTER_WIDTH_PX = 1100 # 1056
-PDF_PRINT_LANDSCAPE_LETTER_HEIGHT_PX = 860 # 816
+PDF_PRINT_PORTRAIT_LETTER_WIDTH_PX = 1000  # 816
+PDF_PRINT_PORTRAIT_LETTER_HEIGHT_PX = 1310  # 1056
+PDF_PRINT_LANDSCAPE_LETTER_WIDTH_PX = 1100  # 1056
+PDF_PRINT_LANDSCAPE_LETTER_HEIGHT_PX = 860  # 816
 # Effective horizontal/vertical print margins removed from the page-size budget
 # when deciding whether a diagram can fit in portrait or landscape.
-PDF_PRINT_HORIZONTAL_MARGIN_PX = 80 # 96
-PDF_PRINT_VERTICAL_MARGIN_PX = 130 # 140
+PDF_PRINT_HORIZONTAL_MARGIN_PX = 80  # 96
+PDF_PRINT_VERTICAL_MARGIN_PX = 130  # 140
 # Floor values keep printable dimensions sane if the margin calculation would
 # otherwise leave an unrealistically small viewport for fit heuristics.
-PDF_PRINT_PORTRAIT_MIN_WIDTH_PX = 320 # 320
-PDF_PRINT_PORTRAIT_MIN_HEIGHT_PX = 320 # 320
-PDF_PRINT_LANDSCAPE_MIN_WIDTH_PX = 360 # 360
-PDF_PRINT_LANDSCAPE_MIN_HEIGHT_PX = 260 # 260
+PDF_PRINT_PORTRAIT_MIN_WIDTH_PX = 320  # 320
+PDF_PRINT_PORTRAIT_MIN_HEIGHT_PX = 320  # 320
+PDF_PRINT_LANDSCAPE_MIN_WIDTH_PX = 360  # 360
+PDF_PRINT_LANDSCAPE_MIN_HEIGHT_PX = 260  # 260
 # Wide diagrams become landscape candidates only when their aspect ratio and
 # expected width gain clear these thresholds.
-PDF_PRINT_WIDE_DIAGRAM_ASPECT_RATIO = 1.19 # 1.25
-PDF_PRINT_WIDE_DIAGRAM_LANDSCAPE_GAIN = 1.06 # 1.08
+PDF_PRINT_WIDE_DIAGRAM_ASPECT_RATIO = 1.19  # 1.25
+PDF_PRINT_WIDE_DIAGRAM_LANDSCAPE_GAIN = 1.06  # 1.08
 # PlantUML tends to benefit from landscape a bit earlier than Mermaid, so it
 # has its own aspect-ratio threshold.
-PDF_PRINT_PLANTUML_LANDSCAPE_ASPECT_RATIO = 1.18 # 1.18
+PDF_PRINT_PLANTUML_LANDSCAPE_ASPECT_RATIO = 1.18  # 1.18
 # QWebEngineView.setHtml uses an internal data URL path with practical size
 # limits; large inline-SVG documents can fail to load. Use file-based loading
 # above this threshold.
@@ -136,7 +169,9 @@ def _configure_qt_graphics_fallback() -> None:
         os.environ["QT_OPENGL"] = "software"
     chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     if "--disable-gpu" not in chromium_flags.split():
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{chromium_flags} --disable-gpu".strip()
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+            f"{chromium_flags} --disable-gpu".strip()
+        )
 
 
 def _gpu_context_available() -> bool:
@@ -146,7 +181,11 @@ def _gpu_context_available() -> bool:
     qt_opengl = os.environ.get("QT_OPENGL", "").strip().lower()
     chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
 
-    if qt_quick_backend == "software" or qsg_rhi_backend == "software" or qt_opengl == "software":
+    if (
+        qt_quick_backend == "software"
+        or qsg_rhi_backend == "software"
+        or qt_opengl == "software"
+    ):
         return False
     if "--disable-gpu" in chromium_flags:
         return False
@@ -237,7 +276,9 @@ def _extract_plantuml_error_details(stderr_text: str) -> str:
     return "\n".join(lines[:8])
 
 
-def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | None = None) -> bytes:
+def _stamp_pdf_page_numbers(
+    pdf_bytes: bytes, layout_hints: dict[str, object] | None = None
+) -> bytes:
     """Overlay centered `N of M` footers on every page of a PDF payload."""
     if not pdf_bytes:
         raise ValueError("Empty PDF payload")
@@ -250,7 +291,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
     try:
         from reportlab.pdfgen import canvas
     except Exception as exc:
-        raise RuntimeError("Missing dependency 'reportlab' for PDF page numbering") from exc
+        raise RuntimeError(
+            "Missing dependency 'reportlab' for PDF page numbering"
+        ) from exc
 
     reader = PdfReader(BytesIO(pdf_bytes))
     layout_hints = layout_hints if isinstance(layout_hints, dict) else {}
@@ -279,7 +322,8 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
     normalized_page_texts = [normalize_text(text) for text in raw_page_texts]
     landscape_token = normalize_text("__MDEXPLORE_LANDSCAPE_PAGE__")
     landscape_flags = [
-        (landscape_token in page_text) or any(heading and heading in page_text for heading in landscape_headings)
+        (landscape_token in page_text)
+        or any(heading and heading in page_text for heading in landscape_headings)
         for page_text in normalized_page_texts
     ]
     diagram_page_flags = [
@@ -303,7 +347,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
             return [None] * len(reader.pages)
 
         try:
-            with tempfile.TemporaryDirectory(prefix="mdexplore-pdf-bounds-") as tmpdir_str:
+            with tempfile.TemporaryDirectory(
+                prefix="mdexplore-pdf-bounds-"
+            ) as tmpdir_str:
                 tmpdir = Path(tmpdir_str)
                 pdf_path = tmpdir / "input.pdf"
                 prefix = tmpdir / "page"
@@ -317,7 +363,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
                 if result.returncode != 0:
                     return [None] * len(reader.pages)
 
-                bounds_by_index: list[tuple[float, float, float, float] | None] = [None] * len(reader.pages)
+                bounds_by_index: list[tuple[float, float, float, float] | None] = [
+                    None
+                ] * len(reader.pages)
                 image_paths = sorted(tmpdir.glob("page-*.png"))
                 for image_path in image_paths:
                     match = re.search(r"-(\d+)\.png$", image_path.name)
@@ -362,7 +410,12 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
                     crop_bottom = ((maxy + 1) / height_px) * page_height
                     lower_y = max(0.0, page_height - crop_bottom)
                     upper_y = min(page_height, page_height - crop_top)
-                    bounds_by_index[page_index] = (crop_left, lower_y, crop_right, upper_y)
+                    bounds_by_index[page_index] = (
+                        crop_left,
+                        lower_y,
+                        crop_right,
+                        upper_y,
+                    )
                 return bounds_by_index
         except Exception:
             return [None] * len(reader.pages)
@@ -465,7 +518,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
     def estimate_majority_font_size() -> float:
         """Infer dominant body font size from PDF text operators."""
         size_counts: dict[float, int] = {}
-        for page, _is_landscape, _is_diagram_page, _crop_bounds in kept_page_records[: min(5, page_total)]:
+        for page, _is_landscape, _is_diagram_page, _crop_bounds in kept_page_records[
+            : min(5, page_total)
+        ]:
             try:
                 contents = page.get_contents()
             except Exception:
@@ -493,7 +548,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
 
         if not size_counts:
             return 10.5
-        return max(size_counts.items(), key=lambda item: (item[1], -abs(item[0] - 11.0)))[0]
+        return max(
+            size_counts.items(), key=lambda item: (item[1], -abs(item[0] - 11.0))
+        )[0]
 
     def estimate_page_diagram_font_size(page) -> float:
         """Approximate the largest non-heading font size used on a page."""
@@ -528,7 +585,12 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
     base_body_font_size = estimate_majority_font_size()
 
     writer = PdfWriter()
-    for page_number, (page, is_landscape_page, is_diagram_page, crop_bounds) in enumerate(kept_page_records, start=1):
+    for page_number, (
+        page,
+        is_landscape_page,
+        is_diagram_page,
+        crop_bounds,
+    ) in enumerate(kept_page_records, start=1):
         source_width = float(page.mediabox.width)
         source_height = float(page.mediabox.height)
         if source_width <= 0 or source_height <= 0:
@@ -555,7 +617,9 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
         # top/side margins plus a dedicated footer band for page numbers.
         side_margin = max(34.0, min(page_width * 0.12, base_body_font_size * 4.2))
         top_margin = max(30.0, min(page_height * 0.10, base_body_font_size * 3.8))
-        footer_band_height = max(42.0, min(page_height * 0.16, base_body_font_size * 4.4))
+        footer_band_height = max(
+            42.0, min(page_height * 0.16, base_body_font_size * 4.4)
+        )
         content_box_width = max(72.0, page_width - (2.0 * side_margin))
         content_box_height = max(72.0, page_height - top_margin - footer_band_height)
 
@@ -573,20 +637,33 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
         )
         content_width = content_source_width * content_scale
         content_height = content_source_height * content_scale
-        content_translate_x = side_margin + max(0.0, (content_box_width - content_width) / 2.0)
-        content_translate_y = footer_band_height + max(0.0, (content_box_height - content_height) / 2.0)
+        content_translate_x = side_margin + max(
+            0.0, (content_box_width - content_width) / 2.0
+        )
+        content_translate_y = footer_band_height + max(
+            0.0, (content_box_height - content_height) / 2.0
+        )
 
-        composed_page = PageObject.create_blank_page(width=page_width, height=page_height)
+        composed_page = PageObject.create_blank_page(
+            width=page_width, height=page_height
+        )
         if is_landscape_page:
             transform = (
                 Transformation()
                 .scale(content_scale, content_scale)
-                .translate(content_translate_x - (crop_left * content_scale), content_translate_y - (crop_bottom * content_scale))
+                .translate(
+                    content_translate_x - (crop_left * content_scale),
+                    content_translate_y - (crop_bottom * content_scale),
+                )
             )
         else:
-            transform = Transformation().scale(content_scale, content_scale).translate(
-                content_translate_x - (crop_left * content_scale),
-                content_translate_y - (crop_bottom * content_scale),
+            transform = (
+                Transformation()
+                .scale(content_scale, content_scale)
+                .translate(
+                    content_translate_x - (crop_left * content_scale),
+                    content_translate_y - (crop_bottom * content_scale),
+                )
             )
         composed_page.merge_transformed_page(page, transform, over=True)
 
@@ -594,10 +671,14 @@ def _stamp_pdf_page_numbers(pdf_bytes: bytes, layout_hints: dict[str, object] | 
         footer_baseline_y = max(12.0, (footer_band_height - footer_font_size) / 2.0)
 
         overlay_buffer = BytesIO()
-        footer_canvas = canvas.Canvas(overlay_buffer, pagesize=(page_width, page_height))
+        footer_canvas = canvas.Canvas(
+            overlay_buffer, pagesize=(page_width, page_height)
+        )
         footer_canvas.setFont("Helvetica", footer_font_size)
         footer_text = f"{page_number} of {page_total}"
-        footer_width = footer_canvas.stringWidth(footer_text, "Helvetica", footer_font_size)
+        footer_width = footer_canvas.stringWidth(
+            footer_text, "Helvetica", footer_font_size
+        )
         x = max(0.0, (page_width - footer_width) / 2.0)
         footer_canvas.drawString(x, footer_baseline_y, footer_text)
         footer_canvas.save()
@@ -617,7 +698,11 @@ def _build_markdown_icon() -> QIcon:
     """Return a standard markdown icon (theme icon with a drawn fallback)."""
 
     def color_distance(a: QColor, b: QColor) -> int:
-        return abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue())
+        return (
+            abs(a.red() - b.red())
+            + abs(a.green() - b.green())
+            + abs(a.blue() - b.blue())
+        )
 
     def transparentize_outer_background(pixmap: QPixmap) -> QPixmap:
         # Convert border-connected background pixels to transparent while
@@ -710,7 +795,9 @@ def _build_markdown_icon() -> QIcon:
         if maxx < minx or maxy < miny:
             return pixmap
 
-        cropped = QPixmap.fromImage(image.copy(minx, miny, maxx - minx + 1, maxy - miny + 1))
+        cropped = QPixmap.fromImage(
+            image.copy(minx, miny, maxx - minx + 1, maxy - miny + 1)
+        )
 
         size = 256
         # Keep only a tiny safety inset so icon art occupies as much of the
@@ -718,7 +805,12 @@ def _build_markdown_icon() -> QIcon:
         inset = 2
         max_w = size - (2 * inset)
         max_h = size - (2 * inset)
-        scaled = cropped.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled = cropped.scaled(
+            max_w,
+            max_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
         canvas = QPixmap(size, size)
         canvas.fill(Qt.GlobalColor.transparent)
@@ -811,9 +903,65 @@ def _load_svg_icon(filename: str, color: QColor, size: int = 16) -> QIcon:
                 if alpha < 16:
                     image.setPixelColor(x, y, QColor(0, 0, 0, 0))
                     continue
-                image.setPixelColor(x, y, QColor(target.red(), target.green(), target.blue(), alpha))
+                image.setPixelColor(
+                    x, y, QColor(target.red(), target.green(), target.blue(), alpha)
+                )
         return QIcon(QPixmap.fromImage(image))
     return QIcon()
+
+
+def _load_svg_icon_two_tone(
+    filename: str,
+    dark_color: QColor,
+    light_color: QColor,
+    size: int = 16,
+) -> QIcon:
+    """Load local SVG and recolor dark/light tones while preserving alpha edges."""
+    icon_path = Path(__file__).resolve().parent / filename
+    if not icon_path.is_file():
+        return QIcon()
+    renderer = QSvgRenderer(str(icon_path))
+    if not renderer.isValid():
+        return QIcon()
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(painter)
+    painter.end()
+
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    dark = QColor(dark_color)
+    light = QColor(light_color)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            pixel = image.pixelColor(x, y)
+            alpha = pixel.alpha()
+            if alpha < 16:
+                image.setPixelColor(x, y, QColor(0, 0, 0, 0))
+                continue
+            # Interpolate between dark and light targets by source luminance so
+            # black -> dark_color, white -> light_color, and antialiased edges
+            # keep smooth gradients.
+            luminance = (
+                (0.299 * pixel.redF())
+                + (0.587 * pixel.greenF())
+                + (0.114 * pixel.blueF())
+            )
+            luminance = max(0.0, min(1.0, luminance))
+            red = int(
+                round((dark.red() * (1.0 - luminance)) + (light.red() * luminance))
+            )
+            green = int(
+                round((dark.green() * (1.0 - luminance)) + (light.green() * luminance))
+            )
+            blue = int(
+                round((dark.blue() * (1.0 - luminance)) + (light.blue() * luminance))
+            )
+            image.setPixelColor(x, y, QColor(red, green, blue, alpha))
+    return QIcon(QPixmap.fromImage(image))
 
 
 class ColorizedMarkdownModel(QFileSystemModel):
@@ -859,8 +1007,14 @@ class ColorizedMarkdownModel(QFileSystemModel):
                 if color_name:
                     color = QColor(color_name)
                     if color.isValid():
-                        luminance = (0.299 * color.redF()) + (0.587 * color.greenF()) + (0.114 * color.blueF())
-                        return QBrush(QColor("#101418") if luminance > 0.6 else QColor("#f8fafc"))
+                        luminance = (
+                            (0.299 * color.redF())
+                            + (0.587 * color.greenF())
+                            + (0.114 * color.blueF())
+                        )
+                        return QBrush(
+                            QColor("#101418") if luminance > 0.6 else QColor("#f8fafc")
+                        )
         if role == Qt.ItemDataRole.FontRole:
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
@@ -919,7 +1073,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
             # Permission errors are expected in some trees; skip quietly.
             return
 
-        for dirpath, _dirnames, _filenames in os.walk(root, onerror=on_walk_error, followlinks=False):
+        for dirpath, _dirnames, _filenames in os.walk(
+            root, onerror=on_walk_error, followlinks=False
+        ):
             directory = Path(dirpath)
             color_map = self._load_directory_colors(directory)
             for file_name, file_color in color_map.items():
@@ -947,7 +1103,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
             # Permission errors are expected in some trees; skip quietly.
             return
 
-        for dirpath, _dirnames, _filenames in os.walk(root, onerror=on_walk_error, followlinks=False):
+        for dirpath, _dirnames, _filenames in os.walk(
+            root, onerror=on_walk_error, followlinks=False
+        ):
             directory = Path(dirpath)
             color_map = self._load_directory_colors(directory)
             if not color_map:
@@ -1017,7 +1175,10 @@ class ColorizedMarkdownModel(QFileSystemModel):
         try:
             if color_map:
                 payload = {"files": dict(sorted(color_map.items()))}
-                color_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                color_file.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
             elif color_file.exists():
                 color_file.unlink()
         except Exception:
@@ -1028,7 +1189,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
     def decorated_icon_size(cls) -> QSize:
         return QSize(cls._GUTTER_WIDTH + cls._ICON_SIZE, cls._ICON_SIZE)
 
-    def _decorated_markdown_icon(self, has_multi_view: bool, has_search_match: bool) -> QIcon:
+    def _decorated_markdown_icon(
+        self, has_multi_view: bool, has_search_match: bool
+    ) -> QIcon:
         cache_key = (has_multi_view, has_search_match)
         cached = self._decorated_icon_cache.get(cache_key)
         if cached is not None:
@@ -1050,7 +1213,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
             search_y = max(0, (self._ICON_SIZE - self._SEARCH_ICON_SIZE) // 2)
             painter.drawPixmap(search_x, search_y, search_pixmap)
         if has_multi_view:
-            views_pixmap = self._views_icon.pixmap(self._VIEWS_ICON_SIZE, self._VIEWS_ICON_SIZE)
+            views_pixmap = self._views_icon.pixmap(
+                self._VIEWS_ICON_SIZE, self._VIEWS_ICON_SIZE
+            )
             views_x = self._SEARCH_SLOT_WIDTH + self._ICON_GAP
             views_y = max(0, (self._ICON_SIZE - self._VIEWS_ICON_SIZE) // 2)
             painter.drawPixmap(views_x, views_y, views_pixmap)
@@ -1091,7 +1256,9 @@ class MarkdownTreeItemDelegate(QStyledItemDelegate):
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
 
-        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        text_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget
+        )
         highlight_rect = text_rect.adjusted(-2, 1, 2, -1)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1100,11 +1267,17 @@ class MarkdownTreeItemDelegate(QStyledItemDelegate):
         painter.restore()
 
         foreground = model.highlight_foreground_for_path(file_path)
-        text_color = foreground if foreground is not None else opt.palette.color(QPalette.ColorRole.Text)
+        text_color = (
+            foreground
+            if foreground is not None
+            else opt.palette.color(QPalette.ColorRole.Text)
+        )
         painter.save()
         painter.setFont(opt.font)
         painter.setPen(text_color)
-        elided_text = opt.fontMetrics.elidedText(opt.text, opt.textElideMode, text_rect.width())
+        elided_text = opt.fontMetrics.elidedText(
+            opt.text, opt.textElideMode, text_rect.width()
+        )
         alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
         painter.drawText(text_rect, alignment, elided_text)
         painter.restore()
@@ -1116,12 +1289,20 @@ class MarkdownRenderer:
     def __init__(self, mermaid_backend: str = MERMAID_BACKEND_JS) -> None:
         # Backend selection is resolved once per renderer so the markdown fence
         # callbacks can stay simple and deterministic.
-        self._mermaid_backend_requested = str(mermaid_backend or MERMAID_BACKEND_JS).strip().lower()
-        if self._mermaid_backend_requested not in {MERMAID_BACKEND_JS, MERMAID_BACKEND_RUST}:
+        self._mermaid_backend_requested = (
+            str(mermaid_backend or MERMAID_BACKEND_JS).strip().lower()
+        )
+        if self._mermaid_backend_requested not in {
+            MERMAID_BACKEND_JS,
+            MERMAID_BACKEND_RUST,
+        }:
             self._mermaid_backend_requested = MERMAID_BACKEND_JS
         self._mermaid_rs_binary = self._resolve_mermaid_rs_binary()
         self._mermaid_rs_setup_issue = self._mermaid_rs_setup_error()
-        if self._mermaid_backend_requested == MERMAID_BACKEND_RUST and self._mermaid_rs_setup_issue is None:
+        if (
+            self._mermaid_backend_requested == MERMAID_BACKEND_RUST
+            and self._mermaid_rs_setup_issue is None
+        ):
             self._mermaid_backend = MERMAID_BACKEND_RUST
         else:
             self._mermaid_backend = MERMAID_BACKEND_JS
@@ -1132,10 +1313,14 @@ class MarkdownRenderer:
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
         self._plantuml_setup_issue = self._plantuml_setup_error()
         self._plantuml_svg_cache: dict[str, str] = {}
-        self._md = MarkdownIt(
-            "commonmark",
-            {"html": True, "linkify": True, "typographer": True},
-        ).enable("table").enable("strikethrough")
+        self._md = (
+            MarkdownIt(
+                "commonmark",
+                {"html": True, "linkify": True, "typographer": True},
+            )
+            .enable("table")
+            .enable("strikethrough")
+        )
         # Parse $...$ / $$...$$ as dedicated math tokens before markdown
         # emphasis/underscore rules run, preventing TeX corruption.
         self._md.use(dollarmath_plugin)
@@ -1173,19 +1358,30 @@ class MarkdownRenderer:
                     # it. The hash is the cache key shared by preview, restore,
                     # and PDF-specific SVG variants.
                     prepared_source = self._prepare_mermaid_source(code)
-                    mermaid_hash = hashlib.sha1(prepared_source.encode("utf-8", errors="replace")).hexdigest()
-                    mermaid_index = int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
+                    mermaid_hash = hashlib.sha1(
+                        prepared_source.encode("utf-8", errors="replace")
+                    ).hexdigest()
+                    mermaid_index = (
+                        int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
+                    )
                     if isinstance(env, dict):
                         env["mermaid_index"] = mermaid_index + 1
                     if self._mermaid_backend == MERMAID_BACKEND_RUST:
                         # Rust preview and PDF SVGs intentionally fork here:
                         # preview gets mdexplore's GUI profile, while PDF gets
                         # a separate vanilla render cached for export only.
-                        svg_markup, error_message = self._render_mermaid_svg_markup(prepared_source, "preview")
+                        svg_markup, error_message = self._render_mermaid_svg_markup(
+                            prepared_source, "preview"
+                        )
                         if isinstance(env, dict):
                             pdf_svg_map = env.get("mermaid_pdf_svg_by_hash")
-                            if isinstance(pdf_svg_map, dict) and mermaid_hash not in pdf_svg_map:
-                                pdf_svg, _pdf_error = self._render_mermaid_svg_markup(prepared_source, "pdf")
+                            if (
+                                isinstance(pdf_svg_map, dict)
+                                and mermaid_hash not in pdf_svg_map
+                            ):
+                                pdf_svg, _pdf_error = self._render_mermaid_svg_markup(
+                                    prepared_source, "pdf"
+                                )
                                 if pdf_svg:
                                     pdf_svg_map[mermaid_hash] = pdf_svg
                         source_attr = html.escape(prepared_source, quote=True)
@@ -1198,7 +1394,9 @@ class MarkdownRenderer:
                                 f'data-mdexplore-mermaid-source="{source_attr}">\n{svg_markup}\n</div>'
                                 "</div>\n"
                             )
-                        safe_error_attr = html.escape(error_message or "Rust Mermaid rendering failed", quote=True)
+                        safe_error_attr = html.escape(
+                            error_message or "Rust Mermaid rendering failed", quote=True
+                        )
                         return (
                             f'<div class="mdexplore-fence"{line_attrs}>'
                             f'<div class="mermaid mermaid-rust-fallback" data-mdexplore-mermaid-backend="rust" '
@@ -1217,7 +1415,9 @@ class MarkdownRenderer:
                         "</div>\n"
                     )
                 except Exception as exc:
-                    safe_error = html.escape(str(exc) or "unexpected Mermaid rendering error")
+                    safe_error = html.escape(
+                        str(exc) or "unexpected Mermaid rendering error"
+                    )
                     return (
                         f'<div class="mdexplore-fence mermaid-error"{line_attrs}>'
                         f'<div class="mermaid mermaid-error">Mermaid render failed: {safe_error}</div>'
@@ -1228,7 +1428,9 @@ class MarkdownRenderer:
                 # PlantUML takes a different path because preview rendering is
                 # progressive and may complete after the rest of the markdown is
                 # already visible.
-                resolver = env.get("plantuml_resolver") if isinstance(env, dict) else None
+                resolver = (
+                    env.get("plantuml_resolver") if isinstance(env, dict) else None
+                )
                 if callable(resolver):
                     plantuml_index = int(env.get("plantuml_index", 0))
                     env["plantuml_index"] = plantuml_index + 1
@@ -1242,7 +1444,9 @@ class MarkdownRenderer:
                         "</div>\n"
                     )
 
-                escaped_error = html.escape(error_message or "PlantUML rendering failed")
+                escaped_error = html.escape(
+                    error_message or "PlantUML rendering failed"
+                )
                 escaped_code = html.escape(code)
                 return (
                     f'<div class="mdexplore-fence plantuml-error"{line_attrs}>'
@@ -1257,7 +1461,12 @@ class MarkdownRenderer:
             # Attach source-line metadata so preview selections can map back
             # to source markdown ranges for copy operations.
             token = tokens[idx]
-            if token.nesting == 1 and token.type.endswith("_open") and token.map and len(token.map) == 2:
+            if (
+                token.nesting == 1
+                and token.type.endswith("_open")
+                and token.map
+                and len(token.map) == 2
+            ):
                 token.attrSet("data-md-line-start", str(token.map[0]))
                 token.attrSet("data-md-line-end", str(token.map[1]))
             return default_render_token(tokens, idx, options, env)
@@ -1279,7 +1488,10 @@ class MarkdownRenderer:
 
     def mermaid_backend_warning(self) -> str | None:
         """Describe why requested Mermaid backend could not be activated."""
-        if self._mermaid_backend_requested == MERMAID_BACKEND_RUST and self._mermaid_backend != MERMAID_BACKEND_RUST:
+        if (
+            self._mermaid_backend_requested == MERMAID_BACKEND_RUST
+            and self._mermaid_backend != MERMAID_BACKEND_RUST
+        ):
             return self._mermaid_rs_setup_issue or "Rust Mermaid backend unavailable"
         return None
 
@@ -1294,7 +1506,12 @@ class MarkdownRenderer:
         candidates.extend(
             [
                 Path.home() / ".cargo" / "bin" / "mmdr",
-                app_dir / "vendor" / "mermaid-rs-renderer" / "target" / "release" / "mmdr",
+                app_dir
+                / "vendor"
+                / "mermaid-rs-renderer"
+                / "target"
+                / "release"
+                / "mmdr",
                 app_dir / "vendor" / "mermaid-rs-renderer" / "mmdr",
                 app_dir / "vendor" / "mermaid-rs-renderer" / "bin" / "mmdr",
                 app_dir / "mermaid-rs-renderer" / "target" / "release" / "mmdr",
@@ -1327,7 +1544,9 @@ class MarkdownRenderer:
             )
         return None
 
-    def _render_mermaid_svg_markup(self, code: str, render_profile: str = "preview") -> tuple[str | None, str | None]:
+    def _render_mermaid_svg_markup(
+        self, code: str, render_profile: str = "preview"
+    ) -> tuple[str | None, str | None]:
         """Render Mermaid source through Rust mmdr backend and return raw SVG."""
         if self._mermaid_rs_setup_issue is not None:
             return None, self._mermaid_rs_setup_issue
@@ -1340,7 +1559,12 @@ class MarkdownRenderer:
         prepared_source = self._prepare_mermaid_source(code)
         if profile == "preview":
             rust_theme_config = self._rust_mermaid_theme_config()
-            config_signature = json.dumps(rust_theme_config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            config_signature = json.dumps(
+                rust_theme_config,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
         else:
             # PDF-mode Rust rendering should stay vanilla/default.
             rust_theme_config = None
@@ -1362,19 +1586,25 @@ class MarkdownRenderer:
         tmp_output_path = None
         tmp_config_path = None
         try:
-            input_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".mmd", delete=False)
+            input_file = tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", suffix=".mmd", delete=False
+            )
             tmp_input_path = Path(input_file.name)
             input_file.write(prepared_source)
             input_file.flush()
             input_file.close()
 
-            output_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".svg", delete=False)
+            output_file = tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", suffix=".svg", delete=False
+            )
             tmp_output_path = Path(output_file.name)
             output_file.close()
 
             candidate_commands = []
             if profile == "preview":
-                config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+                config_file = tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", suffix=".json", delete=False
+                )
                 tmp_config_path = Path(config_file.name)
                 config_file.write(config_signature)
                 config_file.flush()
@@ -1447,13 +1677,19 @@ class MarkdownRenderer:
                     break
 
             if result is None or result.returncode != 0:
-                error_text = ((result.stderr if result is not None else "") or (result.stdout if result is not None else "") or "").strip()
+                error_text = (
+                    (result.stderr if result is not None else "")
+                    or (result.stdout if result is not None else "")
+                    or ""
+                ).strip()
                 if not error_text:
                     code = result.returncode if result is not None else "unknown"
                     error_text = f"mmdr exited with code {code}"
                 return None, error_text
 
-            svg_markup = tmp_output_path.read_text(encoding="utf-8", errors="replace").strip()
+            svg_markup = tmp_output_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
             if "<svg" not in svg_markup.casefold():
                 return None, "mmdr did not produce SVG output"
             cleaned_svg = (
@@ -1543,8 +1779,12 @@ class MarkdownRenderer:
         # dark preview transparency.
         style_attr = str(root.attrib.get("style", "")).strip()
         if style_attr:
-            style_parts = [part.strip() for part in style_attr.split(";") if part.strip()]
-            kept_parts = [part for part in style_parts if "background" not in part.casefold()]
+            style_parts = [
+                part.strip() for part in style_attr.split(";") if part.strip()
+            ]
+            kept_parts = [
+                part for part in style_parts if "background" not in part.casefold()
+            ]
             if kept_parts:
                 root.set("style", "; ".join(kept_parts))
             else:
@@ -1554,7 +1794,10 @@ class MarkdownRenderer:
         view_h = None
         view_box = str(root.attrib.get("viewBox", "")).strip()
         if view_box:
-            numbers = [float(part) for part in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", view_box)]
+            numbers = [
+                float(part)
+                for part in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", view_box)
+            ]
             if len(numbers) == 4:
                 view_w = numbers[2]
                 view_h = numbers[3]
@@ -1576,12 +1819,18 @@ class MarkdownRenderer:
         for child in list(root):
             if local_name(child.tag).lower() != "rect":
                 continue
-            fill_value = str(child.attrib.get("fill", "")).strip().casefold().replace(" ", "")
+            fill_value = (
+                str(child.attrib.get("fill", "")).strip().casefold().replace(" ", "")
+            )
             if not fill_value:
                 style_text = str(child.attrib.get("style", ""))
-                style_match = re.search(r"(?:^|;)\s*fill\s*:\s*([^;]+)", style_text, flags=re.IGNORECASE)
+                style_match = re.search(
+                    r"(?:^|;)\s*fill\s*:\s*([^;]+)", style_text, flags=re.IGNORECASE
+                )
                 if style_match:
-                    fill_value = style_match.group(1).strip().casefold().replace(" ", "")
+                    fill_value = (
+                        style_match.group(1).strip().casefold().replace(" ", "")
+                    )
             if fill_value not in white_fill_values:
                 continue
 
@@ -1590,7 +1839,12 @@ class MarkdownRenderer:
             w = cls._parse_svg_length(child.attrib.get("width"))
             h = cls._parse_svg_length(child.attrib.get("height"))
             if view_w and view_h and w and h:
-                covers_canvas = x <= 1.0 and y <= 1.0 and w >= (view_w * 0.97) and h >= (view_h * 0.97)
+                covers_canvas = (
+                    x <= 1.0
+                    and y <= 1.0
+                    and w >= (view_w * 0.97)
+                    and h >= (view_h * 0.97)
+                )
             else:
                 covers_canvas = x <= 1.0 and y <= 1.0
             if not covers_canvas:
@@ -1730,7 +1984,9 @@ class MarkdownRenderer:
     def _render_plantuml_data_uri(self, code: str) -> tuple[str | None, str | None]:
         """Render PlantUML source locally and return an SVG data URI."""
         prepared_code = self._prepare_plantuml_source(code)
-        cache_key = hashlib.sha1(prepared_code.encode("utf-8", errors="replace")).hexdigest()
+        cache_key = hashlib.sha1(
+            prepared_code.encode("utf-8", errors="replace")
+        ).hexdigest()
         cached = self._plantuml_svg_cache.get(cache_key)
         if cached is not None:
             return cached, None
@@ -1824,7 +2080,9 @@ class MarkdownRenderer:
             env["plantuml_index"] = 0
         body = self._md.render(markdown_text, env)
         if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
-            self._last_mermaid_pdf_svg_by_hash = dict(env.get("mermaid_pdf_svg_by_hash") or {})
+            self._last_mermaid_pdf_svg_by_hash = dict(
+                env.get("mermaid_pdf_svg_by_hash") or {}
+            )
         else:
             self._last_mermaid_pdf_svg_by_hash = {}
         escaped_title = html.escape(title)
@@ -1833,7 +2091,9 @@ class MarkdownRenderer:
         mathjax_sources_json = json.dumps(self._mathjax_script_sources())
         mermaid_sources_json = json.dumps(self._mermaid_script_sources())
         mermaid_backend_json = json.dumps(self._mermaid_backend)
-        total_source_lines_json = json.dumps(max(1, int(total_lines or (markdown_text.count("\n") + 1))))
+        total_source_lines_json = json.dumps(
+            max(1, int(total_lines or (markdown_text.count("\n") + 1)))
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -5799,7 +6059,9 @@ class PreviewRenderWorker(QRunnable):
             markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
             renderer = MarkdownRenderer()
             total_lines = MdExploreWindow._count_markdown_lines(markdown_text)
-            html_doc = renderer.render_document(markdown_text, resolved.name, total_lines=total_lines)
+            html_doc = renderer.render_document(
+                markdown_text, resolved.name, total_lines=total_lines
+            )
             self.signals.finished.emit(
                 self.request_id,
                 str(resolved),
@@ -5822,7 +6084,13 @@ class PlantUmlRenderWorkerSignals(QObject):
 class PlantUmlRenderWorker(QRunnable):
     """Render one PlantUML source block to SVG data URI in background."""
 
-    def __init__(self, hash_key: str, prepared_code: str, jar_path: Path | None, setup_issue: str | None):
+    def __init__(
+        self,
+        hash_key: str,
+        prepared_code: str,
+        jar_path: Path | None,
+        setup_issue: str | None,
+    ):
         super().__init__()
         self.hash_key = hash_key
         self.prepared_code = prepared_code
@@ -5837,7 +6105,9 @@ class PlantUmlRenderWorker(QRunnable):
             self.signals.finished.emit(self.hash_key, "error", self.setup_issue)
             return
         if self.jar_path is None:
-            self.signals.finished.emit(self.hash_key, "error", "plantuml.jar not available")
+            self.signals.finished.emit(
+                self.hash_key, "error", "plantuml.jar not available"
+            )
             return
 
         command = [
@@ -5863,20 +6133,28 @@ class PlantUmlRenderWorker(QRunnable):
                 timeout=20,
             )
         except subprocess.TimeoutExpired:
-            self.signals.finished.emit(self.hash_key, "error", "Local PlantUML render timed out")
+            self.signals.finished.emit(
+                self.hash_key, "error", "Local PlantUML render timed out"
+            )
             return
         except Exception as exc:
-            self.signals.finished.emit(self.hash_key, "error", f"Local PlantUML render failed: {exc}")
+            self.signals.finished.emit(
+                self.hash_key, "error", f"Local PlantUML render failed: {exc}"
+            )
             return
 
         if result.returncode != 0:
             details = _extract_plantuml_error_details(result.stderr or "")
-            self.signals.finished.emit(self.hash_key, "error", f"Local PlantUML render failed: {details}")
+            self.signals.finished.emit(
+                self.hash_key, "error", f"Local PlantUML render failed: {details}"
+            )
             return
 
         svg_text = (result.stdout or "").strip()
         if "<svg" not in svg_text.casefold():
-            self.signals.finished.emit(self.hash_key, "error", "Local PlantUML did not return SVG output")
+            self.signals.finished.emit(
+                self.hash_key, "error", "Local PlantUML did not return SVG output"
+            )
             return
 
         encoded_svg = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
@@ -5893,7 +6171,12 @@ class PdfExportWorkerSignals(QObject):
 class PdfExportWorker(QRunnable):
     """Apply footer page numbers and write exported PDF in background."""
 
-    def __init__(self, output_path: Path, pdf_bytes: bytes, layout_hints: dict[str, object] | None = None):
+    def __init__(
+        self,
+        output_path: Path,
+        pdf_bytes: bytes,
+        layout_hints: dict[str, object] | None = None,
+    ):
         super().__init__()
         self.output_path = output_path
         self.pdf_bytes = pdf_bytes
@@ -5912,6 +6195,8 @@ class PdfExportWorker(QRunnable):
 class ViewTabBar(QTabBar):
     """Custom tab bar that paints dark-theme-friendly pastel tab backgrounds."""
 
+    homeRequested = Signal(int)
+
     PASTEL_SEQUENCE = [
         "#8fb8ff",
         "#9fd8c9",
@@ -5929,9 +6214,21 @@ class ViewTabBar(QTabBar):
     POSITION_BAR_HEIGHT = 8
     POSITION_BAR_TEXT_GAP = 7
     POSITION_BAR_SEGMENTS = 8
+    HOME_ICON_GAP = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._home_icon = _load_svg_icon_two_tone(
+            "home2.svg",
+            QColor("#425066"),
+            QColor("#425066"),
+            # QColor("#f8fafc"),
+            # QColor("#f8fafc"),
+        )
+        if self._home_icon.isNull():
+            self._home_icon = self.style().standardIcon(
+                QStyle.StandardPixmap.SP_DirHomeIcon
+            )
         # Drag state is tracked here instead of relying on Qt's default drag
         # ghost so the whole tab, not just the close button, appears to move.
         self._drag_candidate_index = -1
@@ -5951,7 +6248,45 @@ class ViewTabBar(QTabBar):
     def _is_close_button_hit(self, tab_index: int, pos) -> bool:
         """Detect whether a pointer position targets a tab close button."""
         button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
-        return bool(button is not None and button.isVisible() and button.geometry().contains(pos))
+        return bool(
+            button is not None
+            and button.isVisible()
+            and button.geometry().contains(pos)
+        )
+
+    def _home_icon_size_px(self) -> int:
+        """Size home icon roughly to the close-button glyph size."""
+        close_w = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
+        )
+        close_h = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_TabCloseIndicatorHeight, None, self
+        )
+        icon_size = (
+            min(close_w, close_h)
+            if close_w > 0 and close_h > 0
+            else max(close_w, close_h)
+        )
+        if icon_size <= 0:
+            icon_size = 12
+        icon_size = int(round(icon_size * 1.10))
+        return max(11, min(20, icon_size))
+
+    def _home_icon_rect(self, tab_index: int) -> QRect:
+        """Return home icon hit box for a labeled tab, or empty rect."""
+        if (
+            tab_index < 0
+            or tab_index >= self.count()
+            or not self._tab_has_custom_label(tab_index)
+        ):
+            return QRect()
+        rect = self.tabRect(tab_index).adjusted(2, 2, -2, -1)
+        if rect.width() <= 2 or rect.height() <= 2:
+            return QRect()
+        icon_size = self._home_icon_size_px()
+        icon_x = rect.left() + self.WIDTH_SIDE_PADDING - 1
+        icon_y = rect.center().y() - (icon_size // 2)
+        return QRect(icon_x, icon_y, icon_size, icon_size)
 
     def _set_all_close_buttons_visible(self, visible: bool) -> None:
         """Show/hide close buttons while custom drag ghost is active."""
@@ -6009,6 +6344,10 @@ class ViewTabBar(QTabBar):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self._event_pos(event)
             tab_index = self.tabAt(pos)
+            if tab_index >= 0 and self._home_icon_rect(tab_index).contains(pos):
+                self.homeRequested.emit(tab_index)
+                event.accept()
+                return
             if tab_index >= 0 and not self._is_close_button_hit(tab_index, pos):
                 self._drag_candidate_index = tab_index
                 self._drag_start_pos = pos
@@ -6029,7 +6368,9 @@ class ViewTabBar(QTabBar):
         ):
             pos = self._event_pos(event)
             if self._dragging_index < 0:
-                if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                if (
+                    pos - self._drag_start_pos
+                ).manhattanLength() >= QApplication.startDragDistance():
                     self._begin_tab_drag(self._drag_candidate_index, pos)
             if self._dragging_index >= 0:
                 self._update_tab_drag(pos)
@@ -6079,7 +6420,15 @@ class ViewTabBar(QTabBar):
         color_hex = self.PASTEL_SEQUENCE[color_slot]
         return QColor(color_hex)
 
-    def _paint_single_tab(self, painter: QPainter, tab_index: int, rect, *, selected: bool, force_opaque: bool) -> None:
+    def _paint_single_tab(
+        self,
+        painter: QPainter,
+        tab_index: int,
+        rect,
+        *,
+        selected: bool,
+        force_opaque: bool,
+    ) -> None:
         """Paint one tab using shared logic for static and drag-ghost rendering."""
         base = self._base_color_for_index(tab_index)
         fill = QColor(base)
@@ -6101,9 +6450,21 @@ class ViewTabBar(QTabBar):
         painter.setBrush(fill)
         painter.drawRoundedRect(rect, 6.0, 6.0)
 
+        has_custom_label = self._tab_has_custom_label(tab_index)
+
+        house_offset = 0
+        if has_custom_label:
+            # A house icon marks tabs that have an explicit labeled "beginning".
+            icon_rect = self._home_icon_rect(tab_index)
+            if icon_rect.isValid():
+                icon_pixmap = self._home_icon.pixmap(icon_rect.size())
+                if not icon_pixmap.isNull():
+                    painter.drawPixmap(icon_rect, icon_pixmap)
+                house_offset = icon_rect.width() + self.HOME_ICON_GAP
+
         # Draw a compact segmented bargraph at the left to indicate each
         # tab's approximate position within the current document.
-        bar_x = rect.left() + self.WIDTH_SIDE_PADDING - 1
+        bar_x = rect.left() + self.WIDTH_SIDE_PADDING - 1 + house_offset
         bar_y = rect.center().y() - (self.POSITION_BAR_HEIGHT // 2)
         bar_w = self.POSITION_BAR_WIDTH
         bar_h = self.POSITION_BAR_HEIGHT
@@ -6140,7 +6501,9 @@ class ViewTabBar(QTabBar):
         painter.setPen(Qt.PenStyle.NoPen)
         for segment_index in range(segments):
             segment_x = start_x + (segment_index * (segment_w + segment_gap))
-            segment_color = segment_active if segment_index < filled_segments else segment_inactive
+            segment_color = (
+                segment_active if segment_index < filled_segments else segment_inactive
+            )
             painter.setBrush(segment_color)
             painter.drawRect(segment_x, inner_y, segment_w, inner_h)
 
@@ -6148,13 +6511,17 @@ class ViewTabBar(QTabBar):
         text_rect = rect.adjusted(text_left - rect.left(), 0, -9, 0)
         close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
         if close_button is not None and close_button.isVisible():
-            text_rect.setRight(min(text_rect.right(), close_button.geometry().left() - 4))
+            text_rect.setRight(
+                min(text_rect.right(), close_button.geometry().left() - 4)
+            )
 
         text_color = QColor("#0b1220" if selected else "#1b2436")
         if not self.isTabEnabled(tab_index):
             text_color.setAlpha(130)
         painter.setPen(text_color)
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.tabText(tab_index))
+        painter.drawText(
+            text_rect, Qt.AlignmentFlag.AlignCenter, self.tabText(tab_index)
+        )
 
     def _progress_for_index(self, tab_index: int) -> float:
         """Read normalized document-position progress (0..1) from tab metadata."""
@@ -6174,7 +6541,12 @@ class ViewTabBar(QTabBar):
         text_width = self.fontMetrics().horizontalAdvance(self.WIDTH_TEMPLATE_TEXT)
         close_width = 0
         if self.tabsClosable():
-            close_width = self.style().pixelMetric(QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self) + 8
+            close_width = (
+                self.style().pixelMetric(
+                    QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
+                )
+                + 8
+            )
         return (
             text_width
             + (self.WIDTH_SIDE_PADDING * 2)
@@ -6185,10 +6557,17 @@ class ViewTabBar(QTabBar):
 
     def _tab_width_for_text(self, text: str) -> int:
         """Return tab width for one label, bounded below by the default width."""
-        text_width = self.fontMetrics().horizontalAdvance(text or self.WIDTH_TEMPLATE_TEXT)
+        text_width = self.fontMetrics().horizontalAdvance(
+            text or self.WIDTH_TEMPLATE_TEXT
+        )
         close_width = 0
         if self.tabsClosable():
-            close_width = self.style().pixelMetric(QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self) + 8
+            close_width = (
+                self.style().pixelMetric(
+                    QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
+                )
+                + 8
+            )
         dynamic_width = (
             text_width
             + (self.WIDTH_SIDE_PADDING * 2)
@@ -6198,15 +6577,29 @@ class ViewTabBar(QTabBar):
         )
         return max(self._constant_tab_width(), dynamic_width)
 
+    def _tab_has_custom_label(self, index: int) -> bool:
+        """Return whether a tab currently has a non-empty custom label."""
+        data = self.tabData(index)
+        if not isinstance(data, dict):
+            return False
+        raw = data.get("custom_label")
+        return isinstance(raw, str) and bool(raw.strip())
+
     def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
         """Return per-tab width, expanding for custom labels when needed."""
         base = super().tabSizeHint(index)
-        return QSize(self._tab_width_for_text(self.tabText(index)), base.height())
+        width = self._tab_width_for_text(self.tabText(index))
+        if self._tab_has_custom_label(index):
+            width += self._home_icon_size_px() + self.HOME_ICON_GAP
+        return QSize(width, base.height())
 
     def minimumTabSizeHint(self, index: int) -> QSize:  # noqa: N802
         """Match minimum width to the rendered label width."""
         base = super().minimumTabSizeHint(index)
-        return QSize(self._tab_width_for_text(self.tabText(index)), base.height())
+        width = self._tab_width_for_text(self.tabText(index))
+        if self._tab_has_custom_label(index):
+            width += self._home_icon_size_px() + self.HOME_ICON_GAP
+        return QSize(width, base.height())
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """Draw rounded pastel tabs while preserving built-in tab close buttons."""
@@ -6223,10 +6616,14 @@ class ViewTabBar(QTabBar):
                 continue
 
             selected = tab_index == self.currentIndex()
-            self._paint_single_tab(painter, tab_index, rect, selected=selected, force_opaque=False)
+            self._paint_single_tab(
+                painter, tab_index, rect, selected=selected, force_opaque=False
+            )
 
         if self._dragging_index >= 0 and self.count() > 0:
-            current_rect = self.tabRect(max(0, min(self._dragging_index, self.count() - 1)))
+            current_rect = self.tabRect(
+                max(0, min(self._dragging_index, self.count() - 1))
+            )
             ghost_rect = current_rect.adjusted(2, 2, -2, -1)
             if ghost_rect.width() <= 2 or ghost_rect.height() <= 2:
                 painter.end()
@@ -6242,7 +6639,13 @@ class ViewTabBar(QTabBar):
             painter.setBrush(QColor(5, 10, 18, 108))
             painter.drawRoundedRect(ghost_rect.adjusted(1, 1, 3, 3), 6.0, 6.0)
             selected = self._dragging_index == self.currentIndex()
-            self._paint_single_tab(painter, self._dragging_index, ghost_rect, selected=selected, force_opaque=True)
+            self._paint_single_tab(
+                painter,
+                self._dragging_index,
+                ghost_rect,
+                selected=selected,
+                force_opaque=True,
+            )
             painter.restore()
 
         painter.end()
@@ -6319,9 +6722,14 @@ class MdExploreWindow(QMainWindow):
         self._next_view_id = 1
         self._next_view_sequence = 1
         self._next_tab_color_index = 0
-        self._mermaid_svg_cache_by_mode: dict[str, dict[str, str]] = {"auto": {}, "pdf": {}}
+        self._mermaid_svg_cache_by_mode: dict[str, dict[str, str]] = {
+            "auto": {},
+            "pdf": {},
+        }
         # Per-document, in-memory diagram viewport state (zoom/pan) for this run.
-        self._diagram_view_state_by_doc: dict[str, dict[str, dict[str, float | bool]]] = {}
+        self._diagram_view_state_by_doc: dict[
+            str, dict[str, dict[str, float | bool]]
+        ] = {}
         # In-memory per-document tab/view sessions for this app run only.
         self._document_view_sessions: dict[str, dict] = {}
         # Per-directory disk-backed view session cache loaded on demand from
@@ -6348,7 +6756,9 @@ class MdExploreWindow(QMainWindow):
         # embedded page.
         self._diagram_state_capture_timer = QTimer(self)
         self._diagram_state_capture_timer.setInterval(250)
-        self._diagram_state_capture_timer.timeout.connect(self._on_diagram_state_capture_tick)
+        self._diagram_state_capture_timer.timeout.connect(
+            self._on_diagram_state_capture_tick
+        )
         self._diagram_state_capture_timer.start()
         self._default_status_text = "Ready"
         self._gpu_context_available = bool(gpu_context_available)
@@ -6372,7 +6782,9 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay_shown_at = 0.0
         self._restore_overlay_poll_timer = QTimer(self)
         self._restore_overlay_poll_timer.setInterval(170)
-        self._restore_overlay_poll_timer.timeout.connect(self._check_restore_overlay_progress)
+        self._restore_overlay_poll_timer.timeout.connect(
+            self._check_restore_overlay_progress
+        )
         self._restore_overlay_show_timer = QTimer(self)
         self._restore_overlay_show_timer.setSingleShot(True)
         self._restore_overlay_show_timer.setInterval(RESTORE_OVERLAY_SHOW_DELAY_MS)
@@ -6406,18 +6818,26 @@ class MdExploreWindow(QMainWindow):
         self.tree.setMaximumWidth(700)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
-        self.tree.selectionModel().currentChanged.connect(self._on_tree_selection_changed)
+        self.tree.selectionModel().currentChanged.connect(
+            self._on_tree_selection_changed
+        )
         self.tree.expanded.connect(self._on_tree_directory_expanded)
 
         self.preview = QWebEngineView()
         # Preview pages are loaded as local HTML. Allow remote JS/CSS so CDN
         # assets (MathJax/Mermaid) can load and render as expected.
         preview_settings = self.preview.settings()
-        preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        preview_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        preview_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+        )
+        preview_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
+        )
         if hasattr(QWebEngineSettings.WebAttribute, "PrintElementBackgrounds"):
             # Keep PDF output visually closer to what users see in the preview.
-            preview_settings.setAttribute(QWebEngineSettings.WebAttribute.PrintElementBackgrounds, True)
+            preview_settings.setAttribute(
+                QWebEngineSettings.WebAttribute.PrintElementBackgrounds, True
+            )
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview.loadFinished.connect(self._on_preview_load_finished)
@@ -6433,7 +6853,10 @@ class MdExploreWindow(QMainWindow):
         self.view_tabs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.view_tabs.tabCloseRequested.connect(self._on_view_tab_close_requested)
-        self.view_tabs.customContextMenuRequested.connect(self._show_view_tab_context_menu)
+        self.view_tabs.customContextMenuRequested.connect(
+            self._show_view_tab_context_menu
+        )
+        self.view_tabs.homeRequested.connect(self._on_view_tab_home_requested)
         self.view_tabs.setVisible(False)
         self._reset_document_views()
         self._refresh_tree_multi_view_markers()
@@ -6468,7 +6891,9 @@ class MdExploreWindow(QMainWindow):
         copy_current_btn = QPushButton("")
         copy_current_btn.setFixedSize(18, 18)
         copy_current_btn.setToolTip("Copy currently previewed markdown file")
-        copy_current_btn.setStyleSheet("border: 1px solid #4b5563; border-radius: 3px; padding: 0px;")
+        copy_current_btn.setStyleSheet(
+            "border: 1px solid #4b5563; border-radius: 3px; padding: 0px;"
+        )
         pin_icon_path = Path(__file__).resolve().parent / "pin.png"
         if pin_icon_path.is_file():
             pin_icon = QIcon(str(pin_icon_path))
@@ -6487,7 +6912,9 @@ class MdExploreWindow(QMainWindow):
                 f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
             )
             color_btn.clicked.connect(
-                lambda _checked=False, c=color_value, n=color_name: self._copy_highlighted_files_to_clipboard(c, n)
+                lambda _checked=False, c=color_value, n=color_name: self._copy_highlighted_files_to_clipboard(
+                    c, n
+                )
             )
             copy_buttons_layout.addWidget(color_btn)
 
@@ -6496,7 +6923,9 @@ class MdExploreWindow(QMainWindow):
         match_label = QLabel("Search and highlight: ")
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
-        self.match_input.setPlaceholderText('words, "quoted phrases", AND/OR/NOT, CLOSE(...)')
+        self.match_input.setPlaceholderText(
+            'words, "quoted phrases", AND/OR/NOT, CLOSE(...)'
+        )
         self.match_input.setMinimumWidth(220)
         self.match_clear_action = self.match_input.addAction(
             _build_clear_x_icon(),
@@ -6522,7 +6951,9 @@ class MdExploreWindow(QMainWindow):
                 f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
             )
             color_btn.clicked.connect(
-                lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(c, n)
+                lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(
+                    c, n
+                )
             )
             match_buttons_layout.addWidget(color_btn)
 
@@ -6626,7 +7057,9 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay.move(x, y)
 
     @staticmethod
-    def _detect_special_features_from_markdown(markdown_text: str) -> tuple[bool, bool, bool]:
+    def _detect_special_features_from_markdown(
+        markdown_text: str,
+    ) -> tuple[bool, bool, bool]:
         """Return (has_math, has_mermaid, has_plantuml) from raw markdown."""
         text = markdown_text or ""
         has_mermaid = bool(re.search(r"(?im)^\s*```+\s*mermaid\b", text))
@@ -6720,7 +7153,9 @@ class MdExploreWindow(QMainWindow):
             self._stop_restore_overlay_monitor()
             return
         if self._restore_overlay_shown_at > 0.0:
-            if (time.monotonic() - self._restore_overlay_shown_at) >= RESTORE_OVERLAY_MAX_VISIBLE_SECONDS:
+            if (
+                time.monotonic() - self._restore_overlay_shown_at
+            ) >= RESTORE_OVERLAY_MAX_VISIBLE_SECONDS:
                 self._stop_restore_overlay_monitor()
                 return
 
@@ -6730,7 +7165,9 @@ class MdExploreWindow(QMainWindow):
             pending = bool(progress and progress[1] > 0)
             plantuml_ready = not pending
 
-        needs_js_probe = self._restore_overlay_needs_math or self._restore_overlay_needs_mermaid
+        needs_js_probe = (
+            self._restore_overlay_needs_math or self._restore_overlay_needs_mermaid
+        )
         if not needs_js_probe:
             if plantuml_ready:
                 self._stop_restore_overlay_monitor()
@@ -6766,7 +7203,9 @@ class MdExploreWindow(QMainWindow):
             ),
         )
 
-    def _on_restore_overlay_probe_result(self, expected_key: str, plantuml_ready: bool, result) -> None:
+    def _on_restore_overlay_probe_result(
+        self, expected_key: str, plantuml_ready: bool, result
+    ) -> None:
         """Handle JS readiness probe for math/mermaid restore completion."""
         self._restore_overlay_probe_inflight = False
         self._restore_overlay_probe_started_at = 0.0
@@ -6784,7 +7223,9 @@ class MdExploreWindow(QMainWindow):
         if self._restore_overlay_needs_math:
             math_ready = bool(isinstance(result, dict) and result.get("mathReady"))
         if self._restore_overlay_needs_mermaid:
-            mermaid_ready = bool(isinstance(result, dict) and result.get("mermaidReady"))
+            mermaid_ready = bool(
+                isinstance(result, dict) and result.get("mermaidReady")
+            )
 
         if math_ready and mermaid_ready and plantuml_ready:
             self._stop_restore_overlay_monitor()
@@ -6806,7 +7247,9 @@ class MdExploreWindow(QMainWindow):
             cleaned = cleaned[: ViewTabBar.MAX_LABEL_CHARS]
         return cleaned
 
-    def _display_label_for_view(self, line_number: int, custom_label: str | None = None) -> str:
+    def _display_label_for_view(
+        self, line_number: int, custom_label: str | None = None
+    ) -> str:
         """Return visible tab label, preferring a validated custom label override."""
         normalized = self._normalize_custom_view_label(custom_label)
         if normalized is not None:
@@ -6967,13 +7410,19 @@ class MdExploreWindow(QMainWindow):
             if isinstance(data, dict):
                 raw_sequence = data.get("sequence")
                 raw_color_slot = data.get("color_slot")
-                custom_label = self._normalize_custom_view_label(data.get("custom_label"))
+                custom_label = self._normalize_custom_view_label(
+                    data.get("custom_label")
+                )
                 try:
-                    custom_label_anchor_scroll_y = float(data.get("custom_label_anchor_scroll_y", 0.0))
+                    custom_label_anchor_scroll_y = float(
+                        data.get("custom_label_anchor_scroll_y", 0.0)
+                    )
                 except Exception:
                     custom_label_anchor_scroll_y = 0.0
                 try:
-                    custom_label_anchor_top_line = max(1, int(data.get("custom_label_anchor_top_line", 1)))
+                    custom_label_anchor_top_line = max(
+                        1, int(data.get("custom_label_anchor_top_line", 1))
+                    )
                 except Exception:
                     custom_label_anchor_top_line = 1
                 try:
@@ -6994,7 +7443,11 @@ class MdExploreWindow(QMainWindow):
             if state is None:
                 state = {"scroll_y": 0.0, "top_line": 1}
                 sanitized_states[view_id] = state
-            tab_entry: dict[str, int | float | str] = {"view_id": view_id, "sequence": sequence, "color_slot": color_slot}
+            tab_entry: dict[str, int | float | str] = {
+                "view_id": view_id,
+                "sequence": sequence,
+                "color_slot": color_slot,
+            }
             if custom_label is not None:
                 tab_entry["custom_label"] = custom_label
                 if not math.isfinite(custom_label_anchor_scroll_y):
@@ -7006,7 +7459,9 @@ class MdExploreWindow(QMainWindow):
             max_view_id = max(max_view_id, view_id)
 
         active_view_id = self._active_view_id
-        if active_view_id is None or all(entry["view_id"] != active_view_id for entry in tabs):
+        if active_view_id is None or all(
+            entry["view_id"] != active_view_id for entry in tabs
+        ):
             current_index = self.view_tabs.currentIndex()
             active_view_id = self._tab_view_id(current_index)
         if active_view_id is None and tabs:
@@ -7075,7 +7530,9 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             raw_payload = None
 
-        file_map = raw_payload.get("files") if isinstance(raw_payload, dict) else raw_payload
+        file_map = (
+            raw_payload.get("files") if isinstance(raw_payload, dict) else raw_payload
+        )
         if isinstance(file_map, dict):
             for raw_name, raw_session in file_map.items():
                 if not isinstance(raw_name, str) or not isinstance(raw_session, dict):
@@ -7116,7 +7573,9 @@ class MdExploreWindow(QMainWindow):
                     file_path.unlink()
                 return
             payload = {"files": serializable_files}
-            file_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            file_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
         except Exception:
             # View persistence is best-effort only and must not interrupt UI flow.
             pass
@@ -7132,7 +7591,11 @@ class MdExploreWindow(QMainWindow):
         if len(tabs) > 1:
             return True
         for entry in tabs:
-            if isinstance(entry, dict) and isinstance(entry.get("custom_label"), str) and entry.get("custom_label").strip():
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("custom_label"), str)
+                and entry.get("custom_label").strip()
+            ):
                 return True
         return False
 
@@ -7181,7 +7644,11 @@ class MdExploreWindow(QMainWindow):
     def _serialized_mermaid_cache_json(self) -> str:
         """Serialize in-memory Mermaid SVG cache for template injection."""
         try:
-            return json.dumps(self._mermaid_svg_cache_by_mode, separators=(",", ":"), ensure_ascii=False)
+            return json.dumps(
+                self._mermaid_svg_cache_by_mode,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
         except Exception:
             return "{}"
 
@@ -7221,9 +7688,13 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             return "{}"
 
-    def _inject_mermaid_cache_seed(self, html_doc: str, path_key: str | None = None) -> str:
+    def _inject_mermaid_cache_seed(
+        self, html_doc: str, path_key: str | None = None
+    ) -> str:
         """Inject runtime cache/state payloads into HTML template seed tokens."""
-        resolved_key = path_key if path_key is not None else self._current_preview_path_key()
+        resolved_key = (
+            path_key if path_key is not None else self._current_preview_path_key()
+        )
         token_literal = json.dumps(MERMAID_CACHE_JSON_TOKEN)
         cache_literal = json.dumps(self._serialized_mermaid_cache_json())
         out = html_doc
@@ -7231,12 +7702,16 @@ class MdExploreWindow(QMainWindow):
             out = out.replace(token_literal, cache_literal, 1)
 
         state_token_literal = json.dumps(DIAGRAM_VIEW_STATE_JSON_TOKEN)
-        state_literal = json.dumps(self._serialized_diagram_view_state_json(resolved_key))
+        state_literal = json.dumps(
+            self._serialized_diagram_view_state_json(resolved_key)
+        )
         if state_token_literal in out:
             out = out.replace(state_token_literal, state_literal, 1)
         return out
 
-    def _capture_current_diagram_view_state(self, expected_key: str | None = None) -> None:
+    def _capture_current_diagram_view_state(
+        self, expected_key: str | None = None
+    ) -> None:
         """Snapshot in-page diagram zoom/pan state into per-document runtime cache."""
         key = expected_key or self._current_preview_path_key()
         if key is None:
@@ -7251,7 +7726,9 @@ class MdExploreWindow(QMainWindow):
 """
         self.preview.page().runJavaScript(
             js,
-            lambda result, path_key=key: self._on_diagram_view_state_snapshot(path_key, result),
+            lambda result, path_key=key: self._on_diagram_view_state_snapshot(
+                path_key, result
+            ),
         )
 
     def _reapply_diagram_view_state_for(self, expected_key: str) -> None:
@@ -7292,7 +7769,9 @@ class MdExploreWindow(QMainWindow):
 """
         self.preview.page().runJavaScript(js)
 
-    def _capture_current_diagram_view_state_blocking(self, expected_key: str, timeout_ms: int = 300) -> None:
+    def _capture_current_diagram_view_state_blocking(
+        self, expected_key: str, timeout_ms: int = 300
+    ) -> None:
         """Synchronously capture diagram zoom/pan state before preview navigation."""
         if not expected_key or self._current_preview_path_key() != expected_key:
             return
@@ -7390,7 +7869,9 @@ class MdExploreWindow(QMainWindow):
     def _schedule_mermaid_cache_harvest_for(self, expected_key: str) -> None:
         """Collect Mermaid SVG cache snapshots after client rendering settles."""
         for delay_ms in (380, 980, 2100):
-            QTimer.singleShot(delay_ms, lambda key=expected_key: self._harvest_mermaid_cache_for(key))
+            QTimer.singleShot(
+                delay_ms, lambda key=expected_key: self._harvest_mermaid_cache_for(key)
+            )
 
     def _harvest_mermaid_cache_for(self, expected_key: str) -> None:
         """Fetch Mermaid SVG cache snapshot from active preview page."""
@@ -7407,7 +7888,9 @@ class MdExploreWindow(QMainWindow):
 """
         self.preview.page().runJavaScript(
             js,
-            lambda result, key=expected_key: self._on_mermaid_cache_snapshot(key, result),
+            lambda result, key=expected_key: self._on_mermaid_cache_snapshot(
+                key, result
+            ),
         )
 
     def _on_mermaid_cache_snapshot(self, expected_key: str, result) -> None:
@@ -7493,22 +7976,34 @@ class MdExploreWindow(QMainWindow):
                 color_slot = (sequence - 1) % palette_size
             if color_slot < 0 or color_slot >= palette_size:
                 color_slot = (sequence - 1) % palette_size
-            normalized_entry: dict[str, int | float | str] = {"view_id": view_id, "sequence": sequence, "color_slot": color_slot}
+            normalized_entry: dict[str, int | float | str] = {
+                "view_id": view_id,
+                "sequence": sequence,
+                "color_slot": color_slot,
+            }
             custom_label = self._normalize_custom_view_label(entry.get("custom_label"))
             if custom_label is not None:
                 try:
-                    custom_label_anchor_scroll_y = float(entry.get("custom_label_anchor_scroll_y", 0.0))
+                    custom_label_anchor_scroll_y = float(
+                        entry.get("custom_label_anchor_scroll_y", 0.0)
+                    )
                 except Exception:
                     custom_label_anchor_scroll_y = 0.0
                 if not math.isfinite(custom_label_anchor_scroll_y):
                     custom_label_anchor_scroll_y = 0.0
                 try:
-                    custom_label_anchor_top_line = max(1, int(entry.get("custom_label_anchor_top_line", 1)))
+                    custom_label_anchor_top_line = max(
+                        1, int(entry.get("custom_label_anchor_top_line", 1))
+                    )
                 except Exception:
                     custom_label_anchor_top_line = 1
                 normalized_entry["custom_label"] = custom_label
-                normalized_entry["custom_label_anchor_scroll_y"] = custom_label_anchor_scroll_y
-                normalized_entry["custom_label_anchor_top_line"] = custom_label_anchor_top_line
+                normalized_entry["custom_label_anchor_scroll_y"] = (
+                    custom_label_anchor_scroll_y
+                )
+                normalized_entry["custom_label_anchor_top_line"] = (
+                    custom_label_anchor_top_line
+                )
             normalized_tabs.append(normalized_entry)
             max_sequence = max(max_sequence, sequence)
             max_view_id = max(max_view_id, view_id)
@@ -7529,9 +8024,13 @@ class MdExploreWindow(QMainWindow):
                 top_line = max(1, int(state.get("top_line", 1)))
             except Exception:
                 top_line = 1
-            custom_label = self._normalize_custom_view_label(tab_entry.get("custom_label"))
+            custom_label = self._normalize_custom_view_label(
+                tab_entry.get("custom_label")
+            )
             progress = self._line_progress(top_line, total_lines)
-            index = self.view_tabs.addTab(self._display_label_for_view(top_line, custom_label))
+            index = self.view_tabs.addTab(
+                self._display_label_for_view(top_line, custom_label)
+            )
             self.view_tabs.setTabData(
                 index,
                 {
@@ -7540,11 +8039,17 @@ class MdExploreWindow(QMainWindow):
                     "color_slot": tab_entry["color_slot"],
                     "progress": progress,
                     "custom_label": custom_label,
-                    "custom_label_anchor_scroll_y": float(tab_entry.get("custom_label_anchor_scroll_y", 0.0)),
-                    "custom_label_anchor_top_line": max(1, int(tab_entry.get("custom_label_anchor_top_line", top_line))),
+                    "custom_label_anchor_scroll_y": float(
+                        tab_entry.get("custom_label_anchor_scroll_y", 0.0)
+                    ),
+                    "custom_label_anchor_top_line": max(
+                        1, int(tab_entry.get("custom_label_anchor_top_line", top_line))
+                    ),
                 },
             )
-            self.view_tabs.setTabToolTip(index, f"Top visible line: {top_line} / {total_lines}")
+            self.view_tabs.setTabToolTip(
+                index, f"Top visible line: {top_line} / {total_lines}"
+            )
 
         try:
             wanted_active = int(session.get("active_view_id"))
@@ -7578,6 +8083,20 @@ class MdExploreWindow(QMainWindow):
         self._next_view_sequence = max(next_sequence, max_sequence + 1)
         self._next_tab_color_index = next_color_index % palette_size
         self.view_tabs.blockSignals(blocked)
+
+        # Seed per-view scroll cache immediately so first-load restore can use
+        # persisted positions before any tab switch occurs.
+        for view_id, state in self._view_states.items():
+            try:
+                scroll_y = float(state.get("scroll_y", 0.0))
+            except Exception:
+                scroll_y = 0.0
+            if not math.isfinite(scroll_y):
+                scroll_y = 0.0
+            self._preview_scroll_positions[f"{path_key}::view:{view_id}"] = max(
+                0.0, scroll_y
+            )
+
         self._sync_all_view_tab_progress()
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
@@ -7591,7 +8110,9 @@ class MdExploreWindow(QMainWindow):
         for index in range(self.view_tabs.count()):
             if self._tab_view_id(index) != view_id:
                 continue
-            display_label = self._display_label_for_view(line_value, self._tab_custom_label(index))
+            display_label = self._display_label_for_view(
+                line_value, self._tab_custom_label(index)
+            )
             if self.view_tabs.tabText(index) != display_label:
                 self.view_tabs.setTabText(index, display_label)
                 self.view_tabs.updateGeometry()
@@ -7600,7 +8121,9 @@ class MdExploreWindow(QMainWindow):
                 updated_data = dict(data)
                 updated_data["progress"] = progress
                 self.view_tabs.setTabData(index, updated_data)
-            self.view_tabs.setTabToolTip(index, f"Top visible line: {line_value} / {total_lines}")
+            self.view_tabs.setTabToolTip(
+                index, f"Top visible line: {line_value} / {total_lines}"
+            )
             self.view_tabs.update(self.view_tabs.tabRect(index))
             break
 
@@ -7621,14 +8144,18 @@ class MdExploreWindow(QMainWindow):
                     line_value = 1
             progress = self._line_progress(line_value, total_lines)
             data = self.view_tabs.tabData(index)
-            display_label = self._display_label_for_view(line_value, self._tab_custom_label(index))
+            display_label = self._display_label_for_view(
+                line_value, self._tab_custom_label(index)
+            )
             if self.view_tabs.tabText(index) != display_label:
                 self.view_tabs.setTabText(index, display_label)
             if isinstance(data, dict):
                 updated_data = dict(data)
                 updated_data["progress"] = progress
                 self.view_tabs.setTabData(index, updated_data)
-            self.view_tabs.setTabToolTip(index, f"Top visible line: {line_value} / {total_lines}")
+            self.view_tabs.setTabToolTip(
+                index, f"Top visible line: {line_value} / {total_lines}"
+            )
         self.view_tabs.updateGeometry()
         self.view_tabs.update()
 
@@ -7646,7 +8173,10 @@ class MdExploreWindow(QMainWindow):
         """Enable Add View only when a file is open and tab budget remains."""
         if not hasattr(self, "add_view_btn"):
             return
-        can_add = self.current_file is not None and self.view_tabs.count() < self.MAX_DOCUMENT_VIEWS
+        can_add = (
+            self.current_file is not None
+            and self.view_tabs.count() < self.MAX_DOCUMENT_VIEWS
+        )
         self.add_view_btn.setEnabled(can_add)
 
     def _update_view_tabs_visibility(self) -> None:
@@ -7661,7 +8191,9 @@ class MdExploreWindow(QMainWindow):
                 visible = True
         self.view_tabs.setVisible(visible)
 
-    def _create_document_view(self, scroll_y: float, top_line: int, *, make_current: bool) -> int:
+    def _create_document_view(
+        self, scroll_y: float, top_line: int, *, make_current: bool
+    ) -> int:
         """Create a new view tab/state entry and optionally activate it."""
         view_id = self._next_view_id
         self._next_view_id += 1
@@ -7692,7 +8224,9 @@ class MdExploreWindow(QMainWindow):
                 "custom_label_anchor_top_line": safe_line,
             },
         )
-        self.view_tabs.setTabToolTip(tab_index, f"Top visible line: {safe_line} / {total_lines}")
+        self.view_tabs.setTabToolTip(
+            tab_index, f"Top visible line: {safe_line} / {total_lines}"
+        )
 
         if make_current:
             blocked = self.view_tabs.blockSignals(True)
@@ -7702,7 +8236,9 @@ class MdExploreWindow(QMainWindow):
 
         return view_id
 
-    def _reset_document_views(self, initial_scroll: float = 0.0, initial_line: int = 1) -> None:
+    def _reset_document_views(
+        self, initial_scroll: float = 0.0, initial_line: int = 1
+    ) -> None:
         """Reset per-document view tabs back to a single base view."""
         self._view_states.clear()
         self._active_view_id = None
@@ -7723,10 +8259,14 @@ class MdExploreWindow(QMainWindow):
     def _add_document_view(self) -> None:
         """Create another view tab for the current document at current top line."""
         if self.current_file is None:
-            self.statusBar().showMessage("Open a markdown file before adding a view", 3000)
+            self.statusBar().showMessage(
+                "Open a markdown file before adding a view", 3000
+            )
             return
         if self.view_tabs.count() >= self.MAX_DOCUMENT_VIEWS:
-            self.statusBar().showMessage(f"Maximum of {self.MAX_DOCUMENT_VIEWS} views reached", 3500)
+            self.statusBar().showMessage(
+                f"Maximum of {self.MAX_DOCUMENT_VIEWS} views reached", 3500
+            )
             return
 
         self._capture_current_preview_scroll(force=True)
@@ -7756,24 +8296,33 @@ class MdExploreWindow(QMainWindow):
                 view_id = self._tab_view_id(tab_index)
                 if view_id is None:
                     return
-                state = self._view_states.get(view_id) or {"scroll_y": 0.0, "top_line": 1}
+                state = self._view_states.get(view_id) or {
+                    "scroll_y": 0.0,
+                    "top_line": 1,
+                }
                 try:
                     top_line = max(1, int(state.get("top_line", 1)))
                 except Exception:
                     top_line = 1
                 data = self.view_tabs.tabData(tab_index)
-                updated_data = dict(data) if isinstance(data, dict) else {"view_id": view_id}
+                updated_data = (
+                    dict(data) if isinstance(data, dict) else {"view_id": view_id}
+                )
                 updated_data["custom_label"] = None
                 updated_data["custom_label_anchor_scroll_y"] = 0.0
                 updated_data["custom_label_anchor_top_line"] = top_line
                 self.view_tabs.setTabData(tab_index, updated_data)
-                self.view_tabs.setTabText(tab_index, self._display_label_for_view(top_line, None))
+                self.view_tabs.setTabText(
+                    tab_index, self._display_label_for_view(top_line, None)
+                )
                 self.view_tabs.updateGeometry()
                 self.view_tabs.update()
                 self._update_view_tabs_visibility()
                 self._persist_document_view_session()
                 self._refresh_tree_multi_view_markers()
-                self.statusBar().showMessage("Closed labeled tab and returned to hidden default view", 3000)
+                self.statusBar().showMessage(
+                    "Closed labeled tab and returned to hidden default view", 3000
+                )
                 return
             self.statusBar().showMessage("At least one view must remain open", 2500)
             return
@@ -7817,10 +8366,18 @@ class MdExploreWindow(QMainWindow):
         if expected_key is None:
             return
 
-        QTimer.singleShot(0, lambda key=expected_key: self._restore_current_preview_scroll(key))
-        QTimer.singleShot(180, lambda key=expected_key: self._restore_current_preview_scroll(key))
-        QTimer.singleShot(520, lambda key=expected_key: self._restore_current_preview_scroll(key))
-        QTimer.singleShot(900, lambda key=expected_key: self._enable_preview_scroll_capture_for(key))
+        QTimer.singleShot(
+            0, lambda key=expected_key: self._restore_current_preview_scroll(key)
+        )
+        QTimer.singleShot(
+            180, lambda key=expected_key: self._restore_current_preview_scroll(key)
+        )
+        QTimer.singleShot(
+            520, lambda key=expected_key: self._restore_current_preview_scroll(key)
+        )
+        QTimer.singleShot(
+            900, lambda key=expected_key: self._enable_preview_scroll_capture_for(key)
+        )
         self._request_active_view_top_line_update(force=True)
         self._update_add_view_button_state()
 
@@ -7841,6 +8398,16 @@ class MdExploreWindow(QMainWindow):
                 self._return_view_tab_to_beginning(tab_index)
             return
         self._edit_view_tab_label(tab_index)
+
+    def _on_view_tab_home_requested(self, tab_index: int) -> None:
+        """Jump a labeled tab back to its saved beginning when house icon is clicked."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return
+        if self._tab_label_anchor(tab_index) is None:
+            return
+        if self.view_tabs.currentIndex() != tab_index:
+            self.view_tabs.setCurrentIndex(tab_index)
+        self._return_view_tab_to_beginning(tab_index)
 
     def _edit_view_tab_label(self, tab_index: int) -> None:
         """Prompt for a custom tab label; blank restores the dynamic line number."""
@@ -7864,7 +8431,9 @@ class MdExploreWindow(QMainWindow):
 
         data = self.view_tabs.tabData(tab_index)
         updated_data = dict(data) if isinstance(data, dict) else {"view_id": view_id}
-        previous_custom_label = self._normalize_custom_view_label(updated_data.get("custom_label"))
+        previous_custom_label = self._normalize_custom_view_label(
+            updated_data.get("custom_label")
+        )
         anchor_scroll_y, anchor_top_line = self._tab_label_anchor(tab_index) or (0.0, 1)
         state = self._view_states.get(view_id) or {"scroll_y": 0.0, "top_line": 1}
         try:
@@ -7892,7 +8461,9 @@ class MdExploreWindow(QMainWindow):
             top_line = max(1, int(state.get("top_line", 1)))
         except Exception:
             top_line = 1
-        self.view_tabs.setTabText(tab_index, self._display_label_for_view(top_line, custom_label))
+        self.view_tabs.setTabText(
+            tab_index, self._display_label_for_view(top_line, custom_label)
+        )
         self.view_tabs.updateGeometry()
         self.view_tabs.update()
         self._persist_document_view_session()
@@ -7928,11 +8499,22 @@ class MdExploreWindow(QMainWindow):
         if expected_key is not None:
             self._preview_capture_enabled = False
             self._scroll_restore_block_until = time.monotonic() + 0.8
-            QTimer.singleShot(0, lambda key=expected_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(180, lambda key=expected_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(520, lambda key=expected_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(850, lambda key=expected_key: self._enable_preview_scroll_capture_for(key))
-        self.statusBar().showMessage(f"Returned tab to labeled beginning at line {anchor_top_line}", 3000)
+            QTimer.singleShot(
+                0, lambda key=expected_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                180, lambda key=expected_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                520, lambda key=expected_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                850,
+                lambda key=expected_key: self._enable_preview_scroll_capture_for(key),
+            )
+        self.statusBar().showMessage(
+            f"Returned tab to labeled beginning at line {anchor_top_line}", 3000
+        )
 
     def _request_active_view_top_line_update(self, force: bool = False) -> None:
         """Probe top-most visible source line and update active tab label."""
@@ -7983,7 +8565,9 @@ class MdExploreWindow(QMainWindow):
             ),
         )
 
-    def _on_active_view_line_probe_result(self, expected_key: str, expected_view_id: int, result) -> None:
+    def _on_active_view_line_probe_result(
+        self, expected_key: str, expected_view_id: int, result
+    ) -> None:
         """Apply top-line probe result to active view tab when still current."""
         self._view_line_probe_pending = False
         if self._current_preview_path_key() != expected_key:
@@ -8140,7 +8724,9 @@ class MdExploreWindow(QMainWindow):
 
         done, pending, failed = progress
         if done == 0 and pending == 0 and failed == 0:
-            self.statusBar().showMessage(f"Preview ready: {self.current_file.name}", 3500)
+            self.statusBar().showMessage(
+                f"Preview ready: {self.current_file.name}", 3500
+            )
             return
 
         total = done + pending + failed
@@ -8215,16 +8801,26 @@ class MdExploreWindow(QMainWindow):
         # Kick client-side renderer startup now and a bit later to tolerate
         # delayed external script availability (MathJax/Mermaid).
         self._trigger_client_renderers_for(current_key)
-        QTimer.singleShot(450, lambda key=current_key: self._trigger_client_renderers_for(key))
-        QTimer.singleShot(1500, lambda key=current_key: self._trigger_client_renderers_for(key))
+        QTimer.singleShot(
+            450, lambda key=current_key: self._trigger_client_renderers_for(key)
+        )
+        QTimer.singleShot(
+            1500, lambda key=current_key: self._trigger_client_renderers_for(key)
+        )
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
         self._schedule_mermaid_cache_harvest_for(current_key)
         self._reapply_diagram_view_state_for(current_key)
-        QTimer.singleShot(120, lambda key=current_key: self._reapply_diagram_view_state_for(key))
-        QTimer.singleShot(420, lambda key=current_key: self._reapply_diagram_view_state_for(key))
-        QTimer.singleShot(980, lambda key=current_key: self._reapply_diagram_view_state_for(key))
+        QTimer.singleShot(
+            120, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+        )
+        QTimer.singleShot(
+            420, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+        )
+        QTimer.singleShot(
+            980, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+        )
         has_saved_scroll = self._has_saved_scroll_for_current_preview()
         if self._pending_preview_search_terms:
             # Search normally scrolls to first hit. If this file has a saved
@@ -8239,10 +8835,19 @@ class MdExploreWindow(QMainWindow):
             # shift content after the initial load.
             self._preview_capture_enabled = False
             self._scroll_restore_block_until = time.monotonic() + 1.2
-            QTimer.singleShot(90, lambda key=current_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(320, lambda key=current_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(900, lambda key=current_key: self._restore_current_preview_scroll(key))
-            QTimer.singleShot(1250, lambda key=current_key: self._enable_preview_scroll_capture_for(key))
+            QTimer.singleShot(
+                90, lambda key=current_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                320, lambda key=current_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                900, lambda key=current_key: self._restore_current_preview_scroll(key)
+            )
+            QTimer.singleShot(
+                1250,
+                lambda key=current_key: self._enable_preview_scroll_capture_for(key),
+            )
         else:
             self._preview_capture_enabled = True
             self._scroll_restore_block_until = 0.0
@@ -8370,7 +8975,9 @@ class MdExploreWindow(QMainWindow):
                 )
                 if not restored_selection:
                     self.tree.clearSelection()
-                self.statusBar().showMessage("Directory view refreshed; preview file no longer exists", 4500)
+                self.statusBar().showMessage(
+                    "Directory view refreshed; preview file no longer exists", 4500
+                )
             else:
                 self.statusBar().showMessage("Directory view refreshed", 2500)
         else:
@@ -8558,13 +9165,17 @@ class MdExploreWindow(QMainWindow):
             except Exception:
                 current_path = self.current_file
             current_path_key = self._path_key(current_path)
-            if current_path_key != root_key and current_path_key.startswith(root_key + os.sep):
+            if current_path_key != root_key and current_path_key.startswith(
+                root_key + os.sep
+            ):
                 marked_paths.add(current_path)
 
         def on_walk_error(_err) -> None:
             return
 
-        for dirpath, _dirnames, filenames in os.walk(root, onerror=on_walk_error, followlinks=False):
+        for dirpath, _dirnames, filenames in os.walk(
+            root, onerror=on_walk_error, followlinks=False
+        ):
             if self.VIEWS_FILE_NAME not in filenames:
                 continue
             directory = Path(dirpath)
@@ -9042,20 +9653,28 @@ class MdExploreWindow(QMainWindow):
             if token_type == "OP" and token_value == "NOT":
                 return True
             if token_type == "OP" and token_value in {"AND", "OR"}:
-                next_token = tokens[token_index + 1] if token_index + 1 < len(tokens) else None
+                next_token = (
+                    tokens[token_index + 1] if token_index + 1 < len(tokens) else None
+                )
                 return bool(next_token and next_token[0] == "LPAREN")
             return False
 
-        def consume(expected_type: str | None = None, expected_value: str | None = None) -> tuple[str, str, bool]:
+        def consume(
+            expected_type: str | None = None, expected_value: str | None = None
+        ) -> tuple[str, str, bool]:
             nonlocal idx
             token = peek()
             if token is None:
                 raise QueryParseError("Unexpected end of query")
             token_type, token_value, token_quoted = token
             if expected_type is not None and token_type != expected_type:
-                raise QueryParseError(f"Expected {expected_type} but found {token_type}")
+                raise QueryParseError(
+                    f"Expected {expected_type} but found {token_type}"
+                )
             if expected_value is not None and token_value != expected_value:
-                raise QueryParseError(f"Expected {expected_value} but found {token_value}")
+                raise QueryParseError(
+                    f"Expected {expected_value} but found {token_value}"
+                )
             idx += 1
             return token_type, token_value, token_quoted
 
@@ -9110,7 +9729,9 @@ class MdExploreWindow(QMainWindow):
                     consume("COMMA")
                     continue
                 if not token_starts_expression(idx):
-                    raise QueryParseError(f"{operator_name}() accepts expression arguments only")
+                    raise QueryParseError(
+                        f"{operator_name}() accepts expression arguments only"
+                    )
                 break
 
             items: list[tuple] = []
@@ -9140,7 +9761,9 @@ class MdExploreWindow(QMainWindow):
 
             consume("RPAREN")
             if not items:
-                raise QueryParseError(f"{operator_name}() requires at least one argument")
+                raise QueryParseError(
+                    f"{operator_name}() requires at least one argument"
+                )
             combined = items[0]
             for item in items[1:]:
                 combined = (operator_name, combined, item)
@@ -9182,7 +9805,12 @@ class MdExploreWindow(QMainWindow):
                 return ("TERM", token_value, token_quoted)
             if token_type == "CLOSE":
                 return parse_close_call()
-            if token_type == "OP" and token_value in {"AND", "OR"} and peek(1) is not None and peek(1)[0] == "LPAREN":
+            if (
+                token_type == "OP"
+                and token_value in {"AND", "OR"}
+                and peek(1) is not None
+                and peek(1)[0] == "LPAREN"
+            ):
                 return parse_logic_call(token_value)
             if token_type == "LPAREN":
                 consume("LPAREN")
@@ -9257,20 +9885,45 @@ class MdExploreWindow(QMainWindow):
 
             return False
 
-        def evaluate(node, file_name: str, file_content: str, file_name_folded: str, file_content_folded: str) -> bool:
+        def evaluate(
+            node,
+            file_name: str,
+            file_content: str,
+            file_name_folded: str,
+            file_content_folded: str,
+        ) -> bool:
             node_type = node[0]
             if node_type == "TERM":
                 _kind, term_text, is_quoted = node
-                return term_matches(term_text, bool(is_quoted), file_name, file_content, file_name_folded, file_content_folded)
+                return term_matches(
+                    term_text,
+                    bool(is_quoted),
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                )
             if node_type == "CLOSE":
                 _kind, close_terms = node
                 return close_terms_match(close_terms, file_content)
             if node_type == "NOT":
                 _kind, operand = node
-                return not evaluate(operand, file_name, file_content, file_name_folded, file_content_folded)
+                return not evaluate(
+                    operand,
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                )
             if node_type == "AND":
                 _kind, left_node, right_node = node
-                return evaluate(left_node, file_name, file_content, file_name_folded, file_content_folded) and evaluate(
+                return evaluate(
+                    left_node,
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                ) and evaluate(
                     right_node,
                     file_name,
                     file_content,
@@ -9279,7 +9932,13 @@ class MdExploreWindow(QMainWindow):
                 )
             if node_type == "OR":
                 _kind, left_node, right_node = node
-                return evaluate(left_node, file_name, file_content, file_name_folded, file_content_folded) or evaluate(
+                return evaluate(
+                    left_node,
+                    file_name,
+                    file_content,
+                    file_name_folded,
+                    file_content_folded,
+                ) or evaluate(
                     right_node,
                     file_name,
                     file_content,
@@ -9310,7 +9969,11 @@ class MdExploreWindow(QMainWindow):
 
     def _compile_simple_match_predicate(self, tokens: list[tuple[str, str, bool]]):
         """Fallback matcher: all terms must appear in filename or content."""
-        terms = [(value.strip(), is_quoted) for token_type, value, is_quoted in tokens if token_type == "TERM" and value.strip()]
+        terms = [
+            (value.strip(), is_quoted)
+            for token_type, value, is_quoted in tokens
+            if token_type == "TERM" and value.strip()
+        ]
         if not terms:
             return lambda _file_name, _file_content: True
 
@@ -9565,17 +10228,25 @@ class MdExploreWindow(QMainWindow):
   return { hasSelection, selectedText };
 })();
 """
-        js = js.replace("__CLICK_X__", str(click_x)).replace("__CLICK_Y__", str(click_y))
+        js = js.replace("__CLICK_X__", str(click_x)).replace(
+            "__CLICK_Y__", str(click_y)
+        )
         # Returns selection + line-range metadata used to build copy actions.
         self.preview.page().runJavaScript(
             js,
-            lambda result: self._show_preview_context_menu_with_cached_selection(pos, result, selected_text_hint),
+            lambda result: self._show_preview_context_menu_with_cached_selection(
+                pos, result, selected_text_hint
+            ),
         )
 
-    def _show_preview_context_menu_with_cached_selection(self, pos, selection_info, selected_text_hint: str) -> None:
+    def _show_preview_context_menu_with_cached_selection(
+        self, pos, selection_info, selected_text_hint: str
+    ) -> None:
         """Build preview menu and use cached selection metadata for copy action."""
         menu = self.preview.createStandardContextMenu()
-        has_selection = bool(selected_text_hint.strip() or self.preview.selectedText().strip())
+        has_selection = bool(
+            selected_text_hint.strip() or self.preview.selectedText().strip()
+        )
         if isinstance(selection_info, dict) and selection_info.get("hasSelection"):
             has_selection = True
 
@@ -9588,14 +10259,20 @@ class MdExploreWindow(QMainWindow):
 
         chosen = menu.exec(self.preview.mapToGlobal(pos))
         if copy_rendered_action is not None and chosen == copy_rendered_action:
-            self._copy_preview_selection_as_rendered_text(selection_info, selected_text_hint)
+            self._copy_preview_selection_as_rendered_text(
+                selection_info, selected_text_hint
+            )
             menu.deleteLater()
             return
         if copy_source_action is not None and chosen == copy_source_action:
-            self._copy_preview_selection_as_source_markdown(selection_info, selected_text_hint)
+            self._copy_preview_selection_as_source_markdown(
+                selection_info, selected_text_hint
+            )
         menu.deleteLater()
 
-    def _copy_preview_selection_as_rendered_text(self, selection_info, selected_text_hint: str) -> None:
+    def _copy_preview_selection_as_rendered_text(
+        self, selection_info, selected_text_hint: str
+    ) -> None:
         """Copy currently selected rendered preview text as plain text."""
         selected_text = ""
         if isinstance(selection_info, dict):
@@ -9613,14 +10290,18 @@ class MdExploreWindow(QMainWindow):
         self._set_plain_text_clipboard(selected_text)
         self.statusBar().showMessage("Copied rendered text", 3000)
 
-    def _copy_preview_selection_as_source_markdown(self, selection_info, selected_text_hint: str) -> None:
+    def _copy_preview_selection_as_source_markdown(
+        self, selection_info, selected_text_hint: str
+    ) -> None:
         """Copy source markdown lines that correspond to selected preview content."""
         if self.current_file is None:
             self.statusBar().showMessage("No markdown file selected", 3000)
             return
         source_path = self.current_file
         try:
-            lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            lines = source_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines(keepends=True)
         except Exception:
             self.statusBar().showMessage("Could not read source markdown file", 3000)
             return
@@ -9633,7 +10314,9 @@ class MdExploreWindow(QMainWindow):
         if isinstance(selection_info, dict):
             start_raw = selection_info.get("start")
             end_raw = selection_info.get("end")
-            if isinstance(start_raw, (int, float)) and isinstance(end_raw, (int, float)):
+            if isinstance(start_raw, (int, float)) and isinstance(
+                end_raw, (int, float)
+            ):
                 start = max(0, int(start_raw))
                 end = max(start + 1, int(end_raw))
                 start = min(start, len(lines) - 1)
@@ -9653,7 +10336,11 @@ class MdExploreWindow(QMainWindow):
             if isinstance(selected_raw, str):
                 js_selected_text = selected_raw.strip()
 
-        query = js_selected_text or selected_text_hint.strip() or self.preview.selectedText().strip()
+        query = (
+            js_selected_text
+            or selected_text_hint.strip()
+            or self.preview.selectedText().strip()
+        )
         if not query:
             query = QApplication.clipboard().text(QClipboard.Mode.Clipboard).strip()
         if query:
@@ -9672,7 +10359,9 @@ class MdExploreWindow(QMainWindow):
                 )
                 return
 
-            normalized_match = self._find_source_span_by_normalized_document_match(lines, query)
+            normalized_match = self._find_source_span_by_normalized_document_match(
+                lines, query
+            )
             if normalized_match is not None:
                 start_idx, end_idx, label = normalized_match
                 snippet = "".join(lines[start_idx:end_idx])
@@ -9766,7 +10455,9 @@ class MdExploreWindow(QMainWindow):
 
             best_idx = -1
             best_score = 0.0
-            line_span_end = min(search_end, current_index + max(42, len(query_lines) * 2))
+            line_span_end = min(
+                search_end, current_index + max(42, len(query_lines) * 2)
+            )
             for idx in range(current_index, line_span_end):
                 candidate = normalized_lines[idx]
                 if not candidate:
@@ -9786,7 +10477,9 @@ class MdExploreWindow(QMainWindow):
             elif matched_indexes:
                 current_index = min(search_end, current_index + 4)
 
-        min_required_matches = max(3, min(len(query_lines), max(1, len(query_lines) // 3)))
+        min_required_matches = max(
+            3, min(len(query_lines), max(1, len(query_lines) // 3))
+        )
         if len(matched_indexes) < min_required_matches:
             return None
         if matched_chars / max(total_query_chars, 1) < 0.58:
@@ -9832,7 +10525,9 @@ class MdExploreWindow(QMainWindow):
                 end_idx = min(len(normalized_lines), start_idx + span_len)
                 if end_idx <= start_idx:
                     continue
-                candidate_text = " ".join(line for line in normalized_lines[start_idx:end_idx] if line)
+                candidate_text = " ".join(
+                    line for line in normalized_lines[start_idx:end_idx] if line
+                )
                 if not candidate_text:
                     continue
                 score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
@@ -9898,15 +10593,22 @@ class MdExploreWindow(QMainWindow):
             refined_start = start_idx
             refined_end = end_idx
             prefix_candidates = query_lines[: min(8, len(query_lines))]
-            suffix_candidates = list(reversed(query_lines[max(0, len(query_lines) - 8) :]))
+            suffix_candidates = list(
+                reversed(query_lines[max(0, len(query_lines) - 8) :])
+            )
 
             def best_line_match(
-                candidates: list[str], range_start: int, range_end: int, min_score: float
+                candidates: list[str],
+                range_start: int,
+                range_end: int,
+                min_score: float,
             ) -> tuple[int, float]:
                 best_idx = -1
                 best_score = 0.0
                 for query_norm in candidates:
-                    for idx in range(max(0, range_start), min(len(normalized_lines), range_end)):
+                    for idx in range(
+                        max(0, range_start), min(len(normalized_lines), range_end)
+                    ):
                         candidate = normalized_lines[idx]
                         if not candidate:
                             continue
@@ -9943,7 +10645,9 @@ class MdExploreWindow(QMainWindow):
             mapped = map_char_span(found_at, found_at + len(normalized_query))
             if mapped is not None:
                 start_idx, end_idx = refine_span(*mapped)
-                aligned = cls._align_query_lines_to_source(query_lines, normalized_lines, start_idx, end_idx)
+                aligned = cls._align_query_lines_to_source(
+                    query_lines, normalized_lines, start_idx, end_idx
+                )
                 if aligned is not None:
                     start_idx, end_idx = aligned
                 snippet = "".join(lines[start_idx:end_idx])
@@ -9967,7 +10671,9 @@ class MdExploreWindow(QMainWindow):
         seen_positions: set[tuple[int, int]] = set()
         for offset in anchor_offsets:
             for size in anchor_lengths:
-                if len(normalized_query) < size or offset + size > len(normalized_query):
+                if len(normalized_query) < size or offset + size > len(
+                    normalized_query
+                ):
                     continue
                 fragment = normalized_query[offset : offset + size]
                 search_at = normalized_source.find(fragment)
@@ -9982,7 +10688,9 @@ class MdExploreWindow(QMainWindow):
 
         line_start_candidates: list[int] = []
         seen_line_start_buckets: set[int] = set()
-        for query_offset, query_norm in enumerate(query_lines[: min(12, len(query_lines))]):
+        for query_offset, query_norm in enumerate(
+            query_lines[: min(12, len(query_lines))]
+        ):
             if len(query_norm) < 4:
                 continue
             min_score = 0.52 if len(query_norm) >= 18 else 0.68
@@ -10006,7 +10714,9 @@ class MdExploreWindow(QMainWindow):
         best_score = 0.0
         for position, offset, size in candidate_positions:
             estimated_start = max(0, position - offset)
-            estimated_end = min(len(normalized_source), estimated_start + len(normalized_query))
+            estimated_end = min(
+                len(normalized_source), estimated_start + len(normalized_query)
+            )
             candidate_text = normalized_source[estimated_start:estimated_end]
             score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
             if estimated_end - estimated_start < len(normalized_query) * 0.72:
@@ -10018,7 +10728,9 @@ class MdExploreWindow(QMainWindow):
             if mapped is None:
                 continue
             start_idx, end_idx = refine_span(*mapped)
-            aligned = cls._align_query_lines_to_source(query_lines, normalized_lines, start_idx, end_idx)
+            aligned = cls._align_query_lines_to_source(
+                query_lines, normalized_lines, start_idx, end_idx
+            )
             if aligned is not None:
                 start_idx, end_idx = aligned
             snippet = "".join(lines[start_idx:end_idx])
@@ -10027,7 +10739,11 @@ class MdExploreWindow(QMainWindow):
             best_score = score
             best_span = (start_idx, end_idx, "normalized anchor")
 
-        preferred_span_len = (best_span[1] - best_span[0]) if best_span is not None else max(1, len(query_lines))
+        preferred_span_len = (
+            (best_span[1] - best_span[0])
+            if best_span is not None
+            else max(1, len(query_lines))
+        )
         candidate_span = cls._best_span_from_line_start_candidates(
             query_lines,
             normalized_lines,
@@ -10046,9 +10762,13 @@ class MdExploreWindow(QMainWindow):
         return None
 
     @classmethod
-    def _find_source_span_by_fuzzy_lines(cls, lines: list[str], query_text: str) -> tuple[int, int] | None:
+    def _find_source_span_by_fuzzy_lines(
+        cls, lines: list[str], query_text: str
+    ) -> tuple[int, int] | None:
         """Fuzzy-match selected first/last lines against markdown source lines."""
-        raw_query_lines = [line.strip() for line in query_text.splitlines() if line.strip()]
+        raw_query_lines = [
+            line.strip() for line in query_text.splitlines() if line.strip()
+        ]
         if not raw_query_lines:
             return None
 
@@ -10076,7 +10796,9 @@ class MdExploreWindow(QMainWindow):
                     best_idx = idx
             return best_idx, best_score
 
-        def find_anchor(candidates: list[str], start_index: int, min_score: float) -> tuple[int, float]:
+        def find_anchor(
+            candidates: list[str], start_index: int, min_score: float
+        ) -> tuple[int, float]:
             # Try candidate lines in order and stop at the first sufficiently
             # strong match so non-identifying boundary lines are skipped.
             best_idx = -1
@@ -10115,8 +10837,12 @@ class MdExploreWindow(QMainWindow):
 
         best_span: tuple[int, int] | None = None
         best_span_score = 0.0
-        for anchor_score, estimated_start in sorted(candidate_starts, key=lambda item: item[0], reverse=True)[:18]:
-            approx_end = min(len(lines), estimated_start + len(meaningful_query_lines) + 24)
+        for anchor_score, estimated_start in sorted(
+            candidate_starts, key=lambda item: item[0], reverse=True
+        )[:18]:
+            approx_end = min(
+                len(lines), estimated_start + len(meaningful_query_lines) + 24
+            )
             aligned = cls._align_query_lines_to_source(
                 meaningful_query_lines,
                 normalized_lines,
@@ -10126,7 +10852,9 @@ class MdExploreWindow(QMainWindow):
             if aligned is None:
                 continue
             start_idx, end_idx = aligned
-            candidate_text = " ".join(line for line in normalized_lines[start_idx:end_idx] if line)
+            candidate_text = " ".join(
+                line for line in normalized_lines[start_idx:end_idx] if line
+            )
             if not candidate_text:
                 continue
             span_score = SequenceMatcher(None, normalized_query, candidate_text).ratio()
@@ -10161,7 +10889,9 @@ class MdExploreWindow(QMainWindow):
                 end_idx = min(len(lines), start_idx + approx_span)
 
         end_idx = max(start_idx + 1, min(end_idx, len(lines)))
-        aligned = cls._align_query_lines_to_source(meaningful_query_lines, normalized_lines, start_idx, end_idx)
+        aligned = cls._align_query_lines_to_source(
+            meaningful_query_lines, normalized_lines, start_idx, end_idx
+        )
         if aligned is not None:
             start_idx, end_idx = aligned
         snippet = "".join(lines[start_idx:end_idx])
@@ -10182,10 +10912,20 @@ class MdExploreWindow(QMainWindow):
                 subprocess.run(["wl-copy"], input=text, text=True, check=False)
                 return
             if os.environ.get("DISPLAY") and shutil.which("xclip"):
-                subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=False)
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=text,
+                    text=True,
+                    check=False,
+                )
                 return
             if os.environ.get("DISPLAY") and shutil.which("xsel"):
-                subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=False)
+                subprocess.run(
+                    ["xsel", "--clipboard", "--input"],
+                    input=text,
+                    text=True,
+                    check=False,
+                )
         except Exception:
             # Qt clipboard already received the text; ignore CLI fallback errors.
             pass
@@ -10202,7 +10942,10 @@ class MdExploreWindow(QMainWindow):
                     resolved = selected
                 self.last_directory_selection = resolved
                 return resolved
-        if self.last_directory_selection is not None and self.last_directory_selection.is_dir():
+        if (
+            self.last_directory_selection is not None
+            and self.last_directory_selection.is_dir()
+        ):
             return self.last_directory_selection
         return self.root
 
@@ -10221,7 +10964,10 @@ class MdExploreWindow(QMainWindow):
                     return selected.resolve()
                 except Exception:
                     return selected
-        if self.last_directory_selection is not None and self.last_directory_selection.is_dir():
+        if (
+            self.last_directory_selection is not None
+            and self.last_directory_selection.is_dir()
+        ):
             return self.last_directory_selection
         return self.root
 
@@ -10285,7 +11031,9 @@ class MdExploreWindow(QMainWindow):
         # as file copy operations rather than plain text.
         if urls:
             gnome_payload = "copy\n" + "\n".join(url.toString() for url in urls)
-            mime_data.setData("x-special/gnome-copied-files", gnome_payload.encode("utf-8"))
+            mime_data.setData(
+                "x-special/gnome-copied-files", gnome_payload.encode("utf-8")
+            )
 
         # Keep plain text for editors/terminals.
         mime_data.setText("\n".join(str(path) for path in normalized))
@@ -10309,9 +11057,13 @@ class MdExploreWindow(QMainWindow):
 
         copied = self._copy_files_to_clipboard([target])
         if copied:
-            self.statusBar().showMessage(f"Copied previewed file to clipboard: {target.name}", 4000)
+            self.statusBar().showMessage(
+                f"Copied previewed file to clipboard: {target.name}", 4000
+            )
 
-    def _copy_highlighted_files_to_clipboard(self, color_value: str, color_name: str) -> None:
+    def _copy_highlighted_files_to_clipboard(
+        self, color_value: str, color_name: str
+    ) -> None:
         """Copy highlighted file paths for a color to the system clipboard."""
         scope = self._highlight_scope_directory()
         matches = self.model.collect_files_with_color(scope, color_value)
@@ -10371,7 +11123,9 @@ class MdExploreWindow(QMainWindow):
 
         if error_text:
             self.statusBar().showMessage(f"Preview render failed: {error_text}", 5000)
-            html_doc = self._placeholder_html(f"Could not render preview for {self.current_file.name}: {error_text}")
+            html_doc = self._placeholder_html(
+                f"Could not render preview for {self.current_file.name}: {error_text}"
+            )
         else:
             self.cache[path_key] = (mtime_ns, size, html_doc)
             self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
@@ -10381,7 +11135,9 @@ class MdExploreWindow(QMainWindow):
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
-        self._set_preview_html(self._inject_mermaid_cache_seed(html_doc, path_key), base_url)
+        self._set_preview_html(
+            self._inject_mermaid_cache_seed(html_doc, path_key), base_url
+        )
 
     @staticmethod
     def _doc_id_for_path(path_key: str) -> str:
@@ -10400,7 +11156,9 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_signature_key = None
         self._current_preview_signature = None
 
-    def _set_current_preview_signature(self, path_key: str, mtime_ns: int, size: int) -> None:
+    def _set_current_preview_signature(
+        self, path_key: str, mtime_ns: int, size: int
+    ) -> None:
         """Record the latest observed on-disk signature for a previewed file."""
         self._current_preview_signature_key = path_key
         self._current_preview_signature = (int(mtime_ns), int(size))
@@ -10424,8 +11182,13 @@ class MdExploreWindow(QMainWindow):
             return
 
         current_sig = (int(stat.st_mtime_ns), int(stat.st_size))
-        if self._current_preview_signature_key != path_key or self._current_preview_signature is None:
-            self._set_current_preview_signature(path_key, current_sig[0], current_sig[1])
+        if (
+            self._current_preview_signature_key != path_key
+            or self._current_preview_signature is None
+        ):
+            self._set_current_preview_signature(
+                path_key, current_sig[0], current_sig[1]
+            )
             return
         if current_sig == self._current_preview_signature:
             return
@@ -10441,6 +11204,20 @@ class MdExploreWindow(QMainWindow):
             return False
         if key in self._preview_scroll_positions:
             return True
+        state = self._current_view_state()
+        if isinstance(state, dict):
+            try:
+                scroll_y = float(state.get("scroll_y", 0.0))
+            except Exception:
+                scroll_y = 0.0
+            if math.isfinite(scroll_y) and scroll_y > 0.5:
+                return True
+            try:
+                top_line = int(state.get("top_line", 1))
+            except Exception:
+                top_line = 1
+            if top_line > 1:
+                return True
         # Backward compatibility with pre-view-tab scroll cache entries.
         path_key = self._current_preview_path_key()
         return bool(path_key and path_key in self._preview_scroll_positions)
@@ -10487,7 +11264,12 @@ class MdExploreWindow(QMainWindow):
         if expected_key is not None and path_key != expected_key:
             return
         scroll_key = self._current_preview_scroll_key()
-        scroll_y = self._preview_scroll_positions.get(scroll_key) if scroll_key is not None else None
+        scroll_y = (
+            self._preview_scroll_positions.get(scroll_key)
+            if scroll_key is not None
+            else None
+        )
+        top_line_fallback = 1
         if scroll_y is None:
             state = self._current_view_state()
             if state is not None:
@@ -10495,18 +11277,84 @@ class MdExploreWindow(QMainWindow):
                     scroll_y = float(state.get("scroll_y", 0.0))
                 except Exception:
                     scroll_y = 0.0
+                try:
+                    top_line_fallback = max(1, int(state.get("top_line", 1)))
+                except Exception:
+                    top_line_fallback = 1
+        else:
+            state = self._current_view_state()
+            if state is not None:
+                try:
+                    top_line_fallback = max(1, int(state.get("top_line", 1)))
+                except Exception:
+                    top_line_fallback = 1
         if scroll_y is None:
             # Backward compatibility with pre-view-tab scroll cache entries.
             scroll_y = self._preview_scroll_positions.get(path_key)
         if scroll_y is None:
             return
-        scroll_json = json.dumps(float(scroll_y))
+        try:
+            scroll_value = float(scroll_y)
+        except Exception:
+            scroll_value = 0.0
+        if not math.isfinite(scroll_value):
+            scroll_value = 0.0
+
+        scroll_json = json.dumps(scroll_value)
+        top_line_json = json.dumps(int(max(1, top_line_fallback)))
         js = f"""
 (() => {{
   const y = {scroll_json};
+  const targetLine = {top_line_json};
   // Apply twice (RAF + timeout) because late layout work can override scroll.
-  requestAnimationFrame(() => window.scrollTo(0, y));
-  setTimeout(() => window.scrollTo(0, y), 60);
+  const applyScrollY = () => {{
+    requestAnimationFrame(() => window.scrollTo(0, y));
+    setTimeout(() => window.scrollTo(0, y), 60);
+  }};
+  const applyLineFallback = () => {{
+    if (targetLine <= 1) {{
+      applyScrollY();
+      return;
+    }}
+    let best = null;
+    for (const node of Array.from(document.querySelectorAll("[data-md-line-start][data-md-line-end]"))) {{
+      const start = Number(node.getAttribute("data-md-line-start"));
+      const end = Number(node.getAttribute("data-md-line-end"));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {{
+        continue;
+      }}
+      if (targetLine < start || targetLine > end) {{
+        continue;
+      }}
+      best = node;
+      break;
+    }}
+    if (!best) {{
+      for (const node of Array.from(document.querySelectorAll("[data-md-line-start]"))) {{
+        const start = Number(node.getAttribute("data-md-line-start"));
+        if (!Number.isFinite(start)) {{
+          continue;
+        }}
+        if (start >= targetLine) {{
+          best = node;
+          break;
+        }}
+      }}
+    }}
+    if (!best) {{
+      applyScrollY();
+      return;
+    }}
+    const rect = best.getBoundingClientRect();
+    const targetY = Math.max(0, window.scrollY + rect.top - 14);
+    requestAnimationFrame(() => window.scrollTo(0, targetY));
+    setTimeout(() => window.scrollTo(0, targetY), 60);
+  }};
+  if (targetLine > 1 && (!Number.isFinite(y) || y <= 1)) {{
+    applyLineFallback();
+    return;
+  }}
+  applyScrollY();
 }})();
 """
         # Mutates page scroll position (no returned data consumed).
@@ -10537,7 +11385,11 @@ class MdExploreWindow(QMainWindow):
         payload: str,
         hash_key: str | None = None,
     ) -> str:
-        inner = self._plantuml_inner_html(status, payload) if status in {"done", "error"} else "PlantUML rendering..."
+        inner = (
+            self._plantuml_inner_html(status, payload)
+            if status in {"done", "error"}
+            else "PlantUML rendering..."
+        )
         classes = ["mdexplore-fence", "plantuml-async"]
         if status == "pending":
             classes.append("plantuml-pending")
@@ -10556,7 +11408,9 @@ class MdExploreWindow(QMainWindow):
             "</div>\n"
         )
 
-    def _ensure_plantuml_render_started(self, hash_key: str, prepared_code: str) -> None:
+    def _ensure_plantuml_render_started(
+        self, hash_key: str, prepared_code: str
+    ) -> None:
         result = self._plantuml_results.get(hash_key)
         if result is not None and result[0] in {"done", "error"}:
             return
@@ -10576,7 +11430,9 @@ class MdExploreWindow(QMainWindow):
         worker.signals.finished.connect(self._on_plantuml_render_finished)
         self._plantuml_pool.start(worker)
 
-    def _on_plantuml_render_finished(self, hash_key: str, status: str, payload: str) -> None:
+    def _on_plantuml_render_finished(
+        self, hash_key: str, status: str, payload: str
+    ) -> None:
         worker_to_remove = None
         for worker in self._active_plantuml_workers:
             if worker.hash_key == hash_key:
@@ -10597,7 +11453,9 @@ class MdExploreWindow(QMainWindow):
         self._apply_plantuml_result_to_current_preview(hash_key)
         current_key = self._current_preview_path_key()
         if current_key is not None:
-            current_placeholders = self._plantuml_placeholders_by_doc.get(current_key, {})
+            current_placeholders = self._plantuml_placeholders_by_doc.get(
+                current_key, {}
+            )
             if hash_key in current_placeholders:
                 self._show_preview_progress_status()
                 self._check_restore_overlay_progress()
@@ -10688,7 +11546,9 @@ class MdExploreWindow(QMainWindow):
             for hash_key in ready_hashes[start_index:end_index]:
                 self._apply_plantuml_result_to_current_preview(hash_key)
             if end_index < len(ready_hashes):
-                QTimer.singleShot(0, lambda next_index=end_index: apply_batch(next_index))
+                QTimer.singleShot(
+                    0, lambda next_index=end_index: apply_batch(next_index)
+                )
 
         apply_batch(0)
 
@@ -10702,7 +11562,9 @@ class MdExploreWindow(QMainWindow):
         if previous_path_key is not None and previous_path_key != next_path_key:
             # Best-effort capture only: file switching should stay responsive
             # even if the embedded page is busy finishing diagram work.
-            self._capture_current_diagram_view_state_blocking(previous_path_key, timeout_ms=90)
+            self._capture_current_diagram_view_state_blocking(
+                previous_path_key, timeout_ms=90
+            )
             self._persist_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
@@ -10712,9 +11574,15 @@ class MdExploreWindow(QMainWindow):
             restored = self._restore_document_view_session(next_path_key)
             if not restored:
                 self._reset_document_views(initial_scroll=0.0, initial_line=1)
-        should_highlight_search = bool(self.match_input.text().strip()) and self._is_path_in_current_matches(path)
-        self._pending_preview_search_terms = self._current_search_terms() if should_highlight_search else []
-        self._pending_preview_search_close_groups = self._current_close_term_groups() if should_highlight_search else []
+        should_highlight_search = bool(
+            self.match_input.text().strip()
+        ) and self._is_path_in_current_matches(path)
+        self._pending_preview_search_terms = (
+            self._current_search_terms() if should_highlight_search else []
+        )
+        self._pending_preview_search_close_groups = (
+            self._current_close_term_groups() if should_highlight_search else []
+        )
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
@@ -10722,7 +11590,9 @@ class MdExploreWindow(QMainWindow):
         # Explicitly clear any stale overlay at document entry before
         # considering whether the new document needs one.
         self._stop_restore_overlay_monitor()
-        self._current_document_total_lines = max(1, int(self._document_line_counts.get(next_path_key, 1)))
+        self._current_document_total_lines = max(
+            1, int(self._document_line_counts.get(next_path_key, 1))
+        )
         self._sync_all_view_tab_progress()
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
@@ -10741,12 +11611,16 @@ class MdExploreWindow(QMainWindow):
             resolved = path.resolve()
             stat = resolved.stat()
             cache_key = str(resolved)
-            self._set_current_preview_signature(cache_key, int(stat.st_mtime_ns), int(stat.st_size))
+            self._set_current_preview_signature(
+                cache_key, int(stat.st_mtime_ns), int(stat.st_size)
+            )
             cached = self.cache.get(cache_key)
             if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-                has_math, has_mermaid, has_plantuml = self._detect_special_features_for_path(
-                    resolved,
-                    cached_html=cached[2],
+                has_math, has_mermaid, has_plantuml = (
+                    self._detect_special_features_for_path(
+                        resolved,
+                        cached_html=cached[2],
+                    )
                 )
                 self._begin_restore_overlay_monitor(
                     cache_key,
@@ -10755,8 +11629,12 @@ class MdExploreWindow(QMainWindow):
                     needs_plantuml=has_plantuml,
                     phase="restoring",
                 )
-                self.statusBar().showMessage(f"Using cached preview: {resolved.name}...")
-                self._set_preview_html(self._inject_mermaid_cache_seed(cached[2], cache_key), base_url)
+                self.statusBar().showMessage(
+                    f"Using cached preview: {resolved.name}..."
+                )
+                self._set_preview_html(
+                    self._inject_mermaid_cache_seed(cached[2], cache_key), base_url
+                )
                 return
 
             self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
@@ -10768,7 +11646,9 @@ class MdExploreWindow(QMainWindow):
             doc_id = self._doc_id_for_path(cache_key)
 
             # Remove stale dependency links for this document before rebuilding.
-            previous_placeholders = self._plantuml_placeholders_by_doc.get(cache_key, {})
+            previous_placeholders = self._plantuml_placeholders_by_doc.get(
+                cache_key, {}
+            )
             for hash_key in previous_placeholders:
                 docs = self._plantuml_docs_by_hash.get(hash_key)
                 if docs is not None:
@@ -10782,7 +11662,9 @@ class MdExploreWindow(QMainWindow):
                 # Stable hash key lets the same diagram result be reused across
                 # multiple files and repeated blocks.
                 prepared_code = self.renderer._prepare_plantuml_source(code)
-                hash_key = hashlib.sha1(prepared_code.encode("utf-8", errors="replace")).hexdigest()
+                hash_key = hashlib.sha1(
+                    prepared_code.encode("utf-8", errors="replace")
+                ).hexdigest()
                 placeholder_id = f"mdexplore-plantuml-{doc_id}-{index}"
 
                 placeholders_by_hash.setdefault(hash_key, []).append(placeholder_id)
@@ -10794,7 +11676,9 @@ class MdExploreWindow(QMainWindow):
                 # Always emit a lightweight placeholder first so file restores
                 # are immediate; ready/error SVG payloads are patched in after
                 # the page mounts.
-                return self._plantuml_block_html(placeholder_id, line_attrs, "pending", "", hash_key=hash_key)
+                return self._plantuml_block_html(
+                    placeholder_id, line_attrs, "pending", "", hash_key=hash_key
+                )
 
             html_doc = self.renderer.render_document(
                 markdown_text,
@@ -10805,17 +11689,25 @@ class MdExploreWindow(QMainWindow):
             self._merge_renderer_pdf_mermaid_cache_seed()
             self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
             self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
-            self.statusBar().showMessage(f"Preview rendered, loading in viewer: {resolved.name}...")
-            self._set_preview_html(self._inject_mermaid_cache_seed(html_doc, cache_key), base_url)
+            self.statusBar().showMessage(
+                f"Preview rendered, loading in viewer: {resolved.name}..."
+            )
+            self._set_preview_html(
+                self._inject_mermaid_cache_seed(html_doc, cache_key), base_url
+            )
         except Exception as exc:
             self._stop_restore_overlay_monitor()
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
             self._set_preview_html(
-                self._placeholder_html(f"Could not render preview for {path.name}: {exc}"),
+                self._placeholder_html(
+                    f"Could not render preview for {path.name}: {exc}"
+                ),
                 base_url,
             )
 
-    def _refresh_current_preview(self, _checked: bool = False, *, reason: str | None = None) -> None:
+    def _refresh_current_preview(
+        self, _checked: bool = False, *, reason: str | None = None
+    ) -> None:
         """Force re-render of the currently selected file."""
         if self.current_file is None:
             return
@@ -10840,7 +11732,11 @@ class MdExploreWindow(QMainWindow):
     def _export_current_preview_pdf(self) -> None:
         """Export the currently previewed markdown rendering to a numbered PDF."""
         if self.current_file is None:
-            QMessageBox.information(self, "No file selected", "Select a markdown file before exporting to PDF.")
+            QMessageBox.information(
+                self,
+                "No file selected",
+                "Select a markdown file before exporting to PDF.",
+            )
             return
         if self._pdf_export_in_progress:
             self.statusBar().showMessage("PDF export already in progress", 3000)
@@ -10860,9 +11756,13 @@ class MdExploreWindow(QMainWindow):
 
         self._set_pdf_export_busy(True)
         self.statusBar().showMessage(f"Preparing PDF for {source_path.name}...")
-        self._prepare_preview_for_pdf_export(output_path, attempt=0, source_key=source_key)
+        self._prepare_preview_for_pdf_export(
+            output_path, attempt=0, source_key=source_key
+        )
 
-    def _prepare_preview_for_pdf_export(self, output_path: Path, attempt: int, source_key: str) -> None:
+    def _prepare_preview_for_pdf_export(
+        self, output_path: Path, attempt: int, source_key: str
+    ) -> None:
         """Wait for math/Mermaid/fonts readiness and inject print style before export."""
         js = """
 (() => {
@@ -12655,8 +13555,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
   return { mathReady, mermaidReady, plantumlReady, fontsReady, hasMath, hasMermaid, hasPlantUml, diagramLayout };
 })();
 """
-        js = js.replace("__MDEXPLORE_FORCE_MERMAID__", "true" if attempt == 0 else "false")
-        js = js.replace("__MDEXPLORE_RESET_MERMAID__", "true" if attempt == 0 else "false")
+        js = js.replace(
+            "__MDEXPLORE_FORCE_MERMAID__", "true" if attempt == 0 else "false"
+        )
+        js = js.replace(
+            "__MDEXPLORE_RESET_MERMAID__", "true" if attempt == 0 else "false"
+        )
         # Keep PDF preflight policy sourced from Python constants so the
         # embedded JS remains a consumer of print-layout rules, not the owner.
         js = js.replace(
@@ -12670,7 +13574,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             ),
         )
 
-    def _on_pdf_precheck_result(self, output_path: Path, attempt: int, source_key: str, result) -> None:
+    def _on_pdf_precheck_result(
+        self, output_path: Path, attempt: int, source_key: str, result
+    ) -> None:
         """Continue waiting until print assets are ready, then trigger print."""
         math_ready = False
         mermaid_ready = False
@@ -12691,7 +13597,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
 
         if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
             if attempt == 0:
-                self.statusBar().showMessage("Waiting for math/Mermaid/PlantUML/fonts before PDF export...")
+                self.statusBar().showMessage(
+                    "Waiting for math/Mermaid/PlantUML/fonts before PDF export..."
+                )
             QTimer.singleShot(
                 PDF_EXPORT_PRECHECK_INTERVAL_MS,
                 lambda target=output_path, tries=attempt + 1, key=source_key: self._prepare_preview_for_pdf_export(
@@ -12933,7 +13841,11 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
                 self._set_pdf_export_busy(False)
                 self._restore_preview_mermaid_palette(source_key)
                 error_text = self._truncate_error_text(str(exc), 500)
-                QMessageBox.critical(self, "PDF export failed", f"Could not start PDF rendering:\n{error_text}")
+                QMessageBox.critical(
+                    self,
+                    "PDF export failed",
+                    f"Could not start PDF rendering:\n{error_text}",
+                )
                 self.statusBar().showMessage(f"PDF export failed: {error_text}", 5000)
 
         self.preview.page().runJavaScript(preprint_js, _print_after_dom_normalized)
@@ -13053,11 +13965,19 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         self.preview.page().runJavaScript(js)
         if source_key:
             self._reapply_diagram_view_state_for(source_key)
-            QTimer.singleShot(120, lambda key=source_key: self._reapply_diagram_view_state_for(key))
-            QTimer.singleShot(420, lambda key=source_key: self._reapply_diagram_view_state_for(key))
-            QTimer.singleShot(980, lambda key=source_key: self._reapply_diagram_view_state_for(key))
+            QTimer.singleShot(
+                120, lambda key=source_key: self._reapply_diagram_view_state_for(key)
+            )
+            QTimer.singleShot(
+                420, lambda key=source_key: self._reapply_diagram_view_state_for(key)
+            )
+            QTimer.singleShot(
+                980, lambda key=source_key: self._reapply_diagram_view_state_for(key)
+            )
 
-    def _on_pdf_render_ready(self, output_path: Path, source_key: str, pdf_data) -> None:
+    def _on_pdf_render_ready(
+        self, output_path: Path, source_key: str, pdf_data
+    ) -> None:
         """Receive raw PDF bytes from WebEngine and start footer stamping."""
         try:
             raw_pdf = bytes(pdf_data)
@@ -13088,7 +14008,11 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         self.statusBar().showMessage(f"Writing numbered PDF: {output_path.name}...")
 
     def _on_pdf_export_finished(
-        self, worker: PdfExportWorker, output_path_text: str, error_text: str, source_key: str
+        self,
+        worker: PdfExportWorker,
+        output_path_text: str,
+        error_text: str,
+        source_key: str,
     ) -> None:
         """Finalize async PDF export and report result."""
         self._active_pdf_workers.discard(worker)
@@ -13111,7 +14035,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     def _edit_current_file(self) -> None:
         """Open the selected markdown file in VS Code."""
         if self.current_file is None:
-            QMessageBox.information(self, "No file selected", "Select a markdown file before using Edit.")
+            QMessageBox.information(
+                self, "No file selected", "Select a markdown file before using Edit."
+            )
             return
         try:
             subprocess.Popen(["code", str(self.current_file)])
@@ -13142,7 +14068,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    root = Path(args.path).expanduser() if args.path is not None else _load_default_root_from_config()
+    root = (
+        Path(args.path).expanduser()
+        if args.path is not None
+        else _load_default_root_from_config()
+    )
     if not root.exists():
         print(f"Path does not exist: {root}", file=sys.stderr)
         return 2
