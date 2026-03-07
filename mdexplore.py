@@ -1369,7 +1369,7 @@ class ColorizedMarkdownModel(QFileSystemModel):
             return ""
         if search_hit_count <= self._SEARCH_COUNT_TEXT_MAX:
             return str(search_hit_count)
-        return f"{self._SEARCH_COUNT_TEXT_MAX}+"
+        return "++"
 
     def _decorated_markdown_icon(
         self, has_multi_view: bool, search_hit_count: int
@@ -1409,7 +1409,7 @@ class ColorizedMarkdownModel(QFileSystemModel):
             font = count_painter.font()
             base_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
             font.setFamily(_search_hit_count_font_family())
-            font.setPointSizeF(max(6.0, base_size - 2.0) * oversample)
+            font.setPointSizeF(max(7.0, base_size - 1.0) * oversample)
             font.setBold(False)
             count_painter.setFont(font)
             count_painter.setPen(QPen(QColor("#f5d34f")))
