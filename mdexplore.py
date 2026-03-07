@@ -47,6 +47,7 @@ from PySide6.QtGui import (
     QClipboard,
     QColor,
     QFont,
+    QFontDatabase,
     QIcon,
     QImage,
     QOffscreenSurface,
@@ -146,6 +147,11 @@ PDF_PRINT_PLANTUML_LANDSCAPE_ASPECT_RATIO = 1.18  # 1.18
 PREVIEW_SETHTML_MAX_BYTES = 650_000
 SVG_ICON_RENDER_OVERSAMPLE = 4
 SVG_ICON_ALPHA_CUTOFF = 1
+SEARCH_HIT_COUNT_FONT_PATHS = (
+    "LiberationSansNarrow-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Regular.ttf",
+)
+_SEARCH_HIT_COUNT_FONT_FAMILY_CACHE: str | None = None
 
 
 def _config_file_path() -> Path:
@@ -159,6 +165,46 @@ def _letter_pdf_page_layout() -> QPageLayout:
         QPageLayout.Orientation.Portrait,
         QMarginsF(0.0, 0.0, 0.0, 0.0),
     )
+
+
+def _search_hit_count_font_family() -> str:
+    """Return preferred narrow font family for gutter hit-count rendering."""
+    global _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
+    preferred_family = "Liberation Sans Narrow"
+    fallback_family = "Arial Narrow"
+
+    # Honor an already-resolved non-fallback family immediately.
+    if (
+        _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
+        and _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE != fallback_family
+    ):
+        return _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
+
+    # If the preferred family is already available system-wide, use it directly.
+    try:
+        families = set(QFontDatabase.families())
+    except Exception:
+        families = set()
+    if preferred_family in families:
+        _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE = preferred_family
+        return _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
+
+    base_dir = Path(__file__).resolve().parent
+    for candidate in SEARCH_HIT_COUNT_FONT_PATHS:
+        raw_path = Path(candidate)
+        font_path = raw_path if raw_path.is_absolute() else (base_dir / raw_path)
+        if not font_path.is_file():
+            continue
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        if font_id == -1:
+            continue
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE = families[0]
+            return _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
+
+    _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE = fallback_family
+    return _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE
 
 
 def _configure_qt_graphics_fallback() -> None:
@@ -1081,8 +1127,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
     _ICON_SIZE = 16
     _ICON_GAP = 2
     _VIEWS_ICON_SIZE = 13
-    _SEARCH_ICON_SIZE = 8
-    _SEARCH_SLOT_WIDTH = 10
+    _SEARCH_SLOT_WIDTH = 14
+    _SEARCH_COUNT_TEXT_MAX = 99
+    _SEARCH_COUNT_OVERSAMPLE = 5
     _GUTTER_WIDTH = _SEARCH_SLOT_WIDTH + (_ICON_SIZE + _ICON_GAP)
 
     def __init__(self, parent=None) -> None:
@@ -1091,14 +1138,13 @@ class ColorizedMarkdownModel(QFileSystemModel):
         # the view stays responsive even in large directories.
         self._dir_color_map: dict[str, dict[str, str]] = {}
         self._loaded_dirs: set[str] = set()
-        self._search_match_paths: set[str] = set()
+        self._search_match_counts: dict[str, int] = {}
         self._multi_view_paths: set[str] = set()
         self._markdown_icon = _load_svg_icon("markdown.svg", QColor("#bcc5d1"))
         if self._markdown_icon.isNull():
             self._markdown_icon = _build_markdown_icon()
         self._views_icon = _load_svg_icon("views.svg", QColor("#bcc5d1"))
-        self._search_hit_icon = _load_svg_icon("search-hit.svg", QColor("#f5d34f"))
-        self._decorated_icon_cache: dict[tuple[bool, bool], QIcon] = {}
+        self._decorated_icon_cache: dict[tuple[bool, str], QIcon] = {}
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         # This model only customizes markdown files; directories continue to use
@@ -1107,9 +1153,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
                 path_key = self._path_key(Path(info.filePath()))
-                has_search_match = path_key in self._search_match_paths
+                search_hit_count = self._search_match_counts.get(path_key, 0)
                 has_multi_view = path_key in self._multi_view_paths
-                return self._decorated_markdown_icon(has_multi_view, has_search_match)
+                return self._decorated_markdown_icon(has_multi_view, search_hit_count)
         if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
@@ -1128,7 +1174,9 @@ class ColorizedMarkdownModel(QFileSystemModel):
         if role == Qt.ItemDataRole.FontRole:
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
-                if self._path_key(Path(info.filePath())) in self._search_match_paths:
+                if self._search_match_counts.get(
+                    self._path_key(Path(info.filePath())), 0
+                ) > 0:
                     base_font = super().data(index, role)
                     font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
                     font.setBold(True)
@@ -1231,10 +1279,26 @@ class ColorizedMarkdownModel(QFileSystemModel):
         return color_map.get(path.name)
 
     def set_search_match_paths(self, paths: set[Path]) -> None:
-        self._search_match_paths = {self._path_key(path) for path in paths}
+        self._search_match_counts = {self._path_key(path): 1 for path in paths}
+        self._decorated_icon_cache.clear()
+
+    def set_search_match_counts(self, match_counts: dict[Path, int]) -> None:
+        """Replace active search-hit counts by path (non-positive counts omitted)."""
+        next_counts: dict[str, int] = {}
+        for path, raw_count in match_counts.items():
+            try:
+                count = int(raw_count)
+            except Exception:
+                continue
+            if count <= 0:
+                continue
+            next_counts[self._path_key(path)] = count
+        self._search_match_counts = next_counts
+        self._decorated_icon_cache.clear()
 
     def clear_search_match_paths(self) -> None:
-        self._search_match_paths.clear()
+        self._search_match_counts.clear()
+        self._decorated_icon_cache.clear()
 
     def set_multi_view_paths(self, paths: set[Path]) -> None:
         self._multi_view_paths = {self._path_key(path) for path in paths}
@@ -1299,10 +1363,19 @@ class ColorizedMarkdownModel(QFileSystemModel):
     def decorated_icon_size(cls) -> QSize:
         return QSize(cls._GUTTER_WIDTH + cls._ICON_SIZE, cls._ICON_SIZE)
 
+    def _search_count_display_text(self, search_hit_count: int) -> str:
+        """Render compact count text for the search slot."""
+        if search_hit_count <= 0:
+            return ""
+        if search_hit_count <= self._SEARCH_COUNT_TEXT_MAX:
+            return str(search_hit_count)
+        return f"{self._SEARCH_COUNT_TEXT_MAX}+"
+
     def _decorated_markdown_icon(
-        self, has_multi_view: bool, has_search_match: bool
+        self, has_multi_view: bool, search_hit_count: int
     ) -> QIcon:
-        cache_key = (has_multi_view, has_search_match)
+        search_count_text = self._search_count_display_text(search_hit_count)
+        cache_key = (has_multi_view, search_count_text)
         cached = self._decorated_icon_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1315,13 +1388,45 @@ class ColorizedMarkdownModel(QFileSystemModel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        if has_search_match:
-            search_pixmap = self._search_hit_icon.pixmap(
-                self._SEARCH_ICON_SIZE, self._SEARCH_ICON_SIZE
+        if search_count_text:
+            # Supersample only the count text layer (not the entire gutter),
+            # then downscale into the fixed slot for cleaner glyph edges while
+            # keeping icon geometry unchanged.
+            oversample = max(1, int(self._SEARCH_COUNT_OVERSAMPLE))
+            slot_w = self._SEARCH_SLOT_WIDTH
+            slot_h = self._ICON_SIZE
+            hi_w = slot_w * oversample
+            hi_h = slot_h * oversample
+
+            count_canvas = QPixmap(hi_w, hi_h)
+            count_canvas.fill(Qt.GlobalColor.transparent)
+            count_painter = QPainter(count_canvas)
+            count_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            count_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            count_painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform, True
             )
-            search_x = max(0, (self._SEARCH_SLOT_WIDTH - self._SEARCH_ICON_SIZE) // 2)
-            search_y = max(0, (self._ICON_SIZE - self._SEARCH_ICON_SIZE) // 2)
-            painter.drawPixmap(search_x, search_y, search_pixmap)
+            font = count_painter.font()
+            base_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
+            font.setFamily(_search_hit_count_font_family())
+            font.setPointSizeF(max(6.0, base_size - 2.0) * oversample)
+            font.setBold(False)
+            count_painter.setFont(font)
+            count_painter.setPen(QPen(QColor("#f5d34f")))
+            count_painter.drawText(
+                QRect(0, 0, hi_w, hi_h),
+                Qt.AlignmentFlag.AlignCenter,
+                search_count_text,
+            )
+            count_painter.end()
+
+            count_layer = count_canvas.scaled(
+                slot_w,
+                slot_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(0, 0, count_layer)
         if has_multi_view:
             views_pixmap = self._views_icon.pixmap(
                 self._VIEWS_ICON_SIZE, self._VIEWS_ICON_SIZE
@@ -6925,6 +7030,9 @@ class MdExploreWindow(QMainWindow):
         self.tree.setModel(self.model)
         self.tree.setItemDelegate(MarkdownTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedMarkdownModel.decorated_icon_size())
+        # Reduce branch indentation so gutter markers/counts sit closer to the
+        # left pane edge.
+        self.tree.setIndentation(14)
         self.tree.setHeaderHidden(True)
         self.tree.hideColumn(1)
         self.tree.hideColumn(2)
@@ -9194,11 +9302,13 @@ class MdExploreWindow(QMainWindow):
 
         scope = self._highlight_scope_directory()
         predicate = self._compile_match_predicate(query)
+        hit_counter = self._compile_match_hit_counter(query)
         candidates = self._list_markdown_files_non_recursive(scope)
         self.statusBar().showMessage(
             f"Searching {len(candidates)} markdown file(s) in {scope}...",
         )
         matches: list[Path] = []
+        match_counts: dict[Path, int] = {}
 
         for path in candidates:
             try:
@@ -9208,9 +9318,11 @@ class MdExploreWindow(QMainWindow):
             # Search over file name + body to support quick discovery.
             if predicate(path.name, content):
                 matches.append(path)
+                count = hit_counter(path.name, content)
+                match_counts[path] = count if count > 0 else 1
 
         self.current_match_files = matches
-        self.model.set_search_match_paths(set(matches))
+        self.model.set_search_match_counts(match_counts)
         self.tree.viewport().update()
         self.statusBar().showMessage(
             f"Matched {len(matches)} of {len(candidates)} markdown file(s) in {scope}",
@@ -9742,6 +9854,45 @@ class MdExploreWindow(QMainWindow):
                 # Ignore files that disappear or become inaccessible mid-scan.
                 pass
         return files
+
+    def _compile_match_hit_counter(self, query: str):
+        """Compile a lightweight per-file hit counter from query terms.
+
+        The counter mirrors search term semantics:
+        - Quoted terms are case-sensitive.
+        - Unquoted terms are case-insensitive.
+        - Boolean operators are ignored for counting; counts are additive across
+          unique TERM tokens and are only used for files that already matched
+          the full boolean predicate.
+        """
+        tokens = self._tokenize_match_query(query)
+        compiled_patterns: list[re.Pattern[str]] = []
+        seen: set[str] = set()
+
+        for token_type, token_value, is_quoted in tokens:
+            if token_type != "TERM":
+                continue
+            term = token_value.strip()
+            if not term:
+                continue
+            key = f"Q:{term}" if is_quoted else f"I:{term.casefold()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            flags = 0 if is_quoted else re.IGNORECASE
+            compiled_patterns.append(re.compile(re.escape(term), flags))
+
+        if not compiled_patterns:
+            return lambda _name, _content: 0
+
+        def counter(file_name: str, content: str) -> int:
+            haystack = f"{file_name}\n{content}"
+            total = 0
+            for pattern in compiled_patterns:
+                total += len(pattern.findall(haystack))
+            return total
+
+        return counter
 
     def _compile_match_predicate(self, query: str):
         """Compile boolean query with implicit AND, quotes, and CLOSE(...)."""
