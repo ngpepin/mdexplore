@@ -11565,6 +11565,7 @@ class MdExploreWindow(QMainWindow):
       let clickedHighlightId = "";
       let clickedOffset = null;
       try {
+        const eventType = event && typeof event.type === "string" ? event.type : "";
         const clickX =
           event && Number.isFinite(event.clientX) ? event.clientX : null;
         const clickY =
@@ -11572,7 +11573,6 @@ class MdExploreWindow(QMainWindow):
         if (Number.isFinite(clickX) && Number.isFinite(clickY)) {
           window.__mdexploreLastContextClientX = clickX;
           window.__mdexploreLastContextClientY = clickY;
-          clickedOffset = textOffsetFromPoint(clickX, clickY);
         }
 
         let target = normalizeEventTarget(event ? event.target : null);
@@ -11587,7 +11587,22 @@ class MdExploreWindow(QMainWindow):
           ? String(mark.getAttribute("data-mdexplore-persistent-highlight-id") || "").trim()
           : "";
 
-        if (!clickedHighlightId && Number.isFinite(clickedOffset)) {
+        // Heavy text-offset probing is intentionally limited to context-menu
+        // events to keep normal preview interactions responsive.
+        if (
+          eventType === "contextmenu" &&
+          !clickedHighlightId &&
+          Number.isFinite(clickX) &&
+          Number.isFinite(clickY)
+        ) {
+          clickedOffset = textOffsetFromPoint(clickX, clickY);
+        }
+
+        if (
+          eventType === "contextmenu" &&
+          !clickedHighlightId &&
+          Number.isFinite(clickedOffset)
+        ) {
           const entries = Array.isArray(window.__mdexplorePersistentHighlights)
             ? window.__mdexplorePersistentHighlights
             : [];
@@ -11614,7 +11629,6 @@ class MdExploreWindow(QMainWindow):
     };
     document.addEventListener("contextmenu", updateLastClickedHighlight, true);
     document.addEventListener("mousedown", updateLastClickedHighlight, true);
-    document.addEventListener("mouseup", updateLastClickedHighlight, true);
     window.__mdexplorePersistentHighlightContextHooked = true;
   }
   if (typeof window.__mdexploreLastPersistentHighlightId !== "string") {
