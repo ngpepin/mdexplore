@@ -10632,6 +10632,16 @@ class MdExploreWindow(QMainWindow):
   const hintedText = __SELECTED_HINT__;
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
 
+  function shouldSkipTextNode(node) {
+    if (!node || typeof node.nodeValue !== "string") return true;
+    const value = node.nodeValue;
+    if (!value.length) return true;
+    // Ignore formatting-only whitespace that contains newlines/tabs so
+    // highlight offsets do not drift into structural gaps between blocks.
+    if (!/[^\s]/.test(value) && /[\\r\\n\\t]/.test(value)) return true;
+    return false;
+  }
+
   function lineInfo(node) {
     if (!node) return null;
     if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
@@ -10669,7 +10679,7 @@ class MdExploreWindow(QMainWindow):
           NodeFilter.SHOW_TEXT,
           {
             acceptNode(node) {
-              if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+              if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
               const parent = node.parentElement;
               if (!parent) return NodeFilter.FILTER_REJECT;
               if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
@@ -10723,7 +10733,7 @@ class MdExploreWindow(QMainWindow):
         NodeFilter.SHOW_TEXT,
         {
             acceptNode(node) {
-            if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+            if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
             const parent = node.parentElement;
             if (!parent) return NodeFilter.FILTER_REJECT;
             if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
@@ -10748,7 +10758,7 @@ class MdExploreWindow(QMainWindow):
       NodeFilter.SHOW_TEXT,
       {
         acceptNode(node) {
-          if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+          if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
           const parent = node.parentElement;
           if (!parent) return NodeFilter.FILTER_REJECT;
           if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
@@ -10794,12 +10804,31 @@ class MdExploreWindow(QMainWindow):
 
   function elementFromClick(x, y) {
     const dpr = window.devicePixelRatio || 1;
+    const sx =
+      window.scrollX ||
+      window.pageXOffset ||
+      document.documentElement.scrollLeft ||
+      document.body.scrollLeft ||
+      0;
+    const sy =
+      window.scrollY ||
+      window.pageYOffset ||
+      document.documentElement.scrollTop ||
+      document.body.scrollTop ||
+      0;
     const candidates = [
       [x, y],
+      [x - sx, y - sy],
+      [x + sx, y + sy],
       [x * dpr, y * dpr],
+      [(x - sx) * dpr, (y - sy) * dpr],
       [x / dpr, y / dpr],
+      [(x - sx) / dpr, (y - sy) / dpr],
     ];
     for (const pair of candidates) {
+      if (!Number.isFinite(pair[0]) || !Number.isFinite(pair[1])) {
+        continue;
+      }
       const el = document.elementFromPoint(pair[0], pair[1]);
       if (el) return el;
     }
@@ -10902,13 +10931,42 @@ class MdExploreWindow(QMainWindow):
   }
   const hasSelection = !!(selectedText && selectedText.trim());
   const highlightEntries = normalizeHighlightEntries(window.__mdexplorePersistentHighlights || []);
-  const clickedNode = elementFromClick(__CLICK_X__, __CLICK_Y__);
+  const fallbackClickX =
+    typeof window.__mdexploreLastContextClientX === "number" &&
+    Number.isFinite(window.__mdexploreLastContextClientX)
+      ? window.__mdexploreLastContextClientX
+      : null;
+  const fallbackClickY =
+    typeof window.__mdexploreLastContextClientY === "number" &&
+    Number.isFinite(window.__mdexploreLastContextClientY)
+      ? window.__mdexploreLastContextClientY
+      : null;
+  const clickedNode =
+    elementFromClick(__CLICK_X__, __CLICK_Y__) ||
+    (Number.isFinite(fallbackClickX) && Number.isFinite(fallbackClickY)
+      ? elementFromClick(fallbackClickX, fallbackClickY)
+      : null);
   const clickedHighlight = clickedNode && clickedNode.closest
     ? clickedNode.closest('span[data-mdexplore-persistent-highlight="1"]')
     : null;
+  const fallbackClickedHighlightId =
+    typeof window.__mdexploreLastPersistentHighlightId === "string"
+      ? window.__mdexploreLastPersistentHighlightId.trim()
+      : "";
   const clickedHighlightId = clickedHighlight
     ? String(clickedHighlight.getAttribute("data-mdexplore-persistent-highlight-id") || "")
-    : "";
+    : fallbackClickedHighlightId;
+  let clickedOffset = clickTextOffset(__CLICK_X__, __CLICK_Y__);
+  if (clickedOffset === null && Number.isFinite(fallbackClickX) && Number.isFinite(fallbackClickY)) {
+    clickedOffset = clickTextOffset(fallbackClickX, fallbackClickY);
+  }
+  if (
+    clickedOffset === null &&
+    typeof window.__mdexploreLastPersistentHighlightOffset === "number" &&
+    Number.isFinite(window.__mdexploreLastPersistentHighlightOffset)
+  ) {
+    clickedOffset = Math.max(0, Math.floor(window.__mdexploreLastPersistentHighlightOffset));
+  }
   let selectionOffsetStart = null;
   let selectionOffsetEnd = null;
   let selectionHasHighlightedPart = false;
@@ -10942,6 +11000,7 @@ class MdExploreWindow(QMainWindow):
         selectionHasUnhighlightedPart,
         selectedHighlightIds,
         clickedHighlightId,
+        clickedOffset,
       };
     }
     const startInfo = lineInfo(range.startContainer);
@@ -10958,6 +11017,7 @@ class MdExploreWindow(QMainWindow):
         selectionHasUnhighlightedPart,
         selectedHighlightIds,
         clickedHighlightId,
+        clickedOffset,
       };
     }
   }
@@ -10993,6 +11053,7 @@ class MdExploreWindow(QMainWindow):
       selectionHasUnhighlightedPart,
       selectedHighlightIds,
       clickedHighlightId,
+      clickedOffset,
     };
   }
 
@@ -11005,6 +11066,7 @@ class MdExploreWindow(QMainWindow):
     selectionHasUnhighlightedPart: hasSelection ? true : false,
     selectedHighlightIds,
     clickedHighlightId,
+    clickedOffset,
   };
 })();
 """
@@ -11063,6 +11125,7 @@ class MdExploreWindow(QMainWindow):
             f"has_highlighted_part={has_highlighted_part} "
             f"has_unhighlighted_part={has_unhighlighted_part} "
             f"clicked_highlight_id={'yes' if bool(clicked_highlight_id) else 'no'} "
+            f"clicked_offset={selection_info.get('clickedOffset') if isinstance(selection_info, dict) else None} "
             f"offsets={self._selection_offsets_from_info(selection_info)}"
         )
 
@@ -11153,6 +11216,15 @@ class MdExploreWindow(QMainWindow):
 (() => {
   const root = document.querySelector("main") || document.body;
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
+  function shouldSkipTextNode(node) {
+    if (!node || typeof node.nodeValue !== "string") return true;
+    const value = node.nodeValue;
+    if (!value.length) return true;
+    // Ignore formatting-only whitespace that contains newlines/tabs so
+    // recovered offsets match user-visible text flow.
+    if (!/[^\s]/.test(value) && /[\\r\\n\\t]/.test(value)) return true;
+    return false;
+  }
   if (!root) {
     return {
       hasSelection: false,
@@ -11168,7 +11240,7 @@ class MdExploreWindow(QMainWindow):
       NodeFilter.SHOW_TEXT,
       {
         acceptNode(node) {
-          if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+          if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
           const parent = node.parentElement;
           if (!parent) return NodeFilter.FILTER_REJECT;
           if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
@@ -11196,7 +11268,7 @@ class MdExploreWindow(QMainWindow):
           NodeFilter.SHOW_TEXT,
           {
             acceptNode(node) {
-              if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+              if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
               const parent = node.parentElement;
               if (!parent) return NodeFilter.FILTER_REJECT;
               if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
@@ -11310,6 +11382,58 @@ class MdExploreWindow(QMainWindow):
 
         self.preview.page().runJavaScript(js, _on_result)
 
+    def _request_live_preview_highlight_target(self, callback) -> None:
+        """Read the latest in-page clicked highlight metadata from preview DOM."""
+        js_expr = """
+(() => {
+  const rawId =
+    typeof window.__mdexploreLastPersistentHighlightId === "string"
+      ? window.__mdexploreLastPersistentHighlightId.trim()
+      : "";
+  const rawOffset =
+    typeof window.__mdexploreLastPersistentHighlightOffset === "number" &&
+    Number.isFinite(window.__mdexploreLastPersistentHighlightOffset)
+      ? Math.max(0, Math.floor(window.__mdexploreLastPersistentHighlightOffset))
+      : null;
+  return {
+    clickedHighlightId: rawId,
+    clickedOffset: rawOffset,
+  };
+})()
+"""
+        js = f"""
+(() => {{
+  try {{
+    const __result = {js_expr};
+    return JSON.stringify(__result || {{}});
+  }} catch (err) {{
+    return JSON.stringify({{
+      __error__: String(err),
+    }});
+  }}
+}})();
+"""
+
+        def _on_result(result) -> None:
+            normalized: dict = {}
+            if isinstance(result, dict):
+                normalized = result
+            elif isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    normalized = parsed
+            self._debug_log(
+                "highlight-click-target result "
+                f"id={'yes' if bool(str(normalized.get('clickedHighlightId') or '').strip()) else 'no'} "
+                f"offset={normalized.get('clickedOffset')}"
+            )
+            callback(normalized)
+
+        self.preview.page().runJavaScript(js, _on_result)
+
     def _append_persistent_preview_highlight_range(
         self, path_key: str, start: int, end: int
     ) -> None:
@@ -11366,7 +11490,7 @@ class MdExploreWindow(QMainWindow):
         )
         payload_json = json.dumps(entries, separators=(",", ":"), ensure_ascii=False)
         color_json = json.dumps(self.PREVIEW_HIGHLIGHT_COLOR)
-        js = """
+        js_expr = """
 (() => {
   const incoming = __PAYLOAD__;
   const highlightColor = __COLOR__;
@@ -11374,6 +11498,155 @@ class MdExploreWindow(QMainWindow):
   if (!root) {
     window.__mdexplorePersistentHighlights = [];
     return { applied: 0, entries: 0 };
+  }
+
+  function normalizeEventTarget(rawTarget) {
+    if (rawTarget instanceof Element) {
+      return rawTarget;
+    }
+    if (
+      rawTarget &&
+      rawTarget.nodeType === Node.TEXT_NODE &&
+      rawTarget.parentElement instanceof Element
+    ) {
+      return rawTarget.parentElement;
+    }
+    return null;
+  }
+
+  function textOffsetFromPoint(clickX, clickY) {
+    if (!Number.isFinite(clickX) || !Number.isFinite(clickY) || !root) {
+      return null;
+    }
+    try {
+      let pointRange = null;
+      if (document.caretRangeFromPoint) {
+        pointRange = document.caretRangeFromPoint(clickX, clickY);
+      } else if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(clickX, clickY);
+        if (pos && pos.offsetNode) {
+          pointRange = document.createRange();
+          pointRange.setStart(pos.offsetNode, pos.offset || 0);
+          pointRange.collapse(true);
+        }
+      }
+      if (!(pointRange instanceof Range)) {
+        return null;
+      }
+      const probe = document.createRange();
+      probe.selectNodeContents(root);
+      probe.setEnd(pointRange.startContainer, pointRange.startOffset);
+      const fragment = probe.cloneContents();
+      const walker = document.createTreeWalker(
+        fragment,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode(node) {
+            if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          },
+        },
+      );
+      let offset = 0;
+      while (walker.nextNode()) {
+        offset += (walker.currentNode.nodeValue || "").length;
+      }
+      return Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  if (!window.__mdexplorePersistentHighlightContextHooked) {
+    const updateLastClickedHighlight = (event) => {
+      let clickedHighlightId = "";
+      let clickedOffset = null;
+      try {
+        const clickX =
+          event && Number.isFinite(event.clientX) ? event.clientX : null;
+        const clickY =
+          event && Number.isFinite(event.clientY) ? event.clientY : null;
+        if (Number.isFinite(clickX) && Number.isFinite(clickY)) {
+          window.__mdexploreLastContextClientX = clickX;
+          window.__mdexploreLastContextClientY = clickY;
+          clickedOffset = textOffsetFromPoint(clickX, clickY);
+        }
+
+        let target = normalizeEventTarget(event ? event.target : null);
+        if (!target && Number.isFinite(clickX) && Number.isFinite(clickY)) {
+          target = normalizeEventTarget(document.elementFromPoint(clickX, clickY));
+        }
+        const mark =
+          target && target.closest
+            ? target.closest('span[data-mdexplore-persistent-highlight="1"]')
+            : null;
+        clickedHighlightId = mark
+          ? String(mark.getAttribute("data-mdexplore-persistent-highlight-id") || "").trim()
+          : "";
+
+        if (!clickedHighlightId && Number.isFinite(clickedOffset)) {
+          const entries = Array.isArray(window.__mdexplorePersistentHighlights)
+            ? window.__mdexplorePersistentHighlights
+            : [];
+          for (const item of entries) {
+            if (!item || typeof item !== "object") continue;
+            const id = typeof item.id === "string" ? item.id.trim() : "";
+            const start = Number(item.start);
+            const end = Number(item.end);
+            if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+            if (Math.floor(start) <= clickedOffset && clickedOffset <= Math.floor(end)) {
+              clickedHighlightId = id;
+              break;
+            }
+          }
+        }
+      } catch (_err) {
+        clickedHighlightId = "";
+        clickedOffset = null;
+      }
+      window.__mdexploreLastPersistentHighlightId = clickedHighlightId;
+      window.__mdexploreLastPersistentHighlightOffset = Number.isFinite(clickedOffset)
+        ? Math.floor(clickedOffset)
+        : null;
+    };
+    document.addEventListener("contextmenu", updateLastClickedHighlight, true);
+    document.addEventListener("mousedown", updateLastClickedHighlight, true);
+    document.addEventListener("mouseup", updateLastClickedHighlight, true);
+    window.__mdexplorePersistentHighlightContextHooked = true;
+  }
+  if (typeof window.__mdexploreLastPersistentHighlightId !== "string") {
+    window.__mdexploreLastPersistentHighlightId = "";
+  }
+  if (
+    typeof window.__mdexploreLastPersistentHighlightOffset !== "number" ||
+    !Number.isFinite(window.__mdexploreLastPersistentHighlightOffset)
+  ) {
+    window.__mdexploreLastPersistentHighlightOffset = null;
+  }
+  if (
+    typeof window.__mdexploreLastContextClientX !== "number" ||
+    !Number.isFinite(window.__mdexploreLastContextClientX)
+  ) {
+    window.__mdexploreLastContextClientX = null;
+  }
+  if (
+    typeof window.__mdexploreLastContextClientY !== "number" ||
+    !Number.isFinite(window.__mdexploreLastContextClientY)
+  ) {
+    window.__mdexploreLastContextClientY = null;
+  }
+
+  function shouldSkipTextNode(node) {
+    if (!node || typeof node.nodeValue !== "string") return true;
+    const value = node.nodeValue;
+    if (!value.length) return true;
+    // Ignore formatting-only whitespace that contains newlines/tabs so
+    // highlights do not materialize as visual linefeed artifacts.
+    if (!/[^\s]/.test(value) && /[\\r\\n\\t]/.test(value)) return true;
+    return false;
   }
 
   for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]'))) {
@@ -11425,7 +11698,7 @@ class MdExploreWindow(QMainWindow):
     NodeFilter.SHOW_TEXT,
     {
       acceptNode(node) {
-        if (!node || !node.nodeValue || !node.nodeValue.length) {
+        if (shouldSkipTextNode(node)) {
           return NodeFilter.FILTER_REJECT;
         }
         const parent = node.parentElement;
@@ -11452,7 +11725,12 @@ class MdExploreWindow(QMainWindow):
   }
 
   if (!segments.length) {
-    return { applied: 0, entries: entries.length };
+    return {
+      applied: 0,
+      entries: entries.length,
+      segments: 0,
+      totalLength: 0,
+    };
   }
 
   let applied = 0;
@@ -11512,15 +11790,54 @@ class MdExploreWindow(QMainWindow):
     }
   }
 
-  return { applied, entries: entries.length };
+  return {
+    applied,
+    entries: entries.length,
+    segments: segments.length,
+    totalLength,
+  };
 })();
 """
-        js = js.replace("__PAYLOAD__", payload_json).replace("__COLOR__", color_json)
+        js_expr = js_expr.replace("__PAYLOAD__", payload_json).replace(
+            "__COLOR__", color_json
+        )
+        js = f"""
+(() => {{
+  try {{
+    const __result = {js_expr};
+    return JSON.stringify(__result || {{}});
+  }} catch (err) {{
+    return JSON.stringify({{
+      __error__: String(err),
+      __stack__: err && err.stack ? String(err.stack) : "",
+    }});
+  }}
+}})();
+"""
+
+        def _normalize_apply_result(result) -> dict:
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    return parsed
+            return {}
+
         if completion is None:
-            self.preview.page().runJavaScript(js)
+            self.preview.page().runJavaScript(
+                js,
+                lambda result: self._debug_log(
+                    "highlight-apply-no-completion "
+                    f"result={_normalize_apply_result(result)}"
+                ),
+            )
             return
         self.preview.page().runJavaScript(
-            js, lambda result: completion(result if isinstance(result, dict) else {})
+            js, lambda result: completion(_normalize_apply_result(result))
         )
 
     def _add_persistent_preview_highlight(
@@ -11608,6 +11925,18 @@ class MdExploreWindow(QMainWindow):
                         found.add(entry_id)
             return found
 
+        def _ids_containing_offset(offset: int) -> set[str]:
+            found: set[str] = set()
+            for entry in entries:
+                start = int(entry.get("start", -1))
+                end = int(entry.get("end", -1))
+                # Accept exact-end clicks as part of the same block for usability.
+                if start <= offset <= end:
+                    entry_id = str(entry.get("id", "")).strip()
+                    if entry_id:
+                        found.add(entry_id)
+            return found
+
         def _apply_ids(ids_to_remove: set[str]) -> None:
             updated = [
                 entry for entry in entries if str(entry.get("id", "")) not in ids_to_remove
@@ -11636,6 +11965,9 @@ class MdExploreWindow(QMainWindow):
                 for item in raw_ids:
                     if isinstance(item, str) and item.strip():
                         ids_to_remove.add(item.strip())
+            clicked_offset_raw = selection_info.get("clickedOffset")
+            if isinstance(clicked_offset_raw, (int, float)):
+                ids_to_remove.update(_ids_containing_offset(int(clicked_offset_raw)))
 
         if ids_to_remove:
             _apply_ids(ids_to_remove)
@@ -11649,7 +11981,23 @@ class MdExploreWindow(QMainWindow):
         if not selected_text.strip():
             selected_text = selected_text_hint
         if not selected_text.strip():
-            self.statusBar().showMessage("No highlighted block selected", 2500)
+            def _apply_live_click_removal(target_info: dict) -> None:
+                if self._current_preview_path_key() != path_key:
+                    return
+                live_ids: set[str] = set()
+                if isinstance(target_info, dict):
+                    live_clicked = target_info.get("clickedHighlightId")
+                    if isinstance(live_clicked, str) and live_clicked.strip():
+                        live_ids.add(live_clicked.strip())
+                    live_offset_raw = target_info.get("clickedOffset")
+                    if isinstance(live_offset_raw, (int, float)):
+                        live_ids.update(_ids_containing_offset(int(live_offset_raw)))
+                if not live_ids:
+                    self.statusBar().showMessage("No highlighted block selected", 2500)
+                    return
+                _apply_ids(live_ids)
+
+            self._request_live_preview_highlight_target(_apply_live_click_removal)
             return
 
         def _apply_live_removal(live_info: dict) -> None:

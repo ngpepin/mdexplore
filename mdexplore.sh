@@ -11,7 +11,7 @@ LOG_FILE="${LOG_DIR}/launcher.log"
 MAX_LOG_LINES=1000
 NON_INTERACTIVE=0
 # Set to true to pass --debug into mdexplore.py and enable mdexplore.log.
-DEBUG_MODE=false
+DEBUG_MODE=true
 
 trim_log_file() {
   local file_path="$1"
