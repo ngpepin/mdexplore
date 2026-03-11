@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Callable
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
@@ -6875,6 +6876,10 @@ class ViewTabBar(QTabBar):
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
     VIEWS_FILE_NAME = ".mdexplore-views.json"
+    HIGHLIGHTING_FILE_NAME = ".mdexplore-highlighting.json"
+    PREVIEW_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"
+    DEBUG_LOG_FILE_NAME = "mdexplore.log"
+    DEBUG_LOG_MAX_LINES = 10_000
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -6891,6 +6896,7 @@ class MdExploreWindow(QMainWindow):
         config_path: Path,
         mermaid_backend: str = MERMAID_BACKEND_JS,
         gpu_context_available: bool = False,
+        debug_mode: bool = False,
     ):
         super().__init__()
         # Persistent document/session state is split deliberately:
@@ -6958,6 +6964,19 @@ class MdExploreWindow(QMainWindow):
         self._persisted_view_sessions_by_dir: dict[str, dict[str, dict]] = {}
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
+        self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
+        self._current_preview_text_highlights: list[dict[str, int | str]] = []
+        self._next_text_highlight_id = 1
+        self._debug_enabled = bool(debug_mode)
+        self._debug_log_path = Path(__file__).resolve().parent / self.DEBUG_LOG_FILE_NAME
+        self._debug_log_line_count = 0
+        if self._debug_enabled:
+            self._debug_log_line_count = self._count_debug_log_lines()
+            self._trim_debug_log()
+            self._debug_log(
+                f"session-start root={self.root} mermaid_backend={mermaid_backend} "
+                f"gpu_context={bool(gpu_context_available)}"
+            )
         self._preview_html_temp_files: deque[Path] = deque()
         self._view_line_probe_pending = False
         self._last_view_line_probe_at = 0.0
@@ -7717,6 +7736,56 @@ class MdExploreWindow(QMainWindow):
         return cloned if isinstance(cloned, dict) else {}
 
     @staticmethod
+    def _clone_json_compatible_list(payload: list) -> list:
+        """Return a detached copy of a JSON-compatible list."""
+        try:
+            cloned = json.loads(json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            return []
+        return cloned if isinstance(cloned, list) else []
+
+    def _count_debug_log_lines(self) -> int:
+        """Return current debug log line count (best effort)."""
+        if not getattr(self, "_debug_enabled", False):
+            return 0
+        try:
+            with self._debug_log_path.open("r", encoding="utf-8", errors="replace") as fh:
+                return sum(1 for _ in fh)
+        except Exception:
+            return 0
+
+    def _trim_debug_log(self) -> None:
+        """Keep the debug log capped to the most recent configured line count."""
+        if not getattr(self, "_debug_enabled", False):
+            return
+        if self._debug_log_line_count <= self.DEBUG_LOG_MAX_LINES:
+            return
+        try:
+            recent = deque(maxlen=self.DEBUG_LOG_MAX_LINES)
+            with self._debug_log_path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    recent.append(line)
+            with self._debug_log_path.open("w", encoding="utf-8") as fh:
+                fh.writelines(recent)
+            self._debug_log_line_count = len(recent)
+        except Exception:
+            # Debug logging is non-critical and should never block UI behavior.
+            pass
+
+    def _debug_log(self, message: str) -> None:
+        """Append one timestamped debug line to mdexplore.log in project root."""
+        if not getattr(self, "_debug_enabled", False):
+            return
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with self._debug_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{stamp}] {message}\n")
+            self._debug_log_line_count += 1
+            self._trim_debug_log()
+        except Exception:
+            pass
+
+    @staticmethod
     def _path_directory_and_name(path_key: str | None) -> tuple[Path, str] | None:
         """Resolve a persisted path key into its directory and markdown filename."""
         if not isinstance(path_key, str) or not path_key:
@@ -7735,6 +7804,153 @@ class MdExploreWindow(QMainWindow):
     def _views_file_path(self, directory: Path) -> Path:
         """Return the sidecar JSON path that stores persisted document views."""
         return directory / self.VIEWS_FILE_NAME
+
+    def _highlighting_file_path(self, directory: Path) -> Path:
+        """Return the sidecar JSON path that stores preview text highlights."""
+        return directory / self.HIGHLIGHTING_FILE_NAME
+
+    @staticmethod
+    def _normalize_text_highlight_entries(raw_entries) -> list[dict[str, int | str]]:
+        """Sanitize and merge persistent text-highlight ranges."""
+        if not isinstance(raw_entries, list):
+            return []
+
+        sanitized: list[dict[str, int | str]] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            sanitized.append({"id": raw_id, "start": start, "end": end})
+
+        if not sanitized:
+            return []
+
+        sanitized.sort(key=lambda entry: (int(entry["start"]), int(entry["end"])))
+        merged: list[dict[str, int | str]] = []
+        for entry in sanitized:
+            if not merged:
+                merged.append(entry)
+                continue
+            prev = merged[-1]
+            prev_start = int(prev["start"])
+            prev_end = int(prev["end"])
+            cur_start = int(entry["start"])
+            cur_end = int(entry["end"])
+            # Merge overlap/adjacent ranges so extend/remove actions remain predictable.
+            if cur_start <= prev_end:
+                prev["start"] = min(prev_start, cur_start)
+                prev["end"] = max(prev_end, cur_end)
+                continue
+            merged.append(entry)
+        return merged
+
+    def _new_text_highlight_id(self) -> str:
+        """Return a unique id for a persistent preview text-highlight range."""
+        token = self._next_text_highlight_id
+        self._next_text_highlight_id += 1
+        return f"h{int(time.time() * 1000):x}-{token:x}"
+
+    def _directory_text_highlights(self, directory: Path) -> dict[str, list[dict]]:
+        """Load or return cached text highlights for one directory sidecar."""
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        directory_key = str(resolved_directory)
+        cached = self._persisted_text_highlights_by_dir.get(directory_key)
+        if cached is not None:
+            return cached
+
+        highlights_by_file: dict[str, list[dict]] = {}
+        file_path = self._highlighting_file_path(resolved_directory)
+        try:
+            raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except Exception:
+            raw_payload = None
+
+        file_map = (
+            raw_payload.get("files") if isinstance(raw_payload, dict) else raw_payload
+        )
+        if isinstance(file_map, dict):
+            for raw_name, raw_entries in file_map.items():
+                if not isinstance(raw_name, str):
+                    continue
+                file_name = Path(raw_name).name
+                if not file_name.lower().endswith(".md"):
+                    continue
+                entries = self._normalize_text_highlight_entries(raw_entries)
+                if entries:
+                    highlights_by_file[file_name] = entries
+
+        self._persisted_text_highlights_by_dir[directory_key] = highlights_by_file
+        return highlights_by_file
+
+    def _save_directory_text_highlights(self, directory: Path) -> None:
+        """Persist one directory's text-highlight sidecar, failing quietly on IO errors."""
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        directory_key = str(resolved_directory)
+        highlights_by_file = self._persisted_text_highlights_by_dir.get(
+            directory_key, {}
+        )
+        file_path = self._highlighting_file_path(resolved_directory)
+
+        serializable_files: dict[str, list[dict]] = {}
+        if isinstance(highlights_by_file, dict):
+            for file_name in sorted(highlights_by_file):
+                raw_entries = highlights_by_file.get(file_name)
+                entries = self._normalize_text_highlight_entries(raw_entries)
+                if entries:
+                    serializable_files[file_name] = entries
+
+        try:
+            if not serializable_files:
+                if file_path.exists():
+                    file_path.unlink()
+                return
+            payload = {"files": serializable_files}
+            file_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            # Requested behavior for sidecars is best-effort persistence.
+            pass
+
+    def _load_text_highlights_for_path_key(self, path_key: str | None) -> list[dict]:
+        """Return persisted text-highlight entries for one markdown path key."""
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return []
+        directory, file_name = resolved
+        entries = self._directory_text_highlights(directory).get(file_name, [])
+        return self._normalize_text_highlight_entries(entries)
+
+    def _persist_text_highlights_for_path_key(
+        self, path_key: str | None, entries: list[dict]
+    ) -> None:
+        """Persist one markdown file's text-highlight entries into its directory sidecar."""
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return
+        directory, file_name = resolved
+        normalized = self._normalize_text_highlight_entries(entries)
+        highlights_by_file = self._directory_text_highlights(directory)
+        if normalized:
+            highlights_by_file[file_name] = self._clone_json_compatible_list(normalized)
+        else:
+            highlights_by_file.pop(file_name, None)
+        self._save_directory_text_highlights(directory)
 
     def _directory_view_sessions(self, directory: Path) -> dict[str, dict]:
         """Load or return cached persisted view sessions for one directory."""
@@ -8995,6 +9211,7 @@ class MdExploreWindow(QMainWindow):
         self._scroll_restore_block_until = 0.0
         self._pending_preview_search_terms = []
         self._pending_preview_search_close_groups = []
+        self._current_preview_text_highlights = []
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
@@ -9034,6 +9251,7 @@ class MdExploreWindow(QMainWindow):
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
+        self._apply_persistent_preview_highlights(current_key)
         self._schedule_mermaid_cache_harvest_for(current_key)
         self._reapply_diagram_view_state_for(current_key)
         QTimer.singleShot(
@@ -10403,12 +10621,16 @@ class MdExploreWindow(QMainWindow):
         selected_text_hint = request.selectedText() if request is not None else ""
         click_x = int(pos.x())
         click_y = int(pos.y())
+        hint_json = json.dumps(selected_text_hint or "", ensure_ascii=True)
 
         # Capture selection mapping before context-menu interaction to avoid
         # losing selection state when the menu action is triggered.
         js = """
 (() => {
   const sel = window.getSelection();
+  const root = document.querySelector("main") || document.body;
+  const hintedText = __SELECTED_HINT__;
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
 
   function lineInfo(node) {
     if (!node) return null;
@@ -10432,6 +10654,217 @@ class MdExploreWindow(QMainWindow):
     }
     if (end <= start) end = start + 1;
     return { start, end };
+  }
+
+  function selectionOffsets(range) {
+    if (!(range instanceof Range) || !root) return null;
+    try {
+      function textLengthToBoundary(container, offset) {
+        const probe = document.createRange();
+        probe.selectNodeContents(root);
+        probe.setEnd(container, offset);
+        const fragment = probe.cloneContents();
+        const walker = document.createTreeWalker(
+          fragment,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode(node) {
+              if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            },
+          },
+        );
+        let total = 0;
+        while (walker.nextNode()) {
+          total += (walker.currentNode.nodeValue || "").length;
+        }
+        return total;
+      }
+
+      let start = textLengthToBoundary(range.startContainer, range.startOffset);
+      let end = textLengthToBoundary(range.endContainer, range.endOffset);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+      if (start > end) {
+        const tmp = start;
+        start = end;
+        end = tmp;
+      }
+      if (end <= start) end = start + 1;
+      return { start, end };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function clickTextOffset(clickX, clickY) {
+    if (!root) return null;
+    try {
+      let pointRange = null;
+      if (document.caretRangeFromPoint) {
+        pointRange = document.caretRangeFromPoint(clickX, clickY);
+      } else if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(clickX, clickY);
+        if (pos && pos.offsetNode) {
+          pointRange = document.createRange();
+          pointRange.setStart(pos.offsetNode, pos.offset || 0);
+          pointRange.collapse(true);
+        }
+      }
+      if (!(pointRange instanceof Range)) return null;
+      const probe = document.createRange();
+      probe.selectNodeContents(root);
+      probe.setEnd(pointRange.startContainer, pointRange.startOffset);
+      const fragment = probe.cloneContents();
+      const walker = document.createTreeWalker(
+        fragment,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode(node) {
+            if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          },
+        },
+      );
+      let offset = 0;
+      while (walker.nextNode()) {
+        offset += (walker.currentNode.nodeValue || "").length;
+      }
+      return Number.isFinite(offset) && offset >= 0 ? offset : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function rootTextContent() {
+    if (!root) return "";
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      },
+    );
+    let out = "";
+    while (walker.nextNode()) {
+      out += walker.currentNode.nodeValue || "";
+    }
+    return out;
+  }
+
+  function nearestTextOffsets(selected, clickX, clickY) {
+    if (!selected || !selected.length) return null;
+    const haystack = rootTextContent();
+    if (!haystack.length) return null;
+    const candidates = [];
+    const collapsed = selected.replace(/\\s+/g, " ").trim();
+    if (collapsed) candidates.push(collapsed);
+    const trimmed = selected.trim();
+    if (trimmed && !candidates.includes(trimmed)) candidates.push(trimmed);
+    const noCR = selected.replace(/\\r/g, "");
+    if (noCR && !candidates.includes(noCR)) candidates.push(noCR);
+    if (selected && !candidates.includes(selected)) candidates.push(selected);
+
+    const clickOffset = clickTextOffset(clickX, clickY);
+    let best = null;
+    for (const candidate of candidates) {
+      let idx = haystack.indexOf(candidate);
+      while (idx >= 0) {
+        const score = clickOffset === null ? 0 : Math.abs(idx - clickOffset);
+        if (!best || score < best.score) {
+          best = { start: idx, end: idx + candidate.length, score };
+        }
+        idx = haystack.indexOf(candidate, idx + Math.max(1, candidate.length));
+      }
+    }
+    if (!best) return null;
+    return { start: best.start, end: best.end };
+  }
+
+  function elementFromClick(x, y) {
+    const dpr = window.devicePixelRatio || 1;
+    const candidates = [
+      [x, y],
+      [x * dpr, y * dpr],
+      [x / dpr, y / dpr],
+    ];
+    for (const pair of candidates) {
+      const el = document.elementFromPoint(pair[0], pair[1]);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function normalizeHighlightEntries(raw) {
+    if (!Array.isArray(raw)) return [];
+    const prepared = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const id = typeof item.id === "string" ? item.id.trim() : "";
+      const start = Number(item.start);
+      const end = Number(item.end);
+      if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (end <= start || start < 0) continue;
+      prepared.push({ id, start: Math.floor(start), end: Math.floor(end) });
+    }
+    if (!prepared.length) return [];
+    prepared.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+    const merged = [];
+    for (const item of prepared) {
+      if (!merged.length) {
+        merged.push(item);
+        continue;
+      }
+      const prev = merged[merged.length - 1];
+      if (item.start <= prev.end) {
+        prev.end = Math.max(prev.end, item.end);
+        continue;
+      }
+      merged.push(item);
+    }
+    return merged;
+  }
+
+  function overlapInfo(rangeStart, rangeEnd, entries) {
+    const ids = new Set();
+    const overlaps = [];
+    for (const item of entries) {
+      const start = Math.max(rangeStart, item.start);
+      const end = Math.min(rangeEnd, item.end);
+      if (end <= start) continue;
+      overlaps.push({ start, end });
+      ids.add(item.id);
+    }
+    if (!overlaps.length) {
+      return { highlightedLength: 0, ids: [] };
+    }
+    overlaps.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+    const merged = [overlaps[0]];
+    for (let i = 1; i < overlaps.length; i += 1) {
+      const item = overlaps[i];
+      const prev = merged[merged.length - 1];
+      if (item.start <= prev.end) {
+        prev.end = Math.max(prev.end, item.end);
+      } else {
+        merged.push(item);
+      }
+    }
+    let highlightedLength = 0;
+    for (const item of merged) {
+      highlightedLength += Math.max(0, item.end - item.start);
+    }
+    return { highlightedLength, ids: Array.from(ids) };
   }
 
   function collectIntersectingRange(range) {
@@ -10463,24 +10896,89 @@ class MdExploreWindow(QMainWindow):
     return { start: minStart, end: Math.max(minStart + 1, maxEnd) };
   }
 
-  const hasSelection = !!(sel && sel.toString && sel.toString().trim());
-  const selectedText = hasSelection ? sel.toString() : "";
+  let selectedText = sel && sel.toString ? sel.toString() : "";
+  if (!selectedText.trim() && hintedText) {
+    selectedText = hintedText;
+  }
+  const hasSelection = !!(selectedText && selectedText.trim());
+  const highlightEntries = normalizeHighlightEntries(window.__mdexplorePersistentHighlights || []);
+  const clickedNode = elementFromClick(__CLICK_X__, __CLICK_Y__);
+  const clickedHighlight = clickedNode && clickedNode.closest
+    ? clickedNode.closest('span[data-mdexplore-persistent-highlight="1"]')
+    : null;
+  const clickedHighlightId = clickedHighlight
+    ? String(clickedHighlight.getAttribute("data-mdexplore-persistent-highlight-id") || "")
+    : "";
+  let selectionOffsetStart = null;
+  let selectionOffsetEnd = null;
+  let selectionHasHighlightedPart = false;
+  let selectionHasUnhighlightedPart = false;
+  let selectedHighlightIds = [];
+
   // Preferred path: map the active text selection to source line metadata.
   if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
     const range = sel.getRangeAt(0);
+    const offsets = selectionOffsets(range);
+    if (offsets) {
+      selectionOffsetStart = offsets.start;
+      selectionOffsetEnd = offsets.end;
+      const overlap = overlapInfo(offsets.start, offsets.end, highlightEntries);
+      selectedHighlightIds = overlap.ids;
+      selectionHasHighlightedPart = overlap.highlightedLength > 0;
+      selectionHasUnhighlightedPart = overlap.highlightedLength < Math.max(1, offsets.end - offsets.start);
+    } else {
+      selectionHasUnhighlightedPart = true;
+    }
     const intersecting = collectIntersectingRange(range);
     if (intersecting) {
-      return { hasSelection: true, selectedText, ...intersecting, via: "selection-intersects" };
+      return {
+        hasSelection: true,
+        selectedText,
+        ...intersecting,
+        via: "selection-intersects",
+        selectionOffsetStart,
+        selectionOffsetEnd,
+        selectionHasHighlightedPart,
+        selectionHasUnhighlightedPart,
+        selectedHighlightIds,
+        clickedHighlightId,
+      };
     }
     const startInfo = lineInfo(range.startContainer);
     const endInfo = lineInfo(range.endContainer);
     if (startInfo || endInfo) {
-      return { hasSelection: true, selectedText, ...normalizeRange(startInfo, endInfo), via: "selection" };
+      return {
+        hasSelection: true,
+        selectedText,
+        ...normalizeRange(startInfo, endInfo),
+        via: "selection",
+        selectionOffsetStart,
+        selectionOffsetEnd,
+        selectionHasHighlightedPart,
+        selectionHasUnhighlightedPart,
+        selectedHighlightIds,
+        clickedHighlightId,
+      };
+    }
+  }
+
+  // Robust fallback: selection may collapse before the context menu action
+  // is handled. Recover offsets using selected text near the click location.
+  if ((selectionOffsetStart === null || selectionOffsetEnd === null) && selectedText) {
+    const guessed = nearestTextOffsets(selectedText, __CLICK_X__, __CLICK_Y__);
+    if (guessed && guessed.end > guessed.start) {
+      selectionOffsetStart = guessed.start;
+      selectionOffsetEnd = guessed.end;
+      const overlap = overlapInfo(guessed.start, guessed.end, highlightEntries);
+      selectedHighlightIds = overlap.ids;
+      selectionHasHighlightedPart = overlap.highlightedLength > 0;
+      selectionHasUnhighlightedPart =
+        overlap.highlightedLength < Math.max(1, guessed.end - guessed.start);
     }
   }
 
   // Fallback: map from right-clicked block location.
-  const clicked = document.elementFromPoint(__CLICK_X__, __CLICK_Y__);
+  const clicked = elementFromClick(__CLICK_X__, __CLICK_Y__);
   const clickedInfo = lineInfo(clicked);
   if (clickedInfo) {
     return {
@@ -10489,14 +10987,31 @@ class MdExploreWindow(QMainWindow):
       start: clickedInfo.start,
       end: clickedInfo.end,
       via: "click",
+      selectionOffsetStart,
+      selectionOffsetEnd,
+      selectionHasHighlightedPart,
+      selectionHasUnhighlightedPart,
+      selectedHighlightIds,
+      clickedHighlightId,
     };
   }
 
-  return { hasSelection, selectedText };
+  return {
+    hasSelection,
+    selectedText,
+    selectionOffsetStart,
+    selectionOffsetEnd,
+    selectionHasHighlightedPart,
+    selectionHasUnhighlightedPart: hasSelection ? true : false,
+    selectedHighlightIds,
+    clickedHighlightId,
+  };
 })();
 """
-        js = js.replace("__CLICK_X__", str(click_x)).replace(
-            "__CLICK_Y__", str(click_y)
+        js = (
+            js.replace("__CLICK_X__", str(click_x))
+            .replace("__CLICK_Y__", str(click_y))
+            .replace("__SELECTED_HINT__", hint_json)
         )
         # Returns selection + line-range metadata used to build copy actions.
         self.preview.page().runJavaScript(
@@ -10510,32 +11025,649 @@ class MdExploreWindow(QMainWindow):
         self, pos, selection_info, selected_text_hint: str
     ) -> None:
         """Build preview menu and use cached selection metadata for copy action."""
-        menu = self.preview.createStandardContextMenu()
-        has_selection = bool(
-            selected_text_hint.strip() or self.preview.selectedText().strip()
+        standard_menu = self.preview.createStandardContextMenu()
+        menu = QMenu(self.preview)
+        has_selection = bool(selected_text_hint.strip() or self.preview.selectedText().strip())
+        if isinstance(selection_info, dict):
+            if selection_info.get("hasSelection"):
+                has_selection = True
+            selected_raw = selection_info.get("selectedText")
+            if isinstance(selected_raw, str) and selected_raw.strip():
+                has_selection = True
+            # Offsets are the strongest signal; trust them even if hasSelection
+            # was lost by a timing edge between selection and context-menu probe.
+            if self._selection_offsets_from_info(selection_info) is not None:
+                has_selection = True
+
+        has_highlighted_part = bool(
+            isinstance(selection_info, dict)
+            and selection_info.get("selectionHasHighlightedPart")
         )
-        if isinstance(selection_info, dict) and selection_info.get("hasSelection"):
-            has_selection = True
+        has_unhighlighted_part = bool(
+            isinstance(selection_info, dict)
+            and selection_info.get("selectionHasUnhighlightedPart")
+        )
+        clicked_highlight_id = ""
+        if isinstance(selection_info, dict):
+            raw_clicked = selection_info.get("clickedHighlightId")
+            if isinstance(raw_clicked, str):
+                clicked_highlight_id = raw_clicked.strip()
+        has_existing_persistent_highlights = bool(
+            self._normalize_text_highlight_entries(
+                self._current_preview_text_highlights
+            )
+        )
+        self._debug_log(
+            "preview-menu "
+            f"has_selection={has_selection} "
+            f"has_highlighted_part={has_highlighted_part} "
+            f"has_unhighlighted_part={has_unhighlighted_part} "
+            f"clicked_highlight_id={'yes' if bool(clicked_highlight_id) else 'no'} "
+            f"offsets={self._selection_offsets_from_info(selection_info)}"
+        )
+
+        highlight_action: QAction | None = None
+        remove_highlight_action: QAction | None = None
+        # Always allow creating/extending highlight from any non-empty selection,
+        # even if metadata probing fails on a specific right-click event.
+        if has_selection:
+            highlight_action = menu.addAction("Highlight")
+        if (
+            has_selection
+            or clicked_highlight_id
+            or (has_selection and has_highlighted_part)
+            or has_existing_persistent_highlights
+        ):
+            remove_highlight_action = menu.addAction("Remove Highlight")
+        if highlight_action is not None or remove_highlight_action is not None:
+            menu.addSeparator()
 
         copy_source_action: QAction | None = None
         copy_rendered_action: QAction | None = None
         if has_selection:
-            menu.addSeparator()
             copy_rendered_action = menu.addAction("Copy Rendered Text")
             copy_source_action = menu.addAction("Copy Source Markdown")
+            menu.addSeparator()
+
+        for action in standard_menu.actions():
+            menu.addAction(action)
 
         chosen = menu.exec(self.preview.mapToGlobal(pos))
+        if highlight_action is not None and chosen == highlight_action:
+            self._debug_log("preview-menu action=Highlight")
+            self._add_persistent_preview_highlight(selection_info, selected_text_hint)
+            standard_menu.deleteLater()
+            menu.deleteLater()
+            return
+        if remove_highlight_action is not None and chosen == remove_highlight_action:
+            self._debug_log("preview-menu action=Remove Highlight")
+            self._remove_persistent_preview_highlight(
+                selection_info, selected_text_hint
+            )
+            standard_menu.deleteLater()
+            menu.deleteLater()
+            return
         if copy_rendered_action is not None and chosen == copy_rendered_action:
             self._copy_preview_selection_as_rendered_text(
                 selection_info, selected_text_hint
             )
+            standard_menu.deleteLater()
             menu.deleteLater()
             return
         if copy_source_action is not None and chosen == copy_source_action:
             self._copy_preview_selection_as_source_markdown(
                 selection_info, selected_text_hint
             )
+        standard_menu.deleteLater()
         menu.deleteLater()
+
+    @staticmethod
+    def _selection_offsets_from_info(selection_info) -> tuple[int, int] | None:
+        """Extract normalized selection text offsets from cached JS metadata."""
+        if not isinstance(selection_info, dict):
+            return None
+        start_raw = selection_info.get("selectionOffsetStart")
+        end_raw = selection_info.get("selectionOffsetEnd")
+        if not isinstance(start_raw, (int, float)) or not isinstance(
+            end_raw, (int, float)
+        ):
+            return None
+        start = int(start_raw)
+        end = int(end_raw)
+        if start < 0 or end <= start:
+            return None
+        return (start, end)
+
+    def _request_live_preview_selection_offsets(
+        self, selected_text_hint: str, callback
+    ) -> None:
+        """Read live selection offsets from preview DOM, with text fallback."""
+        self._debug_log(
+            "highlight-live-probe request "
+            f"hint_len={len(selected_text_hint or '')}"
+        )
+        # Keep embedding JS-safe even if selection contains U+2028/U+2029 or
+        # other non-ASCII characters that can break inline script parsing.
+        hint_json = json.dumps(selected_text_hint or "", ensure_ascii=True)
+        js_expr = """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
+  if (!root) {
+    return {
+      hasSelection: false,
+      selectedText: "",
+      selectionOffsetStart: null,
+      selectionOffsetEnd: null,
+    };
+  }
+
+  function collectRootText() {
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      },
+    );
+    let text = "";
+    while (walker.nextNode()) {
+      text += walker.currentNode.nodeValue || "";
+    }
+    return text;
+  }
+
+  function selectionOffsets(range) {
+    if (!(range instanceof Range)) return null;
+    try {
+      function textLengthToBoundary(container, offset) {
+        const probe = document.createRange();
+        probe.selectNodeContents(root);
+        probe.setEnd(container, offset);
+        const fragment = probe.cloneContents();
+        const walker = document.createTreeWalker(
+          fragment,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode(node) {
+              if (!node || !node.nodeValue || !node.nodeValue.length) return NodeFilter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            },
+          },
+        );
+        let total = 0;
+        while (walker.nextNode()) {
+          total += (walker.currentNode.nodeValue || "").length;
+        }
+        return total;
+      }
+
+      const start = Math.max(
+        0,
+        Math.floor(textLengthToBoundary(range.startContainer, range.startOffset))
+      );
+      const end = Math.max(
+        0,
+        Math.floor(textLengthToBoundary(range.endContainer, range.endOffset))
+      );
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        return null;
+      }
+      return { start, end };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  const selection = window.getSelection();
+  let selectedText =
+    selection && typeof selection.toString === "function" ? selection.toString() : "";
+  let offsets = null;
+
+  if (selection && selection.rangeCount > 0) {
+    offsets = selectionOffsets(selection.getRangeAt(0));
+  }
+  if (!selectedText.trim()) {
+    selectedText = __SELECTED_HINT__;
+  }
+
+  // Right-click handling can collapse the browser selection. If that happened,
+  // recover using a unique selected-text occurrence in the same text stream.
+  if ((!offsets || offsets.end <= offsets.start) && selectedText) {
+    const rootText = collectRootText();
+    const candidates = [];
+    const collapsed = selectedText.replace(/\\s+/g, " ").trim();
+    if (collapsed) candidates.push(collapsed);
+    const trimmed = selectedText.trim();
+    if (trimmed && !candidates.includes(trimmed)) candidates.push(trimmed);
+    const noCR = selectedText.replace(/\\r/g, "");
+    if (noCR && !candidates.includes(noCR)) candidates.push(noCR);
+    if (selectedText && !candidates.includes(selectedText)) candidates.push(selectedText);
+
+    for (const candidate of candidates) {
+      const first = rootText.indexOf(candidate);
+      if (first >= 0) {
+        offsets = { start: first, end: first + candidate.length };
+        break;
+      }
+    }
+  }
+
+  return {
+    hasSelection: !!(offsets && offsets.end > offsets.start),
+    selectedText,
+    selectionOffsetStart: offsets ? offsets.start : null,
+    selectionOffsetEnd: offsets ? offsets.end : null,
+  };
+})()
+"""
+        js_expr = js_expr.replace("__SELECTED_HINT__", hint_json)
+        # Force a stable string return type from QtWebEngine marshalling.
+        # If evaluation fails, include the JS error payload in the JSON.
+        js = f"""
+(() => {{
+  try {{
+    const __result = {js_expr};
+    return JSON.stringify(__result || {{}});
+  }} catch (err) {{
+    return JSON.stringify({{
+      __error__: String(err),
+    }});
+  }}
+}})();
+"""
+        def _on_result(result) -> None:
+            normalized: dict = {}
+            if isinstance(result, dict):
+                normalized = result
+            elif isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    normalized = parsed
+            self._debug_log(
+                "highlight-live-probe result "
+                f"raw_type={type(result).__name__} "
+                f"raw_is_dict={isinstance(result, dict)} "
+                f"raw_preview={repr(str(result)[:120])} "
+                f"js_error={repr(str(normalized.get('__error__', ''))[:120])} "
+                f"hasSelection={bool(normalized.get('hasSelection'))} "
+                f"offsets={self._selection_offsets_from_info(normalized)} "
+                f"selected_len={len(str(normalized.get('selectedText') or ''))}"
+            )
+            callback(normalized)
+
+        self.preview.page().runJavaScript(js, _on_result)
+
+    def _append_persistent_preview_highlight_range(
+        self, path_key: str, start: int, end: int
+    ) -> None:
+        """Append one persistent highlight range, persist, and reapply."""
+        self._debug_log(
+            "highlight-append "
+            f"path={path_key} start={start} end={end} len={max(0, end-start)}"
+        )
+        entries = self._normalize_text_highlight_entries(
+            self._clone_json_compatible_list(self._current_preview_text_highlights)
+        )
+        entries.append({"id": self._new_text_highlight_id(), "start": start, "end": end})
+        entries = self._normalize_text_highlight_entries(entries)
+        self._current_preview_text_highlights = entries
+        self._persist_text_highlights_for_path_key(path_key, entries)
+        def _on_applied(result: dict) -> None:
+            applied_count = (
+                int(result.get("applied", 0)) if isinstance(result, dict) else 0
+            )
+            self._debug_log(
+                "highlight-apply-result "
+                f"applied={applied_count} entries={len(entries)} "
+                f"result={result if isinstance(result, dict) else {}}"
+            )
+            if applied_count <= 0:
+                self.statusBar().showMessage(
+                    "Highlight saved, but no visible span was applied",
+                    3500,
+                )
+                return
+            self.statusBar().showMessage("Highlight added", 2500)
+
+        self._apply_persistent_preview_highlights(path_key, completion=_on_applied)
+
+    def _apply_persistent_preview_highlights(
+        self,
+        expected_key: str | None = None,
+        completion: Callable[[dict], None] | None = None,
+    ) -> None:
+        """Apply persisted preview text highlights to the active document DOM."""
+        current_key = self._current_preview_path_key()
+        if not current_key:
+            return
+        if expected_key is not None and expected_key != current_key:
+            return
+        entries = self._normalize_text_highlight_entries(
+            self._current_preview_text_highlights
+        )
+        self._current_preview_text_highlights = entries
+        self._debug_log(
+            "highlight-apply-request "
+            f"current_key={current_key} expected_key={expected_key} "
+            f"entries={len(entries)} completion={bool(completion)}"
+        )
+        payload_json = json.dumps(entries, separators=(",", ":"), ensure_ascii=False)
+        color_json = json.dumps(self.PREVIEW_HIGHLIGHT_COLOR)
+        js = """
+(() => {
+  const incoming = __PAYLOAD__;
+  const highlightColor = __COLOR__;
+  const root = document.querySelector("main") || document.body;
+  if (!root) {
+    window.__mdexplorePersistentHighlights = [];
+    return { applied: 0, entries: 0 };
+  }
+
+  for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]'))) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
+    parent.normalize();
+  }
+
+  function normalizeEntries(raw) {
+    if (!Array.isArray(raw)) return [];
+    const prepared = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const id = typeof item.id === "string" ? item.id.trim() : "";
+      const start = Number(item.start);
+      const end = Number(item.end);
+      if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (end <= start || start < 0) continue;
+      prepared.push({ id, start: Math.floor(start), end: Math.floor(end) });
+    }
+    if (!prepared.length) return [];
+    prepared.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+    const merged = [];
+    for (const item of prepared) {
+      if (!merged.length) {
+        merged.push(item);
+        continue;
+      }
+      const prev = merged[merged.length - 1];
+      if (item.start <= prev.end) {
+        prev.end = Math.max(prev.end, item.end);
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+
+  const entries = normalizeEntries(incoming);
+  window.__mdexplorePersistentHighlights = entries;
+  if (!entries.length) {
+    return { applied: 0, entries: 0 };
+  }
+
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        if (!node || !node.nodeValue || !node.nodeValue.length) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        const parent = node.parentElement;
+        if (!parent) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (skipTags.has(parent.tagName)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    },
+  );
+
+  const segments = [];
+  let totalLength = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.nodeValue || "";
+    const start = totalLength;
+    const end = start + text.length;
+    segments.push({ node, text, start, end });
+    totalLength = end;
+  }
+
+  if (!segments.length) {
+    return { applied: 0, entries: entries.length };
+  }
+
+  let applied = 0;
+  let entryIndex = 0;
+  for (const segment of segments) {
+    while (entryIndex < entries.length && entries[entryIndex].end <= segment.start) {
+      entryIndex += 1;
+    }
+    let localRanges = [];
+    for (let idx = entryIndex; idx < entries.length; idx += 1) {
+      const entry = entries[idx];
+      if (entry.start >= segment.end) {
+        break;
+      }
+      const overlapStart = Math.max(entry.start, segment.start);
+      const overlapEnd = Math.min(entry.end, segment.end);
+      if (overlapEnd > overlapStart) {
+        localRanges.push({
+          start: overlapStart - segment.start,
+          end: overlapEnd - segment.start,
+          id: entry.id,
+        });
+      }
+    }
+    if (!localRanges.length) {
+      continue;
+    }
+
+    localRanges.sort((a, b) => a.start - b.start);
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const range of localRanges) {
+      if (range.start > cursor) {
+        fragment.appendChild(
+          document.createTextNode(segment.text.slice(cursor, range.start))
+        );
+      }
+      const mark = document.createElement("span");
+      mark.setAttribute("data-mdexplore-persistent-highlight", "1");
+      mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
+      mark.style.backgroundColor = highlightColor;
+      mark.style.borderRadius = "2px";
+      mark.style.padding = "0 1px";
+      mark.style.boxDecorationBreak = "clone";
+      mark.style.webkitBoxDecorationBreak = "clone";
+      mark.textContent = segment.text.slice(range.start, range.end);
+      fragment.appendChild(mark);
+      cursor = range.end;
+      applied += 1;
+    }
+    if (cursor < segment.text.length) {
+      fragment.appendChild(document.createTextNode(segment.text.slice(cursor)));
+    }
+    const parent = segment.node.parentNode;
+    if (parent) {
+      parent.replaceChild(fragment, segment.node);
+    }
+  }
+
+  return { applied, entries: entries.length };
+})();
+"""
+        js = js.replace("__PAYLOAD__", payload_json).replace("__COLOR__", color_json)
+        if completion is None:
+            self.preview.page().runJavaScript(js)
+            return
+        self.preview.page().runJavaScript(
+            js, lambda result: completion(result if isinstance(result, dict) else {})
+        )
+
+    def _add_persistent_preview_highlight(
+        self, selection_info, selected_text_hint: str = ""
+    ) -> None:
+        """Persist a new preview text-highlight range for the current file."""
+        path_key = self._current_preview_path_key()
+        if not path_key:
+            self._debug_log("highlight-add aborted reason=no-current-path")
+            self.statusBar().showMessage("No markdown file selected", 3000)
+            return
+        offsets = self._selection_offsets_from_info(selection_info)
+        self._debug_log(
+            "highlight-add start "
+            f"path={path_key} cached_offsets={offsets} "
+            f"hint_len={len(selected_text_hint or '')}"
+        )
+        if offsets is not None:
+            start, end = offsets
+            self._append_persistent_preview_highlight_range(path_key, start, end)
+            return
+
+        selected_text = ""
+        if isinstance(selection_info, dict):
+            raw_selected = selection_info.get("selectedText")
+            if isinstance(raw_selected, str):
+                selected_text = raw_selected
+        if not selected_text.strip():
+            selected_text = selected_text_hint
+        self._debug_log(
+            "highlight-add fallback-live-probe "
+            f"selected_len={len(selected_text)}"
+        )
+
+        def _apply_live_selection(live_info: dict) -> None:
+            if self._current_preview_path_key() != path_key:
+                self._debug_log(
+                    "highlight-add live-probe ignored reason=path-changed "
+                    f"expected={path_key} actual={self._current_preview_path_key()}"
+                )
+                return
+            live_offsets = self._selection_offsets_from_info(live_info)
+            if live_offsets is None:
+                self._debug_log(
+                    "highlight-add live-probe failed offsets=None "
+                    f"live_info={live_info}"
+                )
+                self.statusBar().showMessage("Select text to highlight", 3000)
+                return
+            start_live, end_live = live_offsets
+            self._debug_log(
+                "highlight-add live-probe success "
+                f"start={start_live} end={end_live}"
+            )
+            self._append_persistent_preview_highlight_range(
+                path_key, start_live, end_live
+            )
+
+        self._request_live_preview_selection_offsets(selected_text, _apply_live_selection)
+
+    def _remove_persistent_preview_highlight(
+        self, selection_info, selected_text_hint: str = ""
+    ) -> None:
+        """Remove persisted highlight blocks by click target and/or selected range."""
+        path_key = self._current_preview_path_key()
+        if not path_key:
+            self.statusBar().showMessage("No markdown file selected", 3000)
+            return
+        entries = self._normalize_text_highlight_entries(
+            self._clone_json_compatible_list(self._current_preview_text_highlights)
+        )
+        if not entries:
+            self.statusBar().showMessage("No persistent highlights to remove", 2500)
+            return
+
+        def _ids_overlapping(offsets: tuple[int, int]) -> set[str]:
+            sel_start, sel_end = offsets
+            found: set[str] = set()
+            for entry in entries:
+                start = int(entry.get("start", -1))
+                end = int(entry.get("end", -1))
+                if max(sel_start, start) < min(sel_end, end):
+                    entry_id = str(entry.get("id", "")).strip()
+                    if entry_id:
+                        found.add(entry_id)
+            return found
+
+        def _apply_ids(ids_to_remove: set[str]) -> None:
+            updated = [
+                entry for entry in entries if str(entry.get("id", "")) not in ids_to_remove
+            ]
+            updated = self._normalize_text_highlight_entries(updated)
+            if len(updated) == len(entries):
+                self.statusBar().showMessage("No highlighted block selected", 2500)
+                return
+            self._current_preview_text_highlights = updated
+            self._persist_text_highlights_for_path_key(path_key, updated)
+            self._apply_persistent_preview_highlights(path_key)
+            self.statusBar().showMessage("Highlight removed", 2500)
+
+        ids_to_remove: set[str] = set()
+        if isinstance(selection_info, dict):
+            raw_clicked = selection_info.get("clickedHighlightId")
+            if isinstance(raw_clicked, str) and raw_clicked.strip():
+                ids_to_remove.add(raw_clicked.strip())
+
+            offsets = self._selection_offsets_from_info(selection_info)
+            if offsets is not None:
+                ids_to_remove.update(_ids_overlapping(offsets))
+
+            raw_ids = selection_info.get("selectedHighlightIds")
+            if isinstance(raw_ids, list):
+                for item in raw_ids:
+                    if isinstance(item, str) and item.strip():
+                        ids_to_remove.add(item.strip())
+
+        if ids_to_remove:
+            _apply_ids(ids_to_remove)
+            return
+
+        selected_text = ""
+        if isinstance(selection_info, dict):
+            raw_selected = selection_info.get("selectedText")
+            if isinstance(raw_selected, str):
+                selected_text = raw_selected
+        if not selected_text.strip():
+            selected_text = selected_text_hint
+        if not selected_text.strip():
+            self.statusBar().showMessage("No highlighted block selected", 2500)
+            return
+
+        def _apply_live_removal(live_info: dict) -> None:
+            if self._current_preview_path_key() != path_key:
+                return
+            live_offsets = self._selection_offsets_from_info(live_info)
+            if live_offsets is None:
+                self.statusBar().showMessage("No highlighted block selected", 2500)
+                return
+            live_ids = _ids_overlapping(live_offsets)
+            if not live_ids:
+                self.statusBar().showMessage("No highlighted block selected", 2500)
+                return
+            _apply_ids(live_ids)
+
+        self._request_live_preview_selection_offsets(
+            selected_text, _apply_live_removal
+        )
 
     def _copy_preview_selection_as_rendered_text(
         self, selection_info, selected_text_hint: str
@@ -11853,6 +12985,9 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
 
         self.current_file = path
+        self._current_preview_text_highlights = self._load_text_highlights_for_path_key(
+            next_path_key
+        )
         self._refresh_tree_multi_view_markers()
         # Explicitly clear any stale overlay at document entry before
         # considering whether the new document needs one.
@@ -14333,6 +15468,11 @@ def main() -> int:
         default=MERMAID_BACKEND_JS,
         help="Mermaid render backend: 'js' (default) or 'rust' (requires mmdr).",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug logging to mdexplore.log in the project directory.",
+    )
     args = parser.parse_args()
 
     root = (
@@ -14363,6 +15503,7 @@ def main() -> int:
         _config_file_path(),
         mermaid_backend=str(args.mermaid_backend or MERMAID_BACKEND_JS),
         gpu_context_available=gpu_context_available,
+        debug_mode=bool(args.debug),
     )
     window.show()
     return app.exec()

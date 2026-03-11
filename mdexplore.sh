@@ -10,6 +10,8 @@ LOG_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/mdexplore"
 LOG_FILE="${LOG_DIR}/launcher.log"
 MAX_LOG_LINES=1000
 NON_INTERACTIVE=0
+# Set to true to pass --debug into mdexplore.py and enable mdexplore.log.
+DEBUG_MODE=false
 
 trim_log_file() {
   local file_path="$1"
@@ -91,6 +93,7 @@ fi
 usage() {
   echo "Usage: $(basename "$0") [--mermaid-backend js|rust] [PATH]"
   echo "If PATH is omitted, mdexplore uses ~/.mdexplore.cfg or HOME."
+  echo "Debug logging can be toggled by editing DEBUG_MODE in this script."
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -380,6 +383,11 @@ configure_mermaid_rs_override
 if [[ "${MERMAID_BACKEND_EXPLICIT}" -eq 0 ]]; then
   APP_ARGS+=("--mermaid-backend" "rust")
   echo "Defaulting Mermaid backend to rust (override with --mermaid-backend js)."
+fi
+
+if [[ "${DEBUG_MODE}" == "true" ]]; then
+  APP_ARGS+=("--debug")
+  echo "Debug mode enabled (--debug)."
 fi
 
 if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
