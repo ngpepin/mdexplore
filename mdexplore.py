@@ -49,6 +49,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QFontMetrics,
     QIcon,
     QImage,
     QOffscreenSurface,
@@ -153,6 +154,15 @@ SEARCH_HIT_COUNT_FONT_PATHS = (
     "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Regular.ttf",
 )
 _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE: str | None = None
+PREVIEW_PERSISTENT_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"
+# Preview zoom is intentionally separate from diagram zoom/pan state. These
+# constants control the QWebEngineView-wide scale factor used by Ctrl+/-
+# shortcuts and the transient overlay badge shown inside the preview pane.
+PREVIEW_ZOOM_STEP = 0.1
+PREVIEW_ZOOM_MIN = 0.35
+PREVIEW_ZOOM_MAX = 3.0
+PREVIEW_ZOOM_RESET = 1.0
+PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS = 850
 
 
 def _config_file_path() -> Path:
@@ -1127,11 +1137,15 @@ class ColorizedMarkdownModel(QFileSystemModel):
     COLOR_FILE_NAME = ".mdexplore-colors.json"
     _ICON_SIZE = 16
     _ICON_GAP = 2
-    _VIEWS_ICON_SIZE = 13
+    _VIEWS_ICON_SIZE = 12
+    _MARKER_ICON_SIZE = 13
     _SEARCH_SLOT_WIDTH = 14
     _SEARCH_COUNT_TEXT_MAX = 99
-    _SEARCH_COUNT_OVERSAMPLE = 5
-    _GUTTER_WIDTH = _SEARCH_SLOT_WIDTH + (_ICON_SIZE + _ICON_GAP)
+    # Oversample the search-hit pill/count layer before downscaling it back
+    # into the fixed gutter slot so the pill edges and digits stay sharper
+    # than the surrounding small icons.
+    _SEARCH_COUNT_OVERSAMPLE = 8
+    _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1141,11 +1155,17 @@ class ColorizedMarkdownModel(QFileSystemModel):
         self._loaded_dirs: set[str] = set()
         self._search_match_counts: dict[str, int] = {}
         self._multi_view_paths: set[str] = set()
+        self._highlighted_preview_paths: set[str] = set()
         self._markdown_icon = _load_svg_icon("markdown.svg", QColor("#bcc5d1"))
         if self._markdown_icon.isNull():
             self._markdown_icon = _build_markdown_icon()
-        self._views_icon = _load_svg_icon("views.svg", QColor("#bcc5d1"))
-        self._decorated_icon_cache: dict[tuple[bool, str], QIcon] = {}
+        # Render the views badge in a very light gray so it stays crisp on the
+        # dark tree background without overpowering the markdown file icon.
+        self._views_icon = _load_svg_icon("views2.svg", QColor("#e3e7ee"))
+        # Persistent preview highlights are represented by the same pastel
+        # purple marker regardless of whether the file also has saved views.
+        self._marker_icon = _load_svg_icon("marker.svg", QColor("#c8b4f6"))
+        self._decorated_icon_cache: dict[tuple[bool, bool, str], QIcon] = {}
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         # This model only customizes markdown files; directories continue to use
@@ -1156,7 +1176,12 @@ class ColorizedMarkdownModel(QFileSystemModel):
                 path_key = self._path_key(Path(info.filePath()))
                 search_hit_count = self._search_match_counts.get(path_key, 0)
                 has_multi_view = path_key in self._multi_view_paths
-                return self._decorated_markdown_icon(has_multi_view, search_hit_count)
+                has_persistent_highlight = path_key in self._highlighted_preview_paths
+                return self._decorated_markdown_icon(
+                    has_multi_view,
+                    has_persistent_highlight,
+                    search_hit_count,
+                )
         if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
             if info.isFile() and info.suffix().lower() == "md":
@@ -1280,8 +1305,7 @@ class ColorizedMarkdownModel(QFileSystemModel):
         return color_map.get(path.name)
 
     def set_search_match_paths(self, paths: set[Path]) -> None:
-        self._search_match_counts = {self._path_key(path): 1 for path in paths}
-        self._decorated_icon_cache.clear()
+        self.set_search_match_counts({path: 1 for path in paths})
 
     def set_search_match_counts(self, match_counts: dict[Path, int]) -> None:
         """Replace active search-hit counts by path (non-positive counts omitted)."""
@@ -1298,14 +1322,38 @@ class ColorizedMarkdownModel(QFileSystemModel):
         self._decorated_icon_cache.clear()
 
     def clear_search_match_paths(self) -> None:
+        if not self._search_match_counts:
+            return
         self._search_match_counts.clear()
         self._decorated_icon_cache.clear()
 
     def set_multi_view_paths(self, paths: set[Path]) -> None:
-        self._multi_view_paths = {self._path_key(path) for path in paths}
+        next_paths = {self._path_key(path) for path in paths}
+        if next_paths == self._multi_view_paths:
+            return
+        self._multi_view_paths = next_paths
+        self._decorated_icon_cache.clear()
 
     def clear_multi_view_paths(self) -> None:
+        if not self._multi_view_paths:
+            return
         self._multi_view_paths.clear()
+        self._decorated_icon_cache.clear()
+
+    def set_persistent_highlight_paths(self, paths: set[Path]) -> None:
+        """Replace markdown paths that have persisted preview text highlights."""
+        next_paths = {self._path_key(path) for path in paths}
+        if next_paths == self._highlighted_preview_paths:
+            return
+        self._highlighted_preview_paths = next_paths
+        self._decorated_icon_cache.clear()
+
+    def clear_persistent_highlight_paths(self) -> None:
+        """Clear persisted-preview-highlight badges in the tree."""
+        if not self._highlighted_preview_paths:
+            return
+        self._highlighted_preview_paths.clear()
+        self._decorated_icon_cache.clear()
 
     def _path_key(self, path: Path) -> str:
         try:
@@ -1362,7 +1410,18 @@ class ColorizedMarkdownModel(QFileSystemModel):
 
     @classmethod
     def decorated_icon_size(cls) -> QSize:
-        return QSize(cls._GUTTER_WIDTH + cls._ICON_SIZE, cls._ICON_SIZE)
+        return QSize(cls.max_decoration_width(), cls._ICON_SIZE)
+
+    @classmethod
+    def max_decoration_width(cls) -> int:
+        """Return the widest markdown decoration strip used by the tree."""
+        widths = [
+            cls._SEARCH_SLOT_WIDTH,
+            cls._MARKER_ICON_SIZE,
+            cls._VIEWS_ICON_SIZE,
+            cls._ICON_SIZE,
+        ]
+        return sum(widths) + (cls._ICON_GAP * max(0, len(widths) - 1))
 
     def _search_count_display_text(self, search_hit_count: int) -> str:
         """Render compact count text for the search slot."""
@@ -1372,16 +1431,58 @@ class ColorizedMarkdownModel(QFileSystemModel):
             return str(search_hit_count)
         return "++"
 
+    def decoration_size_for_state(
+        self,
+        has_multi_view: bool,
+        has_persistent_highlight: bool,
+        search_hit_count: int,
+    ) -> QSize:
+        """Return packed decoration size for the active markdown row state."""
+        search_count_text = self._search_count_display_text(search_hit_count)
+        widths: list[int] = []
+        if search_count_text:
+            widths.append(self._SEARCH_SLOT_WIDTH)
+        if has_persistent_highlight:
+            widths.append(self._MARKER_ICON_SIZE)
+        if has_multi_view:
+            widths.append(self._VIEWS_ICON_SIZE)
+        widths.append(self._ICON_SIZE)
+        total_width = sum(widths) + (self._ICON_GAP * max(0, len(widths) - 1))
+        return QSize(total_width, self._ICON_SIZE)
+
+    def decoration_size_for_index(self, index) -> QSize:
+        """Return packed decoration size for one markdown model index."""
+        info = self.fileInfo(index)
+        if not (info.isFile() and info.suffix().lower() == "md"):
+            return QSize(self._ICON_SIZE, self._ICON_SIZE)
+        path_key = self._path_key(Path(info.filePath()))
+        search_hit_count = self._search_match_counts.get(path_key, 0)
+        has_multi_view = path_key in self._multi_view_paths
+        has_persistent_highlight = path_key in self._highlighted_preview_paths
+        return self.decoration_size_for_state(
+            has_multi_view, has_persistent_highlight, search_hit_count
+        )
+
     def _decorated_markdown_icon(
-        self, has_multi_view: bool, search_hit_count: int
+        self,
+        has_multi_view: bool,
+        has_persistent_highlight: bool,
+        search_hit_count: int,
     ) -> QIcon:
         search_count_text = self._search_count_display_text(search_hit_count)
-        cache_key = (has_multi_view, search_count_text)
+        cache_key = (has_multi_view, has_persistent_highlight, search_count_text)
         cached = self._decorated_icon_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        total_width = self._ICON_SIZE + self._GUTTER_WIDTH
+        # Keep a fixed gutter width for every markdown row so the markdown file
+        # icon and the filename always start on the same vertical line. Inside
+        # that strip, badges are packed tightly together and right-aligned so
+        # any unused space appears only to the left of the icon cluster.
+        cluster_size = self.decoration_size_for_state(
+            has_multi_view, has_persistent_highlight, search_hit_count
+        )
+        total_width = self.max_decoration_width()
         total_height = self._ICON_SIZE
         canvas = QPixmap(total_width, total_height)
         canvas.fill(Qt.GlobalColor.transparent)
@@ -1389,11 +1490,13 @@ class ColorizedMarkdownModel(QFileSystemModel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
+        cursor_x = max(0, total_width - cluster_size.width())
         if search_count_text:
-            # Supersample only the count text layer (not the entire gutter),
-            # then downscale into the fixed slot for cleaner glyph edges while
-            # keeping icon geometry unchanged.
+            # Render the pill and the digits in separate passes so the text can
+            # be oversampled more aggressively than the background shape while
+            # still landing in the same fixed gutter slot.
             oversample = max(1, int(self._SEARCH_COUNT_OVERSAMPLE))
+            text_oversample = max(oversample, int(self._SEARCH_COUNT_TEXT_OVERSAMPLE))
             slot_w = self._SEARCH_SLOT_WIDTH
             slot_h = self._ICON_SIZE
             hi_w = slot_w * oversample
@@ -1410,16 +1513,54 @@ class ColorizedMarkdownModel(QFileSystemModel):
             font = count_painter.font()
             base_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
             font.setFamily(_search_hit_count_font_family())
-            font.setPointSizeF(max(7.0, base_size - 1.0) * oversample)
+            font.setPointSizeF(max(6.5, base_size - 1.8) * oversample)
             font.setBold(False)
             count_painter.setFont(font)
-            count_painter.setPen(QPen(QColor("#f5d34f")))
-            count_painter.drawText(
-                QRect(0, 0, hi_w, hi_h),
+            metrics = QFontMetrics(font)
+            text_rect = metrics.boundingRect(search_count_text)
+            pill_padding_x = max(6 * oversample, int(metrics.height() * 0.42))
+            pill_padding_y = max(2 * oversample, int(metrics.height() * 0.12))
+            pill_width = min(
+                hi_w - (2 * oversample),
+                text_rect.width() + (2 * pill_padding_x),
+            )
+            pill_height = min(
+                hi_h - (2 * oversample),
+                text_rect.height() + (2 * pill_padding_y),
+            )
+            pill_x = max(0, (hi_w - pill_width) // 2)
+            pill_y = max(0, (hi_h - pill_height) // 2)
+            pill_rect = QRect(pill_x, pill_y, pill_width, pill_height)
+            radius = max(oversample, int(pill_height * 0.28))
+
+            count_painter.setPen(Qt.PenStyle.NoPen)
+            count_painter.setBrush(QColor("#f7e27a"))
+            count_painter.drawRoundedRect(pill_rect, radius, radius)
+            count_painter.end()
+
+            text_canvas = QPixmap(slot_w * text_oversample, slot_h * text_oversample)
+            text_canvas.fill(Qt.GlobalColor.transparent)
+            text_painter = QPainter(text_canvas)
+            text_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            text_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            text_painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform, True
+            )
+            text_font = text_painter.font()
+            text_base_size = (
+                text_font.pointSizeF() if text_font.pointSizeF() > 0 else 10.0
+            )
+            text_font.setFamily(_search_hit_count_font_family())
+            text_font.setPointSizeF(max(6.5, text_base_size - 1.8) * text_oversample)
+            text_font.setBold(False)
+            text_painter.setFont(text_font)
+            text_painter.setPen(QPen(QColor("#111111")))
+            text_painter.drawText(
+                QRect(0, 0, slot_w * text_oversample, slot_h * text_oversample),
                 Qt.AlignmentFlag.AlignCenter,
                 search_count_text,
             )
-            count_painter.end()
+            text_painter.end()
 
             count_layer = count_canvas.scaled(
                 slot_w,
@@ -1427,17 +1568,34 @@ class ColorizedMarkdownModel(QFileSystemModel):
                 Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            painter.drawPixmap(0, 0, count_layer)
+            text_layer = text_canvas.scaled(
+                slot_w,
+                slot_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(cursor_x, 0, count_layer)
+            painter.drawPixmap(cursor_x, 0, text_layer)
+            cursor_x += self._SEARCH_SLOT_WIDTH + self._ICON_GAP
+
+        if has_persistent_highlight and not self._marker_icon.isNull():
+            marker_pixmap = self._marker_icon.pixmap(
+                self._MARKER_ICON_SIZE, self._MARKER_ICON_SIZE
+            )
+            marker_y = max(0, (self._ICON_SIZE - self._MARKER_ICON_SIZE) // 2)
+            painter.drawPixmap(cursor_x, marker_y, marker_pixmap)
+            cursor_x += self._MARKER_ICON_SIZE + self._ICON_GAP
+
         if has_multi_view:
             views_pixmap = self._views_icon.pixmap(
                 self._VIEWS_ICON_SIZE, self._VIEWS_ICON_SIZE
             )
-            views_x = self._SEARCH_SLOT_WIDTH + self._ICON_GAP
             views_y = max(0, (self._ICON_SIZE - self._VIEWS_ICON_SIZE) // 2)
-            painter.drawPixmap(views_x, views_y, views_pixmap)
+            painter.drawPixmap(cursor_x, views_y, views_pixmap)
+            cursor_x += self._VIEWS_ICON_SIZE + self._ICON_GAP
 
         icon_pixmap = self._markdown_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
-        painter.drawPixmap(self._GUTTER_WIDTH, 0, icon_pixmap)
+        painter.drawPixmap(cursor_x, 0, icon_pixmap)
         painter.end()
 
         decorated = QIcon(canvas)
@@ -2706,11 +2864,73 @@ class MarkdownRenderer:
     .mdexplore-scroll-hit-marker:hover {{
       background: #fde68a;
     }}
+    .mdexplore-scroll-highlight-overlay {{
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 12px;
+      height: 100vh;
+      display: none;
+      pointer-events: auto;
+      z-index: 2147483645;
+    }}
+    .mdexplore-scroll-highlight-overlay.mdexplore-visible {{
+      display: block;
+    }}
+    .mdexplore-scroll-view-overlay {{
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 12px;
+      height: 100vh;
+      display: none;
+      pointer-events: auto;
+      z-index: 2147483647;
+    }}
+    .mdexplore-scroll-view-overlay.mdexplore-visible {{
+      display: block;
+    }}
+    .mdexplore-scroll-highlight-marker {{
+      position: absolute;
+      left: 1px;
+      width: calc(100% - 2px);
+      min-height: 5px;
+      border-radius: 999px;
+      pointer-events: auto;
+      cursor: pointer;
+      background: rgba(114, 96, 194, 0.74);
+      box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.22);
+      opacity: 0.98;
+      user-select: none;
+      touch-action: none;
+    }}
+    .mdexplore-scroll-highlight-marker:hover {{
+      background: rgba(132, 114, 208, 0.86);
+    }}
+    .mdexplore-scroll-view-marker {{
+      position: absolute;
+      left: 0;
+      width: 100%;
+      min-height: 6px;
+      border-radius: 999px;
+      pointer-events: auto;
+      cursor: pointer;
+      box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.22);
+      opacity: 0.98;
+      user-select: none;
+      touch-action: none;
+    }}
     @media print {{
       .mdexplore-scroll-line-indicator {{
         display: none !important;
       }}
       .mdexplore-scroll-hit-overlay {{
+        display: none !important;
+      }}
+      .mdexplore-scroll-highlight-overlay {{
+        display: none !important;
+      }}
+      .mdexplore-scroll-view-overlay {{
         display: none !important;
       }}
       .mdexplore-mermaid-toolbar {{
@@ -2781,6 +3001,7 @@ class MarkdownRenderer:
     window.__mdexploreMermaidSources = {mermaid_sources_json};
     window.__mdexploreMermaidBackend = {mermaid_backend_json};
     window.__mdexploreSourceTotalLines = {total_source_lines_json};
+    window.__mdexploreNamedViewMarkers = [];
     window.__mdexploreMermaidLoadPromise = null;
     window.__mdexploreMermaidAttempted = false;
     window.__mdexploreMermaidPaletteMode = "auto";
@@ -3027,6 +3248,12 @@ class MarkdownRenderer:
       const hitOverlay = document.createElement("div");
       hitOverlay.className = "mdexplore-scroll-hit-overlay";
       document.body.appendChild(hitOverlay);
+      const highlightOverlay = document.createElement("div");
+      highlightOverlay.className = "mdexplore-scroll-highlight-overlay";
+      document.body.appendChild(highlightOverlay);
+      const viewOverlay = document.createElement("div");
+      viewOverlay.className = "mdexplore-scroll-view-overlay";
+      document.body.appendChild(viewOverlay);
 
       const state = {{
         pointerX: window.innerWidth,
@@ -3035,6 +3262,8 @@ class MarkdownRenderer:
         active: false,
         hideTimer: null,
         searchRefreshTimer: null,
+        highlightRefreshTimer: null,
+        viewRefreshTimer: null,
       }};
 
       const clearHideTimer = () => {{
@@ -3061,6 +3290,7 @@ class MarkdownRenderer:
         const overlayWidth = Math.max(4, hitOverlay.offsetWidth || 6);
         const overlayLeft = Math.max(0, docClientWidth - overlayWidth - gap);
         hitOverlay.style.left = `${{Math.round(overlayLeft)}}px`;
+        highlightOverlay.style.left = "0px";
       }};
 
       const isNearVerticalScrollbar = () => {{
@@ -3118,6 +3348,41 @@ class MarkdownRenderer:
           top: desiredTop,
           behavior: "auto",
         }});
+      }};
+
+      const findTargetForSourceLine = (rawLine) => {{
+        const targetLine = Math.max(1, Number(rawLine) || 1);
+        let best = null;
+        let bestStart = -1;
+        for (const node of Array.from(document.querySelectorAll("[data-md-line-start][data-md-line-end]"))) {{
+          const start = Number(node.getAttribute("data-md-line-start"));
+          const end = Number(node.getAttribute("data-md-line-end"));
+          if (!Number.isFinite(start) || !Number.isFinite(end)) {{
+            continue;
+          }}
+          if (targetLine < start || targetLine > end) {{
+            if (start <= targetLine && start > bestStart) {{
+              best = node;
+              bestStart = start;
+            }}
+            continue;
+          }}
+          return node;
+        }}
+        for (const node of Array.from(document.querySelectorAll("[data-md-line-start]"))) {{
+          const start = Number(node.getAttribute("data-md-line-start"));
+          if (!Number.isFinite(start)) {{
+            continue;
+          }}
+          if (start >= targetLine) {{
+            return node;
+          }}
+          if (start > bestStart) {{
+            best = node;
+            bestStart = start;
+          }}
+        }}
+        return best;
       }};
 
       const refreshSearchHitMarkers = () => {{
@@ -3224,6 +3489,228 @@ class MarkdownRenderer:
         hitOverlay.classList.add("mdexplore-visible");
       }};
 
+      const refreshPersistentHighlightMarkers = () => {{
+        // Mirror persisted text highlights into a left-edge navigation gutter.
+        // The marker length reflects the total vertical span of the underlying
+        // highlighted block so long multi-line selections are easier to find.
+        if (!highlightOverlay.isConnected) {{
+          return;
+        }}
+        highlightOverlay.replaceChildren();
+        const marks = Array.from(
+          document.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]')
+        );
+        const scrollHeight = Math.max(
+          1,
+          document.documentElement ? document.documentElement.scrollHeight : 0,
+          document.body ? document.body.scrollHeight : 0
+        );
+        if (!marks.length || scrollHeight <= window.innerHeight) {{
+          highlightOverlay.classList.remove("mdexplore-visible");
+          syncOverlayHorizontalPosition();
+          return;
+        }}
+
+        const trackHeight = window.innerHeight;
+        const groups = new Map();
+        for (const mark of marks) {{
+          const id = String(
+            mark.getAttribute("data-mdexplore-persistent-highlight-id") || ""
+          ).trim();
+          if (!id) {{
+            continue;
+          }}
+          const rects = Array.from(mark.getClientRects ? mark.getClientRects() : []);
+          const usableRects = rects.length
+            ? rects.filter((rect) => rect && rect.height > 0 && rect.width > 0)
+            : [];
+          const sourceRects = usableRects.length
+            ? usableRects
+            : [mark.getBoundingClientRect()].filter(
+                (rect) => rect && rect.height > 0 && rect.width > 0
+              );
+          if (!sourceRects.length) {{
+            continue;
+          }}
+          let group = groups.get(id);
+          if (!group) {{
+            group = {{
+              minTop: null,
+              maxBottom: null,
+              targets: [],
+            }};
+            groups.set(id, group);
+          }}
+          for (const rect of sourceRects) {{
+            const absoluteTop = window.scrollY + rect.top;
+            const absoluteBottom = absoluteTop + rect.height;
+            group.minTop =
+              group.minTop === null ? absoluteTop : Math.min(group.minTop, absoluteTop);
+            group.maxBottom =
+              group.maxBottom === null
+                ? absoluteBottom
+                : Math.max(group.maxBottom, absoluteBottom);
+            group.targets.push({{
+              element: mark,
+              center: ((absoluteTop + absoluteBottom) * 0.5 / scrollHeight) * trackHeight,
+            }});
+          }}
+        }}
+
+        const markerPositions = [];
+        for (const group of groups.values()) {{
+          if (!Number.isFinite(group.minTop) || !Number.isFinite(group.maxBottom)) {{
+            continue;
+          }}
+          const topPx = Math.max(
+            0,
+            Math.min(trackHeight - 4, (group.minTop / scrollHeight) * trackHeight)
+          );
+          const bottomPx = Math.max(
+            topPx + 3,
+            Math.min(trackHeight, (group.maxBottom / scrollHeight) * trackHeight)
+          );
+          markerPositions.push({{
+            top: Math.round(topPx),
+            bottom: Math.round(bottomPx),
+            targets: Array.isArray(group.targets) ? group.targets : [],
+          }});
+        }}
+
+        if (!markerPositions.length) {{
+          highlightOverlay.classList.remove("mdexplore-visible");
+          syncOverlayHorizontalPosition();
+          return;
+        }}
+
+        markerPositions.sort((a, b) => a.top - b.top);
+        const merged = [];
+        for (const item of markerPositions) {{
+          const previous = merged.length ? merged[merged.length - 1] : null;
+          if (previous && item.top <= previous.bottom + 2) {{
+            previous.bottom = Math.max(previous.bottom, item.bottom);
+            previous.targets.push(...item.targets);
+            continue;
+          }}
+          merged.push({{
+            top: item.top,
+            bottom: item.bottom,
+            targets: Array.isArray(item.targets) ? [...item.targets] : [],
+          }});
+        }}
+
+        for (const item of merged) {{
+          const marker = document.createElement("div");
+          marker.className = "mdexplore-scroll-highlight-marker";
+          marker.style.top = `${{item.top}}px`;
+          marker.style.height = `${{Math.max(5, item.bottom - item.top)}}px`;
+          const activateMarker = (event) => {{
+            if (typeof event.button === "number" && event.button !== 0) {{
+              return;
+            }}
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === "function") {{
+              event.stopImmediatePropagation();
+            }}
+            const clickY = Number.isFinite(event.clientY)
+              ? event.clientY
+              : (item.top + item.bottom) * 0.5;
+            const targetInfo = Array.isArray(item.targets) && item.targets.length
+              ? item.targets.reduce((best, candidate) => {{
+                  if (!best) return candidate;
+                  return Math.abs(candidate.center - clickY) < Math.abs(best.center - clickY)
+                    ? candidate
+                    : best;
+                }}, null)
+              : null;
+            const target = targetInfo && targetInfo.element ? targetInfo.element : null;
+            if (!target) {{
+              return;
+            }}
+            jumpToTarget(target);
+          }};
+          marker.addEventListener("mousedown", activateMarker);
+          marker.addEventListener("pointerdown", activateMarker);
+          highlightOverlay.appendChild(marker);
+        }}
+        syncOverlayHorizontalPosition();
+        highlightOverlay.classList.add("mdexplore-visible");
+      }};
+
+      const hasNamedViewMarkers = () => {{
+        const entries = window.__mdexploreNamedViewMarkers;
+        return Array.isArray(entries) && entries.length > 0;
+      }};
+
+      const refreshNamedViewMarkers = () => {{
+        // Named views are anchored to saved source-line "home" positions.
+        // This stays cheap: no DOM scan is needed to place markers because we
+        // map persisted line numbers directly into the overlay track.
+        if (!viewOverlay.isConnected) {{
+          return;
+        }}
+        viewOverlay.replaceChildren();
+        const rawEntries = Array.isArray(window.__mdexploreNamedViewMarkers)
+          ? window.__mdexploreNamedViewMarkers
+          : [];
+        const totalLines = Math.max(1, Number(window.__mdexploreSourceTotalLines || 1));
+        if (!rawEntries.length || totalLines <= 1) {{
+          viewOverlay.classList.remove("mdexplore-visible");
+          return;
+        }}
+
+        const trackHeight = window.innerHeight;
+        const entries = rawEntries
+          .map((entry, index) => {{
+            const topLine = Math.max(1, Number(entry && entry.top_line) || 1);
+            const color = String(entry && entry.color ? entry.color : "#8fb8ff").trim() || "#8fb8ff";
+            return {{
+              topLine,
+              color,
+              sequence: index,
+            }};
+          }})
+          .sort((a, b) => (a.topLine - b.topLine) || (a.sequence - b.sequence));
+
+        for (const entry of entries) {{
+          const marker = document.createElement("div");
+          marker.className = "mdexplore-scroll-view-marker";
+          const ratio = totalLines <= 1 ? 0 : (entry.topLine - 1) / (totalLines - 1);
+          const topPx = Math.max(0, Math.min(trackHeight - 6, ratio * trackHeight));
+          marker.style.top = `${{Math.round(topPx)}}px`;
+          marker.style.height = "6px";
+          marker.style.background = entry.color;
+          const activateMarker = (event) => {{
+            if (typeof event.button === "number" && event.button !== 0) {{
+              return;
+            }}
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === "function") {{
+              event.stopImmediatePropagation();
+            }}
+            const target = findTargetForSourceLine(entry.topLine);
+            if (target) {{
+              jumpToTarget(target);
+              return;
+            }}
+            const scrollable = viewportScrollableHeight();
+            if (scrollable > 0) {{
+              const fallbackRatio = totalLines <= 1 ? 0 : (entry.topLine - 1) / (totalLines - 1);
+              window.scrollTo({{
+                top: Math.max(0, Math.min(scrollable, fallbackRatio * scrollable)),
+                behavior: "auto",
+              }});
+            }}
+          }};
+          marker.addEventListener("mousedown", activateMarker);
+          marker.addEventListener("pointerdown", activateMarker);
+          viewOverlay.appendChild(marker);
+        }}
+        viewOverlay.classList.add("mdexplore-visible");
+      }};
+
       const scheduleSearchHitRefresh = (delayMs = 40) => {{
         if (state.searchRefreshTimer) {{
           window.clearTimeout(state.searchRefreshTimer);
@@ -3234,8 +3721,45 @@ class MarkdownRenderer:
         }}, delayMs);
       }};
 
+      const hasPersistentHighlights = () => {{
+        const entries = window.__mdexplorePersistentHighlights;
+        return Array.isArray(entries) && entries.length > 0;
+      }};
+
+      const schedulePersistentHighlightRefresh = (delayMs = 40) => {{
+        if (!hasPersistentHighlights() && !highlightOverlay.classList.contains("mdexplore-visible")) {{
+          return;
+        }}
+        if (state.highlightRefreshTimer) {{
+          window.clearTimeout(state.highlightRefreshTimer);
+        }}
+        state.highlightRefreshTimer = window.setTimeout(() => {{
+          state.highlightRefreshTimer = null;
+          refreshPersistentHighlightMarkers();
+        }}, delayMs);
+      }};
+
+      const scheduleNamedViewRefresh = (delayMs = 30) => {{
+        if (!hasNamedViewMarkers() && !viewOverlay.classList.contains("mdexplore-visible")) {{
+          return;
+        }}
+        if (state.viewRefreshTimer) {{
+          window.clearTimeout(state.viewRefreshTimer);
+        }}
+        state.viewRefreshTimer = window.setTimeout(() => {{
+          state.viewRefreshTimer = null;
+          refreshNamedViewMarkers();
+        }}, delayMs);
+      }};
+
       window.__mdexploreRefreshScrollHitMarkers = () => {{
         scheduleSearchHitRefresh(0);
+      }};
+      window.__mdexploreRefreshPersistentHighlightMarkers = () => {{
+        schedulePersistentHighlightRefresh(0);
+      }};
+      window.__mdexploreRefreshNamedViewMarkers = () => {{
+        scheduleNamedViewRefresh(0);
       }};
 
       const showIndicator = () => {{
@@ -3308,6 +3832,8 @@ class MarkdownRenderer:
           state.active = false;
           indicator.classList.remove("mdexplore-visible");
           hitOverlay.classList.remove("mdexplore-visible");
+          highlightOverlay.classList.remove("mdexplore-visible");
+          viewOverlay.classList.remove("mdexplore-visible");
           return;
         }}
         if (state.active || (state.leftMouseDown && isNearVerticalScrollbar())) {{
@@ -3324,12 +3850,35 @@ class MarkdownRenderer:
           updateIndicator();
         }}
         scheduleSearchHitRefresh(0);
+        if (hasPersistentHighlights() || highlightOverlay.classList.contains("mdexplore-visible")) {{
+          schedulePersistentHighlightRefresh(0);
+        }}
+        if (hasNamedViewMarkers() || viewOverlay.classList.contains("mdexplore-visible")) {{
+          scheduleNamedViewRefresh(0);
+        }}
       }}, {{ passive: true }});
 
       const searchObserver = new MutationObserver((mutationList) => {{
         for (const mutation of mutationList) {{
+          const targetNode = mutation && mutation.target ? mutation.target : null;
+          if (
+            targetNode === hitOverlay ||
+            targetNode === highlightOverlay ||
+            targetNode === indicator ||
+            (targetNode instanceof Node &&
+              (
+                hitOverlay.contains(targetNode) ||
+                highlightOverlay.contains(targetNode) ||
+                indicator.contains(targetNode)
+              ))
+          ) {{
+            continue;
+          }}
           if (mutation.type === "childList" || mutation.type === "attributes") {{
             scheduleSearchHitRefresh();
+            if (hasPersistentHighlights() || highlightOverlay.classList.contains("mdexplore-visible")) {{
+              schedulePersistentHighlightRefresh();
+            }}
             return;
           }}
         }}
@@ -3338,10 +3887,16 @@ class MarkdownRenderer:
         subtree: true,
         childList: true,
         attributes: true,
-        attributeFilter: ["data-mdexplore-search-mark"],
+        attributeFilter: [
+          "data-mdexplore-search-mark",
+          "data-mdexplore-persistent-highlight",
+          "data-mdexplore-persistent-highlight-id",
+        ],
       }});
 
       scheduleSearchHitRefresh(0);
+      scheduleNamedViewRefresh(0);
+      schedulePersistentHighlightRefresh(0);
     }};
 
     window.__mdexploreMermaidInitConfig = (mode = "auto") => {{
@@ -6877,7 +7432,7 @@ class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
     VIEWS_FILE_NAME = ".mdexplore-views.json"
     HIGHLIGHTING_FILE_NAME = ".mdexplore-highlighting.json"
-    PREVIEW_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"
+    PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     DEBUG_LOG_FILE_NAME = "mdexplore.log"
     DEBUG_LOG_MAX_LINES = 10_000
     HIGHLIGHT_COLORS = [
@@ -6926,6 +7481,10 @@ class MdExploreWindow(QMainWindow):
         self._active_pdf_workers: set[PdfExportWorker] = set()
         self._pdf_export_in_progress = False
         self._pdf_export_source_key: str | None = None
+        # PDF export should ignore preview-only zoom. Capture the user's
+        # current QWebEngine zoom factor so export can temporarily reset to
+        # 100% and then restore the original interactive scale afterward.
+        self._pdf_export_saved_preview_zoom: float | None = None
         self._pending_pdf_layout_hints: dict[str, object] = {}
         # Global, in-process result cache for PlantUML blocks keyed by hash of
         # normalized source. This survives file navigation during this run.
@@ -6967,6 +7526,8 @@ class MdExploreWindow(QMainWindow):
         self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
         self._current_preview_text_highlights: list[dict[str, int | str]] = []
         self._next_text_highlight_id = 1
+        self._last_named_view_marker_payload_key: str | None = None
+        self._last_named_view_marker_payload_json: str | None = None
         self._debug_enabled = bool(debug_mode)
         self._debug_log_path = Path(__file__).resolve().parent / self.DEBUG_LOG_FILE_NAME
         self._debug_log_line_count = 0
@@ -7217,11 +7778,38 @@ class MdExploreWindow(QMainWindow):
         top_bar_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         preview_container = QWidget()
+        self.preview_container = preview_container
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
         preview_layout.addWidget(self.view_tabs)
         preview_layout.addWidget(self.preview, 1)
+
+        # This badge is purely transient UI feedback for preview-wide zoom
+        # changes; it is not tied to Mermaid/PlantUML internal zoom state.
+        self._preview_zoom_overlay = QLabel("", self.preview_container)
+        self._preview_zoom_overlay.setObjectName("mdexplore-preview-zoom-overlay")
+        self._preview_zoom_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_zoom_overlay.setStyleSheet(
+            """
+            QLabel#mdexplore-preview-zoom-overlay {
+                background-color: rgba(11, 20, 38, 210);
+                color: #e5e7eb;
+                border: 1px solid rgba(148, 163, 184, 0.55);
+                border-radius: 8px;
+                padding: 3px 9px;
+                font-weight: 600;
+            }
+            """
+        )
+        self._preview_zoom_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self._preview_zoom_overlay.hide()
+        self._preview_zoom_overlay_timer = QTimer(self)
+        self._preview_zoom_overlay_timer.setSingleShot(True)
+        self._preview_zoom_overlay_timer.setInterval(PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS)
+        self._preview_zoom_overlay_timer.timeout.connect(self._preview_zoom_overlay.hide)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tree)
@@ -7282,10 +7870,73 @@ class MdExploreWindow(QMainWindow):
         refresh_action.triggered.connect(self._refresh_directory_view)
         self.addAction(refresh_action)
 
+        preview_zoom_in_action = QAction("Preview Zoom In", self)
+        preview_zoom_in_action.setShortcuts(
+            ["Ctrl++", "Ctrl+=", "Ctrl+Shift+="]
+        )
+        preview_zoom_in_action.triggered.connect(self._zoom_preview_in)
+        self.addAction(preview_zoom_in_action)
+
+        preview_zoom_out_action = QAction("Preview Zoom Out", self)
+        preview_zoom_out_action.setShortcuts(["Ctrl+-", "Ctrl+_"])
+        preview_zoom_out_action.triggered.connect(self._zoom_preview_out)
+        self.addAction(preview_zoom_out_action)
+
+        preview_zoom_reset_action = QAction("Preview Zoom Reset", self)
+        preview_zoom_reset_action.setShortcuts(["Ctrl+0", "Ctrl+Shift+0"])
+        preview_zoom_reset_action.triggered.connect(self._reset_preview_zoom)
+        self.addAction(preview_zoom_reset_action)
+
+    def _set_preview_zoom_factor(self, factor: float) -> None:
+        """Set preview-only QWebEngine zoom factor with clamped bounds."""
+        clamped = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(factor)))
+        self.preview.setZoomFactor(clamped)
+        percent_text = f"{int(round(clamped * 100))}%"
+        self.statusBar().showMessage(f"Preview zoom: {percent_text}", 1500)
+        self._show_preview_zoom_overlay(percent_text)
+
+    def _zoom_preview_in(self) -> None:
+        """Increase preview pane zoom level."""
+        current = float(self.preview.zoomFactor())
+        self._set_preview_zoom_factor(current + PREVIEW_ZOOM_STEP)
+
+    def _zoom_preview_out(self) -> None:
+        """Decrease preview pane zoom level."""
+        current = float(self.preview.zoomFactor())
+        self._set_preview_zoom_factor(current - PREVIEW_ZOOM_STEP)
+
+    def _reset_preview_zoom(self) -> None:
+        """Reset preview pane zoom level to default scale."""
+        self._set_preview_zoom_factor(PREVIEW_ZOOM_RESET)
+
+    def _show_preview_zoom_overlay(self, percent_text: str) -> None:
+        """Show a short-lived zoom percentage label at top of preview pane."""
+        if not hasattr(self, "_preview_zoom_overlay"):
+            return
+        self._preview_zoom_overlay.setText(percent_text)
+        self._preview_zoom_overlay.adjustSize()
+        self._position_preview_zoom_overlay()
+        self._preview_zoom_overlay.raise_()
+        self._preview_zoom_overlay.show()
+        self._preview_zoom_overlay_timer.start()
+
+    def _position_preview_zoom_overlay(self) -> None:
+        """Keep zoom overlay anchored to the top center of the preview view."""
+        if not hasattr(self, "_preview_zoom_overlay") or not hasattr(self, "preview"):
+            return
+        overlay = self._preview_zoom_overlay
+        target = self.preview
+        top_left = target.mapTo(self.preview_container, QPoint(0, 0))
+        target_width = max(1, target.width())
+        x = top_left.x() + max(8, (target_width - overlay.width()) // 2)
+        y = top_left.y() + 8
+        overlay.move(x, y)
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         """Keep centered overlays aligned when the main window is resized."""
         super().resizeEvent(event)
         self._position_restore_overlay()
+        self._position_preview_zoom_overlay()
 
     def _position_restore_overlay(self) -> None:
         """Center the restore popup label within the visible window area."""
@@ -7528,6 +8179,72 @@ class MdExploreWindow(QMainWindow):
         if not math.isfinite(scroll_y):
             scroll_y = 0.0
         return scroll_y, top_line
+
+    def _current_named_view_marker_entries(self) -> list[dict[str, int | str]]:
+        """Return saved named-view home markers for the active document."""
+        palette = ViewTabBar.PASTEL_SEQUENCE
+        palette_size = max(1, len(palette))
+        markers: list[dict[str, int | str]] = []
+        seen_view_ids: set[int] = set()
+        for tab_index in range(self.view_tabs.count()):
+            anchor = self._tab_label_anchor(tab_index)
+            if anchor is None:
+                continue
+            view_id = self._tab_view_id(tab_index)
+            if view_id is None or view_id in seen_view_ids:
+                continue
+            seen_view_ids.add(view_id)
+            _scroll_y, top_line = anchor
+            data = self.view_tabs.tabData(tab_index)
+            color_slot = tab_index % palette_size
+            if isinstance(data, dict):
+                try:
+                    color_slot = int(data.get("color_slot", color_slot))
+                except Exception:
+                    color_slot = tab_index % palette_size
+            if color_slot < 0 or color_slot >= palette_size:
+                color_slot = tab_index % palette_size
+            markers.append(
+                {
+                    "view_id": int(view_id),
+                    "top_line": max(1, int(top_line)),
+                    "color": str(palette[color_slot]),
+                }
+            )
+        return markers
+
+    def _refresh_named_view_markers_in_preview(
+        self, expected_key: str | None = None, *, force: bool = False
+    ) -> None:
+        """Push named-view home markers into the live preview without reloading."""
+        current_key = self._current_preview_path_key()
+        if current_key is None:
+            self._last_named_view_marker_payload_key = None
+            self._last_named_view_marker_payload_json = None
+            return
+        if expected_key is not None and expected_key != current_key:
+            return
+        payload = self._current_named_view_marker_entries()
+        payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        if (
+            not force
+            and self._last_named_view_marker_payload_key == current_key
+            and self._last_named_view_marker_payload_json == payload_json
+        ):
+            return
+        self._last_named_view_marker_payload_key = current_key
+        self._last_named_view_marker_payload_json = payload_json
+        js = f"""
+(() => {{
+  window.__mdexploreNamedViewMarkers = {payload_json};
+  if (typeof window.__mdexploreRefreshNamedViewMarkers === "function") {{
+    window.__mdexploreRefreshNamedViewMarkers();
+  }}
+}})();
+"""
+        # Marker placement is derived entirely from persisted line anchors, so
+        # a small payload update is enough; avoid full preview reloads here.
+        self.preview.page().runJavaScript(js)
 
     @staticmethod
     def _count_markdown_lines(markdown_text: str) -> int:
@@ -7951,6 +8668,16 @@ class MdExploreWindow(QMainWindow):
         else:
             highlights_by_file.pop(file_name, None)
         self._save_directory_text_highlights(directory)
+        root = getattr(self, "root", None)
+        if isinstance(root, Path):
+            try:
+                target_path = (directory / file_name).resolve()
+            except Exception:
+                target_path = directory / file_name
+            target_key = self._path_key(target_path)
+            root_key = self._path_key(root)
+            if target_key == root_key or target_key.startswith(root_key + os.sep):
+                self._refresh_tree_multi_view_markers()
 
     def _directory_view_sessions(self, directory: Path) -> dict[str, dict]:
         """Load or return cached persisted view sessions for one directory."""
@@ -8760,6 +9487,7 @@ class MdExploreWindow(QMainWindow):
                 self._update_view_tabs_visibility()
                 self._persist_document_view_session()
                 self._refresh_tree_multi_view_markers()
+                self._refresh_named_view_markers_in_preview()
                 self.statusBar().showMessage(
                     "Closed labeled tab and returned to hidden default view", 3000
                 )
@@ -8784,6 +9512,7 @@ class MdExploreWindow(QMainWindow):
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
         self._refresh_tree_multi_view_markers()
+        self._refresh_named_view_markers_in_preview()
 
     def _on_view_tab_changed(self, tab_index: int) -> None:
         """Switch active view and restore its own saved scroll position."""
@@ -8907,6 +9636,7 @@ class MdExploreWindow(QMainWindow):
         self.view_tabs.updateGeometry()
         self.view_tabs.update()
         self._persist_document_view_session()
+        self._refresh_named_view_markers_in_preview()
         if custom_label is None:
             self.statusBar().showMessage("Restored dynamic line-number tab label", 2500)
         elif was_truncated:
@@ -9094,6 +9824,10 @@ class MdExploreWindow(QMainWindow):
 
     def _set_preview_html(self, html_doc: str, base_url: QUrl) -> None:
         """Load preview HTML with file-based fallback for large documents."""
+        # Any fresh page load drops in-page marker state, so force the next
+        # named-view marker push to repopulate the overlay after loadFinished.
+        self._last_named_view_marker_payload_key = None
+        self._last_named_view_marker_payload_json = None
         try:
             encoded_size = len(html_doc.encode("utf-8", errors="replace"))
         except Exception:
@@ -9252,6 +9986,7 @@ class MdExploreWindow(QMainWindow):
         # still happen from cache refreshes; re-apply any ready results.
         self._apply_all_ready_plantuml_to_current_preview()
         self._apply_persistent_preview_highlights(current_key)
+        self._refresh_named_view_markers_in_preview(current_key, force=True)
         self._schedule_mermaid_cache_harvest_for(current_key)
         self._reapply_diagram_view_state_for(current_key)
         QTimer.singleShot(
@@ -9433,6 +10168,7 @@ class MdExploreWindow(QMainWindow):
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         """Persist current pane split after any manual divider movement."""
         self._capture_splitter_sizes_for_session()
+        self._position_preview_zoom_overlay()
 
     def _capture_splitter_sizes_for_session(self) -> None:
         """Store non-zero splitter sizes for reuse while app stays open."""
@@ -9580,17 +10316,19 @@ class MdExploreWindow(QMainWindow):
         return isinstance(tabs, list) and len(tabs) > 1
 
     def _refresh_tree_multi_view_markers(self) -> None:
-        """Update left-tree badges for markdown files that have multi-view state."""
+        """Update left-tree badges for markdown files with views and/or highlights."""
         if not hasattr(self, "model"):
             return
         root = getattr(self, "root", None)
         if not isinstance(root, Path) or not root.exists():
             self.model.clear_multi_view_paths()
+            self.model.clear_persistent_highlight_paths()
             if hasattr(self, "tree"):
                 self.tree.viewport().update()
             return
 
         marked_paths: set[Path] = set()
+        highlighted_paths: set[Path] = set()
         root_key = self._path_key(root)
 
         for raw_path_key, session in self._document_view_sessions.items():
@@ -9622,17 +10360,31 @@ class MdExploreWindow(QMainWindow):
         for dirpath, _dirnames, filenames in os.walk(
             root, onerror=on_walk_error, followlinks=False
         ):
-            if self.VIEWS_FILE_NAME not in filenames:
-                continue
             directory = Path(dirpath)
-            sessions = self._directory_view_sessions(directory)
+            if self.VIEWS_FILE_NAME not in filenames:
+                sessions = {}
+            else:
+                sessions = self._directory_view_sessions(directory)
             for file_name, session in sessions.items():
-                if not self._session_has_multiple_views(session):
-                    continue
-                marked_paths.add(directory / file_name)
+                if self._session_has_multiple_views(session):
+                    marked_paths.add(directory / file_name)
 
+            if self.HIGHLIGHTING_FILE_NAME not in filenames:
+                continue
+            highlights_by_file = self._directory_text_highlights(directory)
+            for file_name, entries in highlights_by_file.items():
+                if self._normalize_text_highlight_entries(entries):
+                    highlighted_paths.add(directory / file_name)
+
+        multi_view_keys = {self.model._path_key(path) for path in marked_paths}
+        highlight_keys = {self.model._path_key(path) for path in highlighted_paths}
+        should_update = (
+            multi_view_keys != self.model._multi_view_paths
+            or highlight_keys != self.model._highlighted_preview_paths
+        )
         self.model.set_multi_view_paths(marked_paths)
-        if hasattr(self, "tree"):
+        self.model.set_persistent_highlight_paths(highlighted_paths)
+        if should_update and hasattr(self, "tree"):
             self.tree.viewport().update()
 
     def _current_search_terms(self) -> list[str]:
@@ -11703,6 +12455,9 @@ class MdExploreWindow(QMainWindow):
   const entries = normalizeEntries(incoming);
   window.__mdexplorePersistentHighlights = entries;
   if (!entries.length) {
+    if (typeof window.__mdexploreRefreshPersistentHighlightMarkers === "function") {
+      window.__mdexploreRefreshPersistentHighlightMarkers();
+    }
     return { applied: 0, entries: 0 };
   }
 
@@ -11804,6 +12559,9 @@ class MdExploreWindow(QMainWindow):
     }
   }
 
+  if (typeof window.__mdexploreRefreshPersistentHighlightMarkers === "function") {
+    window.__mdexploreRefreshPersistentHighlightMarkers();
+  }
   return {
     applied,
     entries: entries.length,
@@ -13493,6 +14251,28 @@ class MdExploreWindow(QMainWindow):
         self._pdf_export_in_progress = busy
         self.pdf_btn.setEnabled(not busy)
 
+    def _prepare_preview_zoom_for_pdf_export(self) -> None:
+        """Temporarily reset preview-wide zoom so PDF snapshots use 100% scale."""
+        if self._pdf_export_saved_preview_zoom is not None:
+            return
+        current_zoom = float(self.preview.zoomFactor())
+        self._pdf_export_saved_preview_zoom = current_zoom
+        if abs(current_zoom - PREVIEW_ZOOM_RESET) > 1e-6:
+            # Use the raw setter so export does not show the user-facing zoom
+            # overlay or status message while preparing the PDF snapshot.
+            self.preview.setZoomFactor(PREVIEW_ZOOM_RESET)
+
+    def _restore_preview_zoom_after_pdf_export(self) -> None:
+        """Restore the interactive preview zoom after PDF export completes."""
+        saved_zoom = self._pdf_export_saved_preview_zoom
+        self._pdf_export_saved_preview_zoom = None
+        if saved_zoom is None:
+            return
+        if abs(float(self.preview.zoomFactor()) - float(saved_zoom)) <= 1e-6:
+            return
+        # Restore silently so PDF completion does not look like a user zoom action.
+        self.preview.setZoomFactor(float(saved_zoom))
+
     def _export_current_preview_pdf(self) -> None:
         """Export the currently previewed markdown rendering to a numbered PDF."""
         if self.current_file is None:
@@ -13517,6 +14297,7 @@ class MdExploreWindow(QMainWindow):
         # Preserve current diagram zoom/pan before forcing PDF-safe rendering mode.
         self._capture_current_diagram_view_state_blocking(source_key, timeout_ms=500)
         self._capture_current_diagram_view_state(source_key)
+        self._prepare_preview_zoom_for_pdf_export()
 
         self._set_pdf_export_busy(True)
         self.statusBar().showMessage(f"Preparing PDF for {source_path.name}...")
@@ -15604,6 +16385,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             except Exception as exc:
                 self._set_pdf_export_busy(False)
                 self._restore_preview_mermaid_palette(source_key)
+                self._restore_preview_zoom_after_pdf_export()
                 error_text = self._truncate_error_text(str(exc), 500)
                 QMessageBox.critical(
                     self,
@@ -15751,6 +16533,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         if not raw_pdf:
             self._set_pdf_export_busy(False)
             self._restore_preview_mermaid_palette(source_key)
+            self._restore_preview_zoom_after_pdf_export()
             message = "Qt WebEngine returned an empty PDF payload"
             QMessageBox.critical(self, "PDF export failed", message)
             self.statusBar().showMessage(f"PDF export failed: {message}", 5000)
@@ -15782,6 +16565,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         self._active_pdf_workers.discard(worker)
         self._set_pdf_export_busy(False)
         self._restore_preview_mermaid_palette(source_key)
+        self._restore_preview_zoom_after_pdf_export()
         self._pdf_export_source_key = None
 
         if error_text:

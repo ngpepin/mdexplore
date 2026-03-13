@@ -27,6 +27,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
 - Runtime view sidecars: per-directory `.mdexplore-views.json` files for
   persisted view-tab state (multi-view sessions and custom tab labels).
+- Runtime preview-highlight sidecars: per-directory
+  `.mdexplore-highlighting.json` files for persistent text highlights created
+  from the preview pane.
 
 ## Runtime Assumptions
 
@@ -64,6 +67,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   current application run.
 - While dragging the preview pane's vertical scrollbar, the preview should show
   an approximate `current line / total lines` indicator beside the scrollbar handle.
+- `Ctrl++`, `Ctrl+-`, and `Ctrl+0` should adjust only the preview pane zoom
+  factor, not the tree pane or overall UI scale.
+- Preview zoom changes should briefly show a top-center percentage overlay inside
+  the preview area.
 - `^` navigates one directory level up and re-roots the tree.
 - User-adjusted splitter width between tree and preview should persist across
   root changes for the current application run.
@@ -156,6 +163,14 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
 - The pin copy action should copy exactly the currently previewed markdown file
   using the same clipboard MIME compatibility guarantees.
+- Preview context menu should offer persistent `Highlight` / `Remove Highlight`
+  actions for rendered text selections and existing highlighted blocks.
+- Preview text highlights should persist per directory in
+  `.mdexplore-highlighting.json`.
+- Persistent preview text highlights should also surface as purple left-gutter
+  markers in the preview; clicking a marker should jump to the corresponding
+  highlighted block, and taller markers should reflect highlights that span
+  more lines.
 - Preview context menu should keep standard actions and add
   `Copy Rendered Text` and `Copy Source Markdown` when there is a text
   selection.
@@ -170,10 +185,21 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - While search is active, the preview should show yellow scrollbar-side markers
   for highlighted hits, and clicking a marker should jump to the nearest
   underlying hit represented by that marker cluster.
-- While search is active, matching markdown files in the tree should also show
-  a small yellow right-pointing triangle marker beside the markdown icon.
+- While search is active, matching markdown files in the tree should show a
+  yellow hit-count pill in the left gutter rather than the older triangle badge.
 - Markdown files that currently have more than the default single view should
-  show a small tab badge beside the markdown icon in the tree.
+  show a small light-gray tab badge beside the markdown icon in the tree.
+- Markdown files with persisted preview text highlights should also show a
+  separate marker badge in the tree.
+- Tree gutter badge order for markdown files is:
+  search hit-count pill, highlight marker, views badge, markdown file icon.
+- The markdown file icon and filename must stay horizontally aligned across all
+  markdown rows by using a fixed-width gutter strip and packing only the active
+  badges inside it.
+- Named views with saved `Return to beginning` anchors should also appear as
+  color-matched left-side preview gutter markers positioned by their saved home
+  line number. These markers must render above persistent-highlight markers
+  when their positions overlap.
 
 ## Editing Rules
 
@@ -217,6 +243,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   (line numbers when available).
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
+- Debug logging to project-root `mdexplore.log` must remain disabled unless the
+  app is launched with `--debug`.
 
 ## Mermaid Render/Caching Architecture (Read Before Changes)
 
@@ -300,6 +328,8 @@ across all navigation sequences.
   - `file://` URIs should be decoded
   - file arguments should resolve to parent directory
 - Launcher must pass through supported app switches (for example `--mermaid-backend`).
+- Launcher `DEBUG_MODE=true` should append `--debug` so application debug logging
+  can be enabled without editing desktop launchers or shell aliases.
 - Non-interactive launcher runs should log to
   `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
   Log retention is capped to the most recent 1000 lines.

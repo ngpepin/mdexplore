@@ -27,6 +27,8 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Mermaid keeps separate in-memory cache modes for GUI (`auto`) and PDF (`pdf`) rendering.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
+- `Ctrl++` / `Ctrl+-` / `Ctrl+0` zoom only the preview pane content in/out/reset.
+- Preview-only zoom changes briefly show a percentage badge at the top of the preview pane.
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
 - Status bar reports active long-running work (preview load/render, PlantUML progress, PDF export) and returns to `Ready` instead of staying blank.
 - Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
@@ -34,13 +36,19 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - View-tab state persists per directory in `.mdexplore-views.json` files for
   documents that have more than one saved view or a custom tab label.
-- Files in the tree show a small tab badge when they currently have more than
-  the default single view.
+- Persistent preview text highlights are stored per directory in
+  `.mdexplore-highlighting.json`.
+- Files in the tree show a small light-gray tab badge when they currently have
+  more than the default single view.
+- Files with persistent preview text highlights show a separate purple marker
+  badge in the tree.
+- Markdown tree gutter badges are packed together in a fixed-width strip so the
+  markdown file icon and filename stay aligned even when only some badges apply.
 - Right-click menu includes `Clear All` to recursively remove all highlights from scope.
 - Top-right color buttons copy matching highlighted files to clipboard.
 - A pin button before the copy-color buttons copies the currently previewed markdown file.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
-- Search-hit files in the tree show a small yellow right-pointing triangle marker.
+- Search-hit files in the tree show a yellow hit-count pill in the left gutter.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
 - While dragging the preview scrollbar, mdexplore shows an approximate
   `current line / total lines` indicator beside the scrollbar handle.
@@ -133,6 +141,41 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 - Right-click a directory to access recursive `Clear All` for that subtree.
 - Copy/Clear operations are recursive and use scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
+
+### Preview Text Highlights
+
+- In the preview pane, right-click selected text and choose `Highlight` to add a
+  persistent text highlight behind that rendered text.
+- Highlighted preview text uses a subdued purple-blue background intended to
+  remain readable against the dark preview theme.
+- Highlighted blocks also appear as purple navigation markers on the left side
+  of the preview gutter; longer markers indicate highlights that span more lines.
+- Clicking a purple highlight marker jumps to the corresponding highlighted block.
+- Named views with a saved `Return to beginning` anchor also appear as
+  color-matched left-gutter markers in the preview, layered above highlight
+  markers when the two coincide.
+- Right-click inside an existing highlighted block to remove it with
+  `Remove Highlight`.
+- If the current selection overlaps existing highlighted text and also includes
+  unhighlighted text, both `Highlight` and `Remove Highlight` remain available
+  so the block can be extended or removed.
+- Preview text highlights persist per directory in `.mdexplore-highlighting.json`.
+- The tree also mirrors persisted preview highlights with a marker badge so
+  highlighted documents remain easy to spot while browsing directories.
+- The tree gutter badge order is:
+  hit-count pill, highlight marker, views badge, markdown file icon.
+- Highlight persistence is best-effort: if the directory is not writable,
+  mdexplore fails quietly rather than interrupting preview use.
+
+### Preview Zoom
+
+- `Ctrl++` zooms the preview pane in.
+- `Ctrl+-` zooms the preview pane out.
+- `Ctrl+0` resets preview zoom to `100%`.
+- These shortcuts affect only the preview content, not the tree pane, toolbar,
+  or overall window layout.
+- Each zoom change briefly shows a percentage badge at the top-center of the
+  preview pane and also reports the same value in the status bar.
 
 ### PDF Export
 
@@ -412,6 +455,17 @@ Rust backend executable override:
 ```bash
 MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh --mermaid-backend rust
 ```
+
+## Debug Logging
+
+- `mdexplore.py --debug` enables verbose debug logging to `mdexplore.log` in the
+  project directory.
+- `mdexplore.sh` exposes the same behavior through the `DEBUG_MODE` variable near
+  the top of the script. Set `DEBUG_MODE=true` to pass `--debug` into the app.
+- When debug logging is disabled, `mdexplore.log` is not written.
+- The application debug log trims itself to the most recent `10,000` lines.
+- The non-interactive launcher log remains separate at
+  `~/.cache/mdexplore/launcher.log` and trims to `1,000` lines.
 
 ## Render Architecture Map
 

@@ -5,6 +5,18 @@ It complements `UML.md` by going deep on the render forks and cache ownership.
 
 Use this file before changing Mermaid, PlantUML, preview caching, or PDF export.
 
+Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is intentionally outside the
+diagram render/cache forks described below. It is implemented as a
+`QWebEngineView.setZoomFactor()` adjustment in `mdexplore.py`, so it scales the
+entire preview surface after HTML/diagram rendering rather than creating a
+separate render branch or cache namespace.
+
+Preview overlay markers are also intentionally outside the diagram render/cache
+forks. Search-hit markers, persistent-highlight markers, and named-view home
+markers are lightweight in-page overlays driven from already-known match spans
+or persisted source-line anchors. They should be maintained as post-render UI
+navigation aids, not as renderer outputs or cache buckets.
+
 ## 0. One-Page Triage Card
 
 Use this as the fast incident-response path before going deep.
@@ -142,6 +154,15 @@ flowchart TD
 The main maintenance risk is crossing these concerns and accidentally reusing
 the wrong SVG variant (for example reusing GUI-adjusted SVGs in PDF mode).
 
+This document does not treat the following as render branches:
+
+- preview-wide `QWebEngineView` zoom,
+- preview overlay markers for search hits / persistent highlights / named views,
+- tree gutter badge composition (search pill, highlight marker, views badge).
+
+Those features consume render outputs, but they do not create alternate HTML,
+diagram SVG, or cache namespaces.
+
 ## 2. Render Mode Matrix
 
 | Mode | Mermaid Backend | SVG Source | Post-processing | Primary Cache Bucket |
@@ -206,6 +227,29 @@ sequenceDiagram
   end
   J->>J: apply GUI post-styling for readability
 ```
+
+### 4.1 Preview Overlay Layers (Non-Render)
+
+After the HTML is already loaded, mdexplore may add three navigation overlays
+inside the preview viewport:
+
+- right-side yellow search-hit markers derived from the active search result DOM,
+- left-side purple persistent-highlight markers derived from persisted text
+  highlight spans,
+- left-side named-view markers derived from saved tab home line numbers.
+
+These overlays are intentionally kept outside the diagram render branches:
+
+- search markers are rebuilt from existing highlighted-match DOM,
+- persistent-highlight markers are rebuilt only when persisted highlight spans
+  exist,
+- named-view markers are pushed from Python as a compact line-anchor payload and
+  do not scan the DOM.
+
+The layering order is significant:
+
+1. persistent-highlight markers,
+2. named-view markers on top when positions overlap.
 
 ## 5. PDF Export Path
 
@@ -295,6 +339,8 @@ flowchart TD
 - Diagram zoom/pan state restore across document switches is still not fully reliable
   for all Mermaid/PlantUML navigation sequences in one app run.
 - See `AGENTS.md` for attempted approaches and constraints.
+- Preview-only zoom factor is intentionally session-local and is not persisted
+  per file, per view, or into any render cache bucket.
 
 ## 10. Debugging Playbook (Human + Agent)
 

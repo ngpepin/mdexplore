@@ -38,6 +38,8 @@ node "Ubuntu Desktop Session" as Desktop {
 folder "Markdown directories" as MdFS
 file "~/.mdexplore.cfg" as UserCfg
 file "<dir>/.mdexplore-colors.json" as ColorCfg
+file "<dir>/.mdexplore-views.json" as ViewCfg
+file "<dir>/.mdexplore-highlighting.json" as HighlightCfg
 database "System Clipboard\nURLs + GNOME copied-files MIME" as Clipboard
 component "VS Code CLI\ncode" as Vscode
 file "vendor/plantuml/plantuml.jar" as PlantJar
@@ -63,6 +65,8 @@ Window --> MermaidCache
 Model --> MdFS : list dirs + *.md
 Model <--> ColorCfg : read/write highlight metadata
 Window <--> UserCfg : persist effective root on close
+Window <--> ViewCfg : persist saved view sessions
+Window <--> HighlightCfg : persist preview text highlights
 Window --> Clipboard : copy files/text/source markdown
 Window --> Vscode : Edit action
 Renderer --> PlantJar : local PlantUML render request
@@ -133,13 +137,17 @@ class ColorizedMarkdownModel {
   +COLOR_FILE_NAME: str
   -_dir_color_map: dict[str, dict[str, str]]
   -_loaded_dirs: set[str]
-  -_search_match_paths: set[str]
+  -_search_match_counts: dict[str, int]
+  -_multi_view_paths: set[str]
+  -_highlighted_preview_paths: set[str]
   +data(index, role)
   +set_color_for_file(path, color_name)
   +collect_files_with_color(root, color_name): list[Path]
   +clear_all_highlights(root): int
-  +set_search_match_paths(paths)
+  +set_search_match_counts(match_counts)
   +clear_search_match_paths()
+  +set_multi_view_paths(paths)
+  +set_persistent_highlight_paths(paths)
 }
 
 class MarkdownRenderer {
@@ -210,9 +218,12 @@ class MdExploreWindow {
   -_mermaid_svg_cache_by_mode: dict[mode -> dict[hash->svg]]
   -_preview_scroll_positions: dict[key->y]
   -_document_view_sessions: dict[path_key->session]
+  -_current_preview_text_highlights: list[dict]
   +_set_root_directory(new_root)
   +_load_preview(path)
   +_refresh_directory_view()
+  +_refresh_tree_multi_view_markers()
+  +_refresh_named_view_markers_in_preview()
   +_run_match_search()
   +_export_current_preview_pdf()
   +_copy_preview_selection_as_source_markdown(...)
@@ -275,6 +286,38 @@ end
 Win -> Pools : async diagram/export jobs as needed
 Pools --> Win : completion signals
 Win -> Web : in-place JS patch updates
+@enduml
+```
+
+## 4.1 Preview Navigation Overlays
+
+These are intentionally shown here only as boundary-level UI overlays. The
+exact DOM/CSS/JS mechanics remain in `RENDER-PATHS.md`.
+
+```plantuml
+@startuml
+actor User
+participant "MdExploreWindow" as Win
+participant "QWebEngineView" as Web
+participant "In-page overlay JS" as Overlay
+
+Win -> Web : setHtml(...)
+Web -> Overlay : initialize overlay layers
+
+alt active search
+  Win -> Overlay : refresh search-hit markers
+end
+
+alt persisted preview highlights exist
+  Win -> Overlay : refresh highlight markers
+end
+
+alt named tab views have saved home lines
+  Win -> Overlay : push named-view marker payload
+end
+
+User -> Overlay : click left/right gutter marker
+Overlay -> Web : jump to nearest target block/line
 @enduml
 ```
 
@@ -436,6 +479,13 @@ MultiView --> [*] : window close (persist effective root)
 - Diagrams are based on current code in `mdexplore.py` and `mdexplore.sh`.
 - Render/caching branch internals are intentionally abstracted here and documented in
   `RENDER-PATHS.md` to keep a single authoritative deep map.
+- Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is also intentionally kept out
+  of the UML internals here because it is a `QWebEngineView` scale adjustment,
+  not a separate renderer/cache branch.
+- Preview gutter overlays (search-hit markers, persistent-highlight markers,
+  named-view home markers) are similarly abstracted here and described in more
+  detail in `RENDER-PATHS.md`, because they are post-render navigation aids
+  rather than renderer/cache forks.
 - Worker/threadpool usage is intentionally separated by concern:
   - render pool (preview HTML jobs),
   - PlantUML pool (diagram jobs),
