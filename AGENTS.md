@@ -22,6 +22,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers used by the tree and tab UI.
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF export.
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
+- `setup-mdexplore.sh`: full bootstrap helper for local setup (venv, vendored assets, Rust Mermaid renderer).
 - `requirements.txt`: Python runtime dependencies.
 - `README.md`: user-facing setup and usage documentation.
 - `RENDER-PATHS.md`: detailed render/caching architecture map (Mermaid diagrams + prose).
@@ -354,6 +355,22 @@ across all navigation sequences.
   `PySide6.QtWebEngineWidgets`, `pypdf`, `reportlab.pdfgen.canvas`) and
   self-heal by reinstalling requirements if the environment is incomplete.
 - `--help` should stay lightweight and not require venv activation.
+
+## Setup Script Rules
+
+- `setup-mdexplore.sh` is the full local bootstrap path and should remain safe to rerun.
+- It should:
+  - create/update `.venv`
+  - install Python dependencies from `requirements.txt`
+  - ensure vendored local assets exist for MathJax, Mermaid JS, and PlantUML
+  - ensure the Rust Mermaid renderer source exists under `vendor/mermaid-rs-renderer`
+  - build `mmdr` into the path already probed by the launcher/app
+- If the vendored Rust renderer source already exists, prefer it over recloning.
+- If `cargo` is missing, the setup script may install a minimal Rust toolchain
+  through `rustup` so bootstrap can complete non-interactively.
+- The setup script should not silently apt-install arbitrary system packages.
+  Missing optional system runtime pieces (for example Java or `code`) should
+  produce clear warnings instead.
 
 ## Quality Gates Before Finishing
 

@@ -99,8 +99,18 @@ gradually decomposed.
 From any directory:
 
 ```bash
+/path/to/mdexplore/setup-mdexplore.sh
 /path/to/mdexplore/mdexplore.sh
 ```
+
+`setup-mdexplore.sh` is the full bootstrap path. It:
+
+- creates or updates `.venv`
+- installs Python dependencies from `requirements.txt`
+- downloads local MathJax, Mermaid, and PlantUML assets if they are missing
+- downloads/builds the Rust Mermaid renderer under `vendor/mermaid-rs-renderer`
+
+It is safe to rerun. After bootstrap, use `mdexplore.sh` for normal launches.
 
 When no `PATH` is supplied, the app opens:
 
@@ -143,6 +153,27 @@ python3 /path/to/mdexplore/mdexplore.py [--mermaid-backend js|rust] [PATH]
 ```
 
 If `PATH` is omitted for direct run, the same config/home default rule applies.
+
+### Full Bootstrap Script
+
+```bash
+setup-mdexplore.sh [--skip-python] [--skip-assets] [--skip-rust] [--rebuild-rust]
+```
+
+- `--skip-python` leaves the existing `.venv` untouched.
+- `--skip-assets` skips local MathJax / Mermaid JS / PlantUML asset checks.
+- `--skip-rust` skips Rust Mermaid bootstrap/build.
+- `--rebuild-rust` forces a fresh `cargo build --release --locked` for `mmdr`.
+
+By default the script prefers the vendored `vendor/mermaid-rs-renderer/`
+checkout if it already exists. If it does not exist, the script clones it from:
+
+```text
+https://github.com/1jehuang/mermaid-rs-renderer.git
+```
+
+If `cargo` is missing, the setup script installs a minimal Rust toolchain
+through `rustup` so it can build `mmdr` locally.
 
 ### File Highlights
 
@@ -500,6 +531,7 @@ MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh 
 ```text
 mdexplore.py       # Qt application, file tree, renderer integration
 mdexplore.sh       # launcher (venv create/install/run)
+setup-mdexplore.sh # full bootstrap script (venv/assets/mmdr)
 mdexplore.desktop.sample # sample desktop launcher entry for user customization
 mdexplor-icon.png  # primary app icon asset (preferred)
 requirements.txt   # Python runtime dependencies
