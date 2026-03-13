@@ -156,9 +156,9 @@ SEARCH_HIT_COUNT_FONT_PATHS = (
 _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE: str | None = None
 PREVIEW_PERSISTENT_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"
 PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR = "rgba(225, 214, 255, 0.76)"
-PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR = "#2f1658"
-PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR = "rgba(132, 114, 208, 0.86)"
-PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = "rgba(208, 188, 248, 0.96)"
+PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR = "#170534"
+PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR = "rgba(112, 90, 188, 0.92)"
+PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = "rgba(170, 148, 234, 0.96)"
 PREVIEW_HIGHLIGHT_KIND_NORMAL = "normal"
 PREVIEW_HIGHLIGHT_KIND_IMPORTANT = "important"
 # Preview zoom is intentionally separate from diagram zoom/pan state. These
@@ -3533,10 +3533,10 @@ class MarkdownRenderer:
           ).trim();
           const kind =
             String(
-              mark.getAttribute("data-mdexplore-persistent-highlight-kind") || "__NORMAL_KIND__"
-            ).trim().toLowerCase() === "__IMPORTANT_KIND__"
-              ? "__IMPORTANT_KIND__"
-              : "__NORMAL_KIND__";
+              mark.getAttribute("data-mdexplore-persistent-highlight-kind") || {json.dumps(PREVIEW_HIGHLIGHT_KIND_NORMAL)}
+            ).trim().toLowerCase() === {json.dumps(PREVIEW_HIGHLIGHT_KIND_IMPORTANT)}
+              ? {json.dumps(PREVIEW_HIGHLIGHT_KIND_IMPORTANT)}
+              : {json.dumps(PREVIEW_HIGHLIGHT_KIND_NORMAL)};
           if (!id) {{
             continue;
           }}
@@ -3596,7 +3596,7 @@ class MarkdownRenderer:
             bottom: Math.round(bottomPx),
             kind: group.kind,
             color:
-              group.kind === "__IMPORTANT_KIND__"
+              group.kind === {json.dumps(PREVIEW_HIGHLIGHT_KIND_IMPORTANT)}
                 ? importantHighlightMarkerColor
                 : highlightMarkerColor,
             targets: Array.isArray(group.targets) ? group.targets : [],
