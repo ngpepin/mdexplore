@@ -163,14 +163,21 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
 - The pin copy action should copy exactly the currently previewed markdown file
   using the same clipboard MIME compatibility guarantees.
-- Preview context menu should offer persistent `Highlight` / `Remove Highlight`
-  actions for rendered text selections and existing highlighted blocks.
+- Preview context menu should offer persistent `Highlight`,
+  `Highlight Important`, and `Remove Highlight` actions for rendered text
+  selections and existing highlighted blocks.
 - Preview text highlights should persist per directory in
   `.mdexplore-highlighting.json`.
-- Persistent preview text highlights should also surface as purple left-gutter
-  markers in the preview; clicking a marker should jump to the corresponding
+- Persistent preview text highlights should support at least two visual kinds:
+  normal and important. Entries in `.mdexplore-highlighting.json` should carry
+  enough metadata to preserve that distinction across runs.
+- Persistent preview text highlights should also surface as left-gutter markers
+  in the preview; clicking a marker should jump to the corresponding
   highlighted block, and taller markers should reflect highlights that span
   more lines.
+- Important-highlight markers should be visually lighter than normal-highlight
+  markers, and selecting part of an existing block should allow converting that
+  selected subrange between normal and important highlighting.
 - Preview context menu should keep standard actions and add
   `Copy Rendered Text` and `Copy Source Markdown` when there is a text
   selection.

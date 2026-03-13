@@ -309,7 +309,7 @@ alt active search
 end
 
 alt persisted preview highlights exist
-  Win -> Overlay : refresh highlight markers
+  Win -> Overlay : refresh normal/important highlight markers
 end
 
 alt named tab views have saved home lines

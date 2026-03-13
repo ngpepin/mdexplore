@@ -155,6 +155,12 @@ SEARCH_HIT_COUNT_FONT_PATHS = (
 )
 _SEARCH_HIT_COUNT_FONT_FAMILY_CACHE: str | None = None
 PREVIEW_PERSISTENT_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"
+PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR = "rgba(225, 214, 255, 0.76)"
+PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR = "#2f1658"
+PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR = "rgba(132, 114, 208, 0.86)"
+PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = "rgba(208, 188, 248, 0.96)"
+PREVIEW_HIGHLIGHT_KIND_NORMAL = "normal"
+PREVIEW_HIGHLIGHT_KIND_IMPORTANT = "important"
 # Preview zoom is intentionally separate from diagram zoom/pan state. These
 # constants control the QWebEngineView-wide scale factor used by Ctrl+/-
 # shortcuts and the transient overlay badge shown inside the preview pane.
@@ -2841,7 +2847,7 @@ class MarkdownRenderer:
       width: 15px;
       height: 100vh;
       display: none;
-      pointer-events: auto;
+      pointer-events: none;
       z-index: 2147483646;
     }}
     .mdexplore-scroll-hit-overlay.mdexplore-visible {{
@@ -2868,10 +2874,10 @@ class MarkdownRenderer:
       position: fixed;
       top: 0;
       left: 0;
-      width: 12px;
+      width: 18px;
       height: 100vh;
       display: none;
-      pointer-events: auto;
+      pointer-events: none;
       z-index: 2147483645;
     }}
     .mdexplore-scroll-highlight-overlay.mdexplore-visible {{
@@ -2881,10 +2887,10 @@ class MarkdownRenderer:
       position: fixed;
       top: 0;
       left: 0;
-      width: 12px;
+      width: 18px;
       height: 100vh;
       display: none;
-      pointer-events: auto;
+      pointer-events: none;
       z-index: 2147483647;
     }}
     .mdexplore-scroll-view-overlay.mdexplore-visible {{
@@ -2892,8 +2898,8 @@ class MarkdownRenderer:
     }}
     .mdexplore-scroll-highlight-marker {{
       position: absolute;
-      left: 1px;
-      width: calc(100% - 2px);
+      left: 7px;
+      width: 9px;
       min-height: 5px;
       border-radius: 999px;
       pointer-events: auto;
@@ -2905,13 +2911,13 @@ class MarkdownRenderer:
       touch-action: none;
     }}
     .mdexplore-scroll-highlight-marker:hover {{
-      background: rgba(132, 114, 208, 0.86);
+      filter: brightness(1.08);
     }}
     .mdexplore-scroll-view-marker {{
       position: absolute;
       left: 0;
-      width: 100%;
-      min-height: 6px;
+      width: 7px;
+      min-height: 7px;
       border-radius: 999px;
       pointer-events: auto;
       cursor: pointer;
@@ -3002,6 +3008,8 @@ class MarkdownRenderer:
     window.__mdexploreMermaidBackend = {mermaid_backend_json};
     window.__mdexploreSourceTotalLines = {total_source_lines_json};
     window.__mdexploreNamedViewMarkers = [];
+    window.__mdexplorePersistentHighlightMarkerColor = {json.dumps(PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR)};
+    window.__mdexplorePersistentHighlightImportantMarkerColor = {json.dumps(PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR)};
     window.__mdexploreMermaidLoadPromise = null;
     window.__mdexploreMermaidAttempted = false;
     window.__mdexploreMermaidPaletteMode = "auto";
@@ -3496,6 +3504,12 @@ class MarkdownRenderer:
         if (!highlightOverlay.isConnected) {{
           return;
         }}
+        const highlightMarkerColor =
+          String(window.__mdexplorePersistentHighlightMarkerColor || "").trim() ||
+          "rgba(132, 114, 208, 0.86)";
+        const importantHighlightMarkerColor =
+          String(window.__mdexplorePersistentHighlightImportantMarkerColor || "").trim() ||
+          "rgba(208, 188, 248, 0.96)";
         highlightOverlay.replaceChildren();
         const marks = Array.from(
           document.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]')
@@ -3517,6 +3531,12 @@ class MarkdownRenderer:
           const id = String(
             mark.getAttribute("data-mdexplore-persistent-highlight-id") || ""
           ).trim();
+          const kind =
+            String(
+              mark.getAttribute("data-mdexplore-persistent-highlight-kind") || "__NORMAL_KIND__"
+            ).trim().toLowerCase() === "__IMPORTANT_KIND__"
+              ? "__IMPORTANT_KIND__"
+              : "__NORMAL_KIND__";
           if (!id) {{
             continue;
           }}
@@ -3535,6 +3555,7 @@ class MarkdownRenderer:
           let group = groups.get(id);
           if (!group) {{
             group = {{
+              kind,
               minTop: null,
               maxBottom: null,
               targets: [],
@@ -3573,6 +3594,11 @@ class MarkdownRenderer:
           markerPositions.push({{
             top: Math.round(topPx),
             bottom: Math.round(bottomPx),
+            kind: group.kind,
+            color:
+              group.kind === "__IMPORTANT_KIND__"
+                ? importantHighlightMarkerColor
+                : highlightMarkerColor,
             targets: Array.isArray(group.targets) ? group.targets : [],
           }});
         }}
@@ -3587,7 +3613,11 @@ class MarkdownRenderer:
         const merged = [];
         for (const item of markerPositions) {{
           const previous = merged.length ? merged[merged.length - 1] : null;
-          if (previous && item.top <= previous.bottom + 2) {{
+          if (
+            previous &&
+            previous.kind === item.kind &&
+            item.top <= previous.bottom + 2
+          ) {{
             previous.bottom = Math.max(previous.bottom, item.bottom);
             previous.targets.push(...item.targets);
             continue;
@@ -3595,6 +3625,8 @@ class MarkdownRenderer:
           merged.push({{
             top: item.top,
             bottom: item.bottom,
+            kind: item.kind,
+            color: item.color,
             targets: Array.isArray(item.targets) ? [...item.targets] : [],
           }});
         }}
@@ -3604,6 +3636,7 @@ class MarkdownRenderer:
           marker.className = "mdexplore-scroll-highlight-marker";
           marker.style.top = `${{item.top}}px`;
           marker.style.height = `${{Math.max(5, item.bottom - item.top)}}px`;
+          marker.style.background = item.color;
           const activateMarker = (event) => {{
             if (typeof event.button === "number" && event.button !== 0) {{
               return;
@@ -7433,6 +7466,7 @@ class MdExploreWindow(QMainWindow):
     VIEWS_FILE_NAME = ".mdexplore-views.json"
     HIGHLIGHTING_FILE_NAME = ".mdexplore-highlighting.json"
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
+    PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
     DEBUG_LOG_FILE_NAME = "mdexplore.log"
     DEBUG_LOG_MAX_LINES = 10_000
     HIGHLIGHT_COLORS = [
@@ -8528,7 +8562,7 @@ class MdExploreWindow(QMainWindow):
 
     @staticmethod
     def _normalize_text_highlight_entries(raw_entries) -> list[dict[str, int | str]]:
-        """Sanitize and merge persistent text-highlight ranges."""
+        """Sanitize and merge persistent text-highlight ranges by kind."""
         if not isinstance(raw_entries, list):
             return []
 
@@ -8544,14 +8578,33 @@ class MdExploreWindow(QMainWindow):
                 end = int(item.get("end", -1))
             except Exception:
                 continue
+            raw_kind = item.get("kind", PREVIEW_HIGHLIGHT_KIND_NORMAL)
+            kind = (
+                str(raw_kind).strip().lower()
+                if isinstance(raw_kind, str)
+                else PREVIEW_HIGHLIGHT_KIND_NORMAL
+            )
+            if kind not in {
+                PREVIEW_HIGHLIGHT_KIND_NORMAL,
+                PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+            }:
+                kind = PREVIEW_HIGHLIGHT_KIND_NORMAL
             if start < 0 or end <= start:
                 continue
-            sanitized.append({"id": raw_id, "start": start, "end": end})
+            sanitized.append(
+                {"id": raw_id, "start": start, "end": end, "kind": kind}
+            )
 
         if not sanitized:
             return []
 
-        sanitized.sort(key=lambda entry: (int(entry["start"]), int(entry["end"])))
+        sanitized.sort(
+            key=lambda entry: (
+                int(entry["start"]),
+                int(entry["end"]),
+                str(entry.get("kind", PREVIEW_HIGHLIGHT_KIND_NORMAL)),
+            )
+        )
         merged: list[dict[str, int | str]] = []
         for entry in sanitized:
             if not merged:
@@ -8562,13 +8615,24 @@ class MdExploreWindow(QMainWindow):
             prev_end = int(prev["end"])
             cur_start = int(entry["start"])
             cur_end = int(entry["end"])
-            # Merge overlap/adjacent ranges so extend/remove actions remain predictable.
-            if cur_start <= prev_end:
+            prev_kind = str(prev.get("kind", PREVIEW_HIGHLIGHT_KIND_NORMAL))
+            cur_kind = str(entry.get("kind", PREVIEW_HIGHLIGHT_KIND_NORMAL))
+            # Merge overlap/adjacent ranges only when they share the same visual
+            # style; this preserves normal-vs-important transitions.
+            if cur_kind == prev_kind and cur_start <= prev_end:
                 prev["start"] = min(prev_start, cur_start)
                 prev["end"] = max(prev_end, cur_end)
                 continue
             merged.append(entry)
         return merged
+
+    @staticmethod
+    def _normalize_preview_highlight_kind(kind: str | None) -> str:
+        """Return a supported persistent preview-highlight kind."""
+        raw = str(kind or PREVIEW_HIGHLIGHT_KIND_NORMAL).strip().lower()
+        if raw == PREVIEW_HIGHLIGHT_KIND_IMPORTANT:
+            return PREVIEW_HIGHLIGHT_KIND_IMPORTANT
+        return PREVIEW_HIGHLIGHT_KIND_NORMAL
 
     def _new_text_highlight_id(self) -> str:
         """Return a unique id for a persistent preview text-highlight range."""
@@ -11882,11 +11946,13 @@ class MdExploreWindow(QMainWindow):
         )
 
         highlight_action: QAction | None = None
+        highlight_important_action: QAction | None = None
         remove_highlight_action: QAction | None = None
         # Always allow creating/extending highlight from any non-empty selection,
         # even if metadata probing fails on a specific right-click event.
         if has_selection:
             highlight_action = menu.addAction("Highlight")
+            highlight_important_action = menu.addAction("Highlight Important")
         if (
             has_selection
             or clicked_highlight_id
@@ -11894,7 +11960,11 @@ class MdExploreWindow(QMainWindow):
             or has_existing_persistent_highlights
         ):
             remove_highlight_action = menu.addAction("Remove Highlight")
-        if highlight_action is not None or remove_highlight_action is not None:
+        if (
+            highlight_action is not None
+            or highlight_important_action is not None
+            or remove_highlight_action is not None
+        ):
             menu.addSeparator()
 
         copy_source_action: QAction | None = None
@@ -11910,7 +11980,24 @@ class MdExploreWindow(QMainWindow):
         chosen = menu.exec(self.preview.mapToGlobal(pos))
         if highlight_action is not None and chosen == highlight_action:
             self._debug_log("preview-menu action=Highlight")
-            self._add_persistent_preview_highlight(selection_info, selected_text_hint)
+            self._add_persistent_preview_highlight(
+                selection_info,
+                selected_text_hint,
+                kind=PREVIEW_HIGHLIGHT_KIND_NORMAL,
+            )
+            standard_menu.deleteLater()
+            menu.deleteLater()
+            return
+        if (
+            highlight_important_action is not None
+            and chosen == highlight_important_action
+        ):
+            self._debug_log("preview-menu action=Highlight Important")
+            self._add_persistent_preview_highlight(
+                selection_info,
+                selected_text_hint,
+                kind=PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+            )
             standard_menu.deleteLater()
             menu.deleteLater()
             return
@@ -12186,21 +12273,68 @@ class MdExploreWindow(QMainWindow):
 
         self.preview.page().runJavaScript(js, _on_result)
 
-    def _append_persistent_preview_highlight_range(
-        self, path_key: str, start: int, end: int
+    def _replace_persistent_preview_highlight_range(
+        self, path_key: str, start: int, end: int, kind: str
     ) -> None:
-        """Append one persistent highlight range, persist, and reapply."""
+        """Replace overlap with one highlight kind, persist, and reapply."""
+        if end <= start:
+            self.statusBar().showMessage("Select text to highlight", 3000)
+            return
+        normalized_kind = self._normalize_preview_highlight_kind(kind)
         self._debug_log(
-            "highlight-append "
-            f"path={path_key} start={start} end={end} len={max(0, end-start)}"
+            "highlight-replace "
+            f"path={path_key} start={start} end={end} "
+            f"len={max(0, end-start)} kind={normalized_kind}"
         )
         entries = self._normalize_text_highlight_entries(
             self._clone_json_compatible_list(self._current_preview_text_highlights)
         )
-        entries.append({"id": self._new_text_highlight_id(), "start": start, "end": end})
-        entries = self._normalize_text_highlight_entries(entries)
+        updated: list[dict[str, int | str]] = []
+        for entry in entries:
+            entry_start = int(entry.get("start", -1))
+            entry_end = int(entry.get("end", -1))
+            entry_kind = self._normalize_preview_highlight_kind(entry.get("kind"))
+            if entry_end <= start or entry_start >= end:
+                updated.append(
+                    {
+                        "id": str(entry.get("id", "")).strip()
+                        or self._new_text_highlight_id(),
+                        "start": entry_start,
+                        "end": entry_end,
+                        "kind": entry_kind,
+                    }
+                )
+                continue
+            if entry_start < start:
+                updated.append(
+                    {
+                        "id": self._new_text_highlight_id(),
+                        "start": entry_start,
+                        "end": start,
+                        "kind": entry_kind,
+                    }
+                )
+            if entry_end > end:
+                updated.append(
+                    {
+                        "id": self._new_text_highlight_id(),
+                        "start": end,
+                        "end": entry_end,
+                        "kind": entry_kind,
+                    }
+                )
+        updated.append(
+            {
+                "id": self._new_text_highlight_id(),
+                "start": start,
+                "end": end,
+                "kind": normalized_kind,
+            }
+        )
+        entries = self._normalize_text_highlight_entries(updated)
         self._current_preview_text_highlights = entries
         self._persist_text_highlights_for_path_key(path_key, entries)
+
         def _on_applied(result: dict) -> None:
             applied_count = (
                 int(result.get("applied", 0)) if isinstance(result, dict) else 0
@@ -12216,7 +12350,12 @@ class MdExploreWindow(QMainWindow):
                     3500,
                 )
                 return
-            self.statusBar().showMessage("Highlight added", 2500)
+            message = (
+                "Important highlight added"
+                if normalized_kind == PREVIEW_HIGHLIGHT_KIND_IMPORTANT
+                else "Highlight added"
+            )
+            self.statusBar().showMessage(message, 2500)
 
         self._apply_persistent_preview_highlights(path_key, completion=_on_applied)
 
@@ -12242,10 +12381,25 @@ class MdExploreWindow(QMainWindow):
         )
         payload_json = json.dumps(entries, separators=(",", ":"), ensure_ascii=False)
         color_json = json.dumps(self.PREVIEW_HIGHLIGHT_COLOR)
+        important_color_json = json.dumps(self.PREVIEW_HIGHLIGHT_IMPORTANT_COLOR)
+        important_text_color_json = json.dumps(
+            PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR
+        )
+        marker_color_json = json.dumps(PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR)
+        important_marker_color_json = json.dumps(
+            PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR
+        )
         js_expr = """
 (() => {
   const incoming = __PAYLOAD__;
   const highlightColor = __COLOR__;
+  const importantHighlightColor = __IMPORTANT_COLOR__;
+  const importantHighlightTextColor = __IMPORTANT_TEXT_COLOR__;
+  const highlightMarkerColor = __MARKER_COLOR__;
+  const importantHighlightMarkerColor = __IMPORTANT_MARKER_COLOR__;
+  window.__mdexplorePersistentHighlightMarkerColor = highlightMarkerColor;
+  window.__mdexplorePersistentHighlightImportantMarkerColor =
+    importantHighlightMarkerColor;
   const root = document.querySelector("main") || document.body;
   if (!root) {
     window.__mdexplorePersistentHighlights = [];
@@ -12430,9 +12584,13 @@ class MdExploreWindow(QMainWindow):
       const id = typeof item.id === "string" ? item.id.trim() : "";
       const start = Number(item.start);
       const end = Number(item.end);
+      const kind =
+        String(item.kind || "__NORMAL_KIND__").trim().toLowerCase() === "__IMPORTANT_KIND__"
+          ? "__IMPORTANT_KIND__"
+          : "__NORMAL_KIND__";
       if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
       if (end <= start || start < 0) continue;
-      prepared.push({ id, start: Math.floor(start), end: Math.floor(end) });
+      prepared.push({ id, start: Math.floor(start), end: Math.floor(end), kind });
     }
     if (!prepared.length) return [];
     prepared.sort((a, b) => (a.start - b.start) || (a.end - b.end));
@@ -12443,7 +12601,7 @@ class MdExploreWindow(QMainWindow):
         continue;
       }
       const prev = merged[merged.length - 1];
-      if (item.start <= prev.end) {
+      if (item.kind === prev.kind && item.start <= prev.end) {
         prev.end = Math.max(prev.end, item.end);
       } else {
         merged.push(item);
@@ -12521,6 +12679,7 @@ class MdExploreWindow(QMainWindow):
           start: overlapStart - segment.start,
           end: overlapEnd - segment.start,
           id: entry.id,
+          kind: entry.kind,
         });
       }
     }
@@ -12540,7 +12699,15 @@ class MdExploreWindow(QMainWindow):
       const mark = document.createElement("span");
       mark.setAttribute("data-mdexplore-persistent-highlight", "1");
       mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
-      mark.style.backgroundColor = highlightColor;
+      mark.setAttribute(
+        "data-mdexplore-persistent-highlight-kind",
+        range.kind === "__IMPORTANT_KIND__" ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__"
+      );
+      const isImportant = range.kind === "__IMPORTANT_KIND__";
+      mark.style.backgroundColor = isImportant
+        ? importantHighlightColor
+        : highlightColor;
+      mark.style.color = isImportant ? importantHighlightTextColor : "";
       mark.style.borderRadius = "2px";
       mark.style.padding = "0 1px";
       mark.style.boxDecorationBreak = "clone";
@@ -12570,8 +12737,15 @@ class MdExploreWindow(QMainWindow):
   };
 })();
 """
-        js_expr = js_expr.replace("__PAYLOAD__", payload_json).replace(
-            "__COLOR__", color_json
+        js_expr = (
+        js_expr.replace("__PAYLOAD__", payload_json)
+            .replace("__COLOR__", color_json)
+            .replace("__IMPORTANT_COLOR__", important_color_json)
+            .replace("__IMPORTANT_TEXT_COLOR__", important_text_color_json)
+            .replace("__MARKER_COLOR__", marker_color_json)
+            .replace("__IMPORTANT_MARKER_COLOR__", important_marker_color_json)
+            .replace("__NORMAL_KIND__", PREVIEW_HIGHLIGHT_KIND_NORMAL)
+            .replace("__IMPORTANT_KIND__", PREVIEW_HIGHLIGHT_KIND_IMPORTANT)
         )
         js = f"""
 (() => {{
@@ -12613,7 +12787,10 @@ class MdExploreWindow(QMainWindow):
         )
 
     def _add_persistent_preview_highlight(
-        self, selection_info, selected_text_hint: str = ""
+        self,
+        selection_info,
+        selected_text_hint: str = "",
+        kind: str = PREVIEW_HIGHLIGHT_KIND_NORMAL,
     ) -> None:
         """Persist a new preview text-highlight range for the current file."""
         path_key = self._current_preview_path_key()
@@ -12621,15 +12798,19 @@ class MdExploreWindow(QMainWindow):
             self._debug_log("highlight-add aborted reason=no-current-path")
             self.statusBar().showMessage("No markdown file selected", 3000)
             return
+        normalized_kind = self._normalize_preview_highlight_kind(kind)
         offsets = self._selection_offsets_from_info(selection_info)
         self._debug_log(
             "highlight-add start "
             f"path={path_key} cached_offsets={offsets} "
-            f"hint_len={len(selected_text_hint or '')}"
+            f"hint_len={len(selected_text_hint or '')} "
+            f"kind={normalized_kind}"
         )
         if offsets is not None:
             start, end = offsets
-            self._append_persistent_preview_highlight_range(path_key, start, end)
+            self._replace_persistent_preview_highlight_range(
+                path_key, start, end, normalized_kind
+            )
             return
 
         selected_text = ""
@@ -12664,8 +12845,8 @@ class MdExploreWindow(QMainWindow):
                 "highlight-add live-probe success "
                 f"start={start_live} end={end_live}"
             )
-            self._append_persistent_preview_highlight_range(
-                path_key, start_live, end_live
+            self._replace_persistent_preview_highlight_range(
+                path_key, start_live, end_live, normalized_kind
             )
 
         self._request_live_preview_selection_offsets(selected_text, _apply_live_selection)

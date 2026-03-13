@@ -234,8 +234,8 @@ After the HTML is already loaded, mdexplore may add three navigation overlays
 inside the preview viewport:
 
 - right-side yellow search-hit markers derived from the active search result DOM,
-- left-side purple persistent-highlight markers derived from persisted text
-  highlight spans,
+- left-side persistent-highlight markers derived from persisted text
+  highlight spans, with separate normal and important visual styles,
 - left-side named-view markers derived from saved tab home line numbers.
 
 These overlays are intentionally kept outside the diagram render branches:

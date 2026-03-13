@@ -144,21 +144,25 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 ### Preview Text Highlights
 
-- In the preview pane, right-click selected text and choose `Highlight` to add a
-  persistent text highlight behind that rendered text.
-- Highlighted preview text uses a subdued purple-blue background intended to
-  remain readable against the dark preview theme.
-- Highlighted blocks also appear as purple navigation markers on the left side
-  of the preview gutter; longer markers indicate highlights that span more lines.
-- Clicking a purple highlight marker jumps to the corresponding highlighted block.
+- In the preview pane, right-click selected text and choose either `Highlight`
+  or `Highlight Important` to add a persistent text highlight behind that
+  rendered text.
+- Normal highlights use a darker subdued purple. Important highlights use a
+  lighter purple so the two categories are visually distinct on the dark theme.
+- Selecting part or all of an existing highlighted block and applying the other
+  action converts just that selected range to the chosen highlight type.
+- Highlighted preview text also appears as left-side navigation markers in the
+  preview gutter. Important-highlight markers are lighter than normal-highlight
+  markers, and longer markers indicate highlights that span more lines.
+- Clicking a highlight marker jumps to the corresponding highlighted block.
 - Named views with a saved `Return to beginning` anchor also appear as
   color-matched left-gutter markers in the preview, layered above highlight
   markers when the two coincide.
 - Right-click inside an existing highlighted block to remove it with
   `Remove Highlight`.
 - If the current selection overlaps existing highlighted text and also includes
-  unhighlighted text, both `Highlight` and `Remove Highlight` remain available
-  so the block can be extended or removed.
+  unhighlighted text, both highlight actions and `Remove Highlight` remain
+  available so the block can be extended, converted, or removed.
 - Preview text highlights persist per directory in `.mdexplore-highlighting.json`.
 - The tree also mirrors persisted preview highlights with a marker badge so
   highlighted documents remain easy to spot while browsing directories.
