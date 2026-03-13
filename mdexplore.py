@@ -15046,7 +15046,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const pageBudget = useLandscape ? printableHeightLandscape : printableHeightPortrait;
       const pageMetrics = remainingOnCurrentPage(fence, pageBudget);
       const projectedSectionHeight = chosenHeadingHeight + HEADING_TO_DIAGRAM_GAP_PX + diagramHeight;
+      // Landscape sections already force a dedicated page via the named-page
+      // CSS rule. Adding the generic pre-break marker on top of that can
+      // trigger an extra intermediate page before the actual landscape page,
+      // which shows up as a heading-only orphan for very wide UML sections.
       const shouldBreakBefore =
+        !useLandscape &&
         pageMetrics.pageOffset > 1 &&
         (keepOnOnePage
           ? projectedSectionHeight > pageMetrics.remaining + 1

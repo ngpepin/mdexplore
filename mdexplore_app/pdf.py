@@ -63,11 +63,24 @@ def stamp_pdf_page_numbers(
 
     raw_page_texts = [page_text(page) for page in reader.pages]
     normalized_page_texts = [normalize_text(text) for text in raw_page_texts]
-    landscape_token = normalize_text("__MDEXPLORE_LANDSCAPE_PAGE__")
+    landscape_token_literal = "__MDEXPLORE_LANDSCAPE_PAGE__"
+    landscape_token = normalize_text(landscape_token_literal)
+    landscape_token_compact = re.sub(r"\s+", "", landscape_token)
+    landscape_token_pattern = re.compile(
+        "".join(re.escape(char) + r"\s*" for char in landscape_token_literal),
+        re.IGNORECASE,
+    )
+
+    def contains_landscape_token(raw_text: str) -> bool:
+        normalized = normalize_text(raw_text)
+        if landscape_token in normalized:
+            return True
+        collapsed = re.sub(r"\s+", "", normalized)
+        return landscape_token_compact in collapsed
     landscape_flags = [
-        (landscape_token in page_text)
+        contains_landscape_token(raw_text)
         or any(heading and heading in page_text for heading in landscape_headings)
-        for page_text in normalized_page_texts
+        for raw_text, page_text in zip(raw_page_texts, normalized_page_texts)
     ]
     diagram_page_flags = [
         any(heading and heading in page_text for heading in diagram_headings)
@@ -231,8 +244,14 @@ def stamp_pdf_page_numbers(
 
         return False
 
-    kept_page_records = [
-        (page, landscape, is_diagram_page, crop_bounds)
+    base_page_records = [
+        {
+            "page": page,
+            "is_landscape_page": landscape,
+            "is_diagram_page": is_diagram_page,
+            "crop_bounds": crop_bounds,
+            "raw_text": extracted_text,
+        }
         for page, landscape, is_diagram_page, crop_bounds, extracted_text in zip(
             reader.pages,
             landscape_flags,
@@ -242,9 +261,15 @@ def stamp_pdf_page_numbers(
         )
         if page_has_meaningful_content(page, extracted_text)
     ]
-    if not kept_page_records:
-        kept_page_records = [
-            (page, landscape, is_diagram_page, crop_bounds)
+    if not base_page_records:
+        base_page_records = [
+            {
+                "page": page,
+                "is_landscape_page": landscape,
+                "is_diagram_page": is_diagram_page,
+                "crop_bounds": crop_bounds,
+                "raw_text": "",
+            }
             for page, landscape, is_diagram_page, crop_bounds in zip(
                 reader.pages,
                 landscape_flags,
@@ -253,15 +278,89 @@ def stamp_pdf_page_numbers(
             )
         ]
 
+    def extract_orphan_landscape_heading(raw_text: str) -> str:
+        def compact_spaced_heading_text(text: str) -> str:
+            tokens = text.split()
+            compacted: list[str] = []
+            run: list[str] = []
+
+            def flush_run() -> None:
+                if not run:
+                    return
+                compacted.append("".join(run))
+                run.clear()
+
+            for token in tokens:
+                if len(token) == 1 and token.isalnum():
+                    run.append(token)
+                    continue
+                if token == "." and run:
+                    run.append(token)
+                    flush_run()
+                    continue
+                flush_run()
+                compacted.append(token)
+
+            flush_run()
+            compacted_text = " ".join(compacted)
+            compacted_text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", compacted_text)
+            return re.sub(r"\s+", " ", compacted_text).strip()
+
+        heading_lines: list[str] = []
+        for raw_line in str(raw_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            normalized = normalize_text(line)
+            if not normalized:
+                continue
+            if contains_landscape_token(line):
+                continue
+            if normalized == "mdexplore landscape page":
+                continue
+            if re.fullmatch(r"\d+\s+of\s+\d+", normalized):
+                continue
+            cleaned_line = landscape_token_pattern.sub("", line)
+            cleaned_line = re.sub(r"\b\d+\s+of\s+\d+\b", "", cleaned_line, flags=re.IGNORECASE)
+            cleaned_line = compact_spaced_heading_text(cleaned_line)
+            if cleaned_line:
+                heading_lines.append(cleaned_line)
+        return " ".join(heading_lines).strip()
+
+    kept_page_records: list[dict[str, object]] = []
+    page_index = 0
+    while page_index < len(base_page_records):
+        record = base_page_records[page_index]
+        attached_heading_text = ""
+        next_index = page_index + 1
+        if (
+            next_index < len(base_page_records)
+            and contains_landscape_token(str(record.get("raw_text") or ""))
+        ):
+            next_record = base_page_records[next_index]
+            heading_text = extract_orphan_landscape_heading(record.get("raw_text") or "")
+            heading_word_count = len(re.findall(r"\w+", heading_text))
+            if 0 < heading_word_count <= 12 and heading_text:
+                merged_record = dict(next_record)
+                merged_record["attached_heading_text"] = heading_text
+                kept_page_records.append(merged_record)
+                page_index += 2
+                continue
+        merged_record = dict(record)
+        merged_record["attached_heading_text"] = attached_heading_text
+        kept_page_records.append(merged_record)
+        page_index += 1
+
     page_total = len(kept_page_records)
     if page_total <= 0:
         raise RuntimeError("Generated PDF has no pages")
 
     def estimate_majority_font_size() -> float:
         size_counts: dict[float, int] = {}
-        for page, _is_landscape, _is_diagram_page, _crop_bounds in kept_page_records[
+        for record in kept_page_records[
             : min(5, page_total)
         ]:
+            page = record["page"]
             try:
                 contents = page.get_contents()
             except Exception:
@@ -330,7 +429,20 @@ def stamp_pdf_page_numbers(
         is_landscape_page,
         is_diagram_page,
         crop_bounds,
-    ) in enumerate(kept_page_records, start=1):
+        attached_heading_text,
+    ) in enumerate(
+        (
+            (
+                record["page"],
+                bool(record["is_landscape_page"]),
+                bool(record["is_diagram_page"]),
+                record["crop_bounds"],
+                str(record.get("attached_heading_text") or ""),
+            )
+            for record in kept_page_records
+        ),
+        start=1,
+    ):
         source_width = float(page.mediabox.width)
         source_height = float(page.mediabox.height)
         if source_width <= 0 or source_height <= 0:
@@ -358,8 +470,21 @@ def stamp_pdf_page_numbers(
         footer_band_height = max(
             42.0, min(page_height * 0.16, base_body_font_size * 4.4)
         )
+        attached_heading_font_size = 0.0
+        attached_heading_block_height = 0.0
+        if attached_heading_text:
+            attached_heading_font_size = max(
+                16.0, min(24.0, base_body_font_size * 1.95)
+            )
+            attached_heading_block_height = attached_heading_font_size * 1.85
         content_box_width = max(72.0, page_width - (2.0 * side_margin))
-        content_box_height = max(72.0, page_height - top_margin - footer_band_height)
+        content_box_height = max(
+            72.0,
+            page_height
+            - top_margin
+            - footer_band_height
+            - attached_heading_block_height,
+        )
 
         max_safe_scale = 1.0
         if is_diagram_page or is_landscape_page:
@@ -402,6 +527,15 @@ def stamp_pdf_page_numbers(
         footer_canvas = canvas.Canvas(
             overlay_buffer, pagesize=(page_width, page_height)
         )
+        if attached_heading_text:
+            footer_canvas.setFont("Helvetica-Bold", attached_heading_font_size)
+            heading_baseline_y = max(
+                footer_band_height + content_box_height + (attached_heading_font_size * 0.55),
+                page_height - top_margin - attached_heading_font_size,
+            )
+            footer_canvas.drawString(
+                side_margin, heading_baseline_y, attached_heading_text
+            )
         footer_canvas.setFont("Helvetica", footer_font_size)
         footer_text = f"{page_number} of {page_total}"
         footer_width = footer_canvas.stringWidth(
