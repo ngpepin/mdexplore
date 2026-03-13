@@ -5,6 +5,19 @@ It complements `UML.md` by going deep on the render forks and cache ownership.
 
 Use this file before changing Mermaid, PlantUML, preview caching, or PDF export.
 
+Support code has been split into `mdexplore_app/`, but render orchestration
+still lives primarily in `mdexplore.py`. In practice:
+
+- `mdexplore.py` still owns preview HTML generation, cache injection, and all
+  in-page JavaScript orchestration.
+- `mdexplore_app/pdf.py` owns PDF footer stamping and related PDF post-pass
+  helpers.
+- `mdexplore_app/workers.py` owns the background worker classes used by the
+  window.
+
+When tracing a render bug, start in `mdexplore.py` for control flow and then
+drop into `mdexplore_app/*` only for leaf helpers.
+
 Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is intentionally outside the
 diagram render/cache forks described below. It is implemented as a
 `QWebEngineView.setZoomFactor()` adjustment in `mdexplore.py`, so it scales the

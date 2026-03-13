@@ -16,6 +16,11 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 ## Repository Map
 
 - `mdexplore.py`: main application (Qt UI, renderer, file loading, cache, CLI path arg).
+- `mdexplore_app/constants.py`: shared constants used by the main app and support modules.
+- `mdexplore_app/runtime.py`: runtime/config/GPU-print helper functions.
+- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr helpers.
+- `mdexplore_app/icons.py`: icon loading/recoloring helpers used by the tree and tab UI.
+- `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF export.
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `requirements.txt`: Python runtime dependencies.
 - `README.md`: user-facing setup and usage documentation.
@@ -216,6 +221,11 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Do not add heavy dependencies without clear user value.
 - Keep startup and preview interactions responsive.
 - Preserve cache semantics unless changing performance behavior intentionally.
+- Treat `mdexplore_app/` as the first extraction boundary:
+  - move leaf helpers there first,
+  - keep `mdexplore.py` responsible for orchestration and UI state unless a
+    second-stage refactor is explicitly intended,
+  - do not duplicate helpers between `mdexplore.py` and `mdexplore_app/*`.
 
 ## Rendering Rules
 

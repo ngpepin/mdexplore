@@ -8,6 +8,12 @@ ownership, and restore behavior) are intentionally documented in `RENDER-PATHS.m
 This UML file keeps those areas abstracted at system/class boundaries to avoid
 duplicating low-level render logic across two docs.
 
+Low-risk modularization note: support code now lives in `mdexplore_app/`
+(`constants.py`, `runtime.py`, `pdf.py`, `icons.py`, `workers.py`), while the
+main orchestration, renderer/template logic, and UI state machine remain in
+`mdexplore.py`. The diagrams below show that split at subsystem boundaries
+rather than expanding every extracted helper inline.
+
 ## 1. System Architecture
 
 ```plantuml
@@ -23,6 +29,13 @@ node "Ubuntu Desktop Session" as Desktop {
   component "mdexplore.sh\nLauncher" as Launcher
   component "mdexplore.py\nmain()" as AppEntry
   component "MdExploreWindow\n(QMainWindow)" as Window
+  package "mdexplore_app\nsupport package" as Support {
+    component "constants.py" as ConstantsSupport
+    component "runtime.py" as RuntimeSupport
+    component "pdf.py" as PdfSupport
+    component "icons.py" as IconSupport
+    component "workers.py" as WorkerSupport
+  }
   component "QWebEngineView\nPreview Pane" as WebView
   component "ColorizedMarkdownModel\n(QFileSystemModel)" as Model
   component "MarkdownRenderer\n(markdown-it + HTML template)" as Renderer
@@ -61,6 +74,11 @@ Window --> PdfWorker : async footer stamping
 Window --> PreviewCache
 Window --> PumlCache
 Window --> MermaidCache
+Window --> ConstantsSupport
+Window --> RuntimeSupport
+Window --> PdfSupport
+Window --> IconSupport
+Window --> WorkerSupport
 
 Model --> MdFS : list dirs + *.md
 Model <--> ColorCfg : read/write highlight metadata
@@ -232,6 +250,12 @@ class MdExploreWindow {
   +closeEvent(event)
 }
 
+class "mdexplore_app.constants" as ConstantsSupportBoundary
+class "mdexplore_app.runtime" as RuntimeSupportBoundary
+class "mdexplore_app.pdf" as PdfSupportBoundary
+class "mdexplore_app.icons" as IconSupportBoundary
+class "mdexplore_app.workers" as WorkerSupportBoundary
+
 class QApplication
 class QWebEngineView
 class QFileSystemModel
@@ -251,6 +275,13 @@ PlantUmlRenderWorker --> PlantUmlRenderWorkerSignals
 PdfExportWorker --> PdfExportWorkerSignals
 PreviewRenderWorker ..> MarkdownRenderer : creates renderer in worker
 MdExploreWindow ..> QApplication
+MdExploreWindow ..> ConstantsSupportBoundary
+MdExploreWindow ..> RuntimeSupportBoundary
+MdExploreWindow ..> PdfSupportBoundary
+MdExploreWindow ..> IconSupportBoundary
+MdExploreWindow ..> WorkerSupportBoundary
+ColorizedMarkdownModel ..> IconSupportBoundary
+MarkdownRenderer ..> ConstantsSupportBoundary
 @enduml
 ```
 

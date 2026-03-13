@@ -2,6 +2,22 @@
 
 Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directory tree and preview fully rendered output instantly.
 
+## Code Layout
+
+The application still uses `mdexplore.py` as the main entrypoint and primary UI
+module, but low-risk support code is now split into `mdexplore_app/`:
+
+- `mdexplore.py`: main window, tree model, markdown renderer, preview JS/HTML template, and app entrypoint.
+- `mdexplore_app/constants.py`: shared runtime/render constants.
+- `mdexplore_app/runtime.py`: runtime environment helpers (config path, default root, GPU/software fallback, print layout knobs).
+- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr formatting.
+- `mdexplore_app/icons.py`: icon loading/recoloring helpers.
+- `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF write/stamp steps.
+
+This is intentionally a first-stage modularization. Most behavior and call flow
+still lives in `mdexplore.py` so feature risk stays low while the file is
+gradually decomposed.
+
 ## Features
 
 - Expandable left-pane directory tree rooted at a chosen folder.
