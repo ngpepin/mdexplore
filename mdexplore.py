@@ -6401,6 +6401,9 @@ class MdExploreWindow(QMainWindow):
         self._persisted_view_sessions_by_dir: dict[str, dict[str, dict]] = {}
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
+        # Cache per-document rich-render feature flags so post-load startup can
+        # skip renderer retries and diagram restore passes for plain markdown.
+        self._preview_feature_flags_by_key: dict[str, tuple[bool, bool, bool]] = {}
         self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
         self._current_preview_text_highlights: list[dict[str, int | str]] = []
         self._next_text_highlight_id = 1
@@ -7727,12 +7730,15 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             return "{}"
 
-    def _merge_renderer_pdf_mermaid_cache_seed(self) -> None:
-        """Merge latest renderer-produced Rust PDF Mermaid SVGs into runtime cache."""
-        try:
-            payload = self.renderer.take_last_mermaid_pdf_svg_by_hash()
-        except Exception:
-            return
+    def _merge_renderer_pdf_mermaid_cache_seed(
+        self, payload: dict[str, str] | None = None
+    ) -> None:
+        """Merge renderer-produced Rust PDF Mermaid SVGs into runtime cache."""
+        if payload is None:
+            try:
+                payload = self.renderer.take_last_mermaid_pdf_svg_by_hash()
+            except Exception:
+                return
         if not isinstance(payload, dict) or not payload:
             return
 
@@ -7750,6 +7756,112 @@ class MdExploreWindow(QMainWindow):
             target[hash_key] = raw_svg
         while len(target) > MERMAID_SVG_CACHE_MAX_ENTRIES:
             target.pop(next(iter(target)))
+
+    def _build_preview_render_payload(
+        self, resolved: Path
+    ) -> tuple[str, int, int, dict[str, object]]:
+        """Render one markdown file to HTML and return side metadata for the UI thread."""
+        stat = resolved.stat()
+        cache_key = str(resolved)
+        markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+        has_math, has_mermaid, has_plantuml = (
+            self._detect_special_features_from_markdown(markdown_text)
+        )
+        total_lines = self._count_markdown_lines(markdown_text)
+        doc_id = self._doc_id_for_path(cache_key)
+        placeholders_by_hash: dict[str, list[str]] = {}
+        prepared_plantuml_sources_by_hash: dict[str, str] = {}
+        worker_renderer = MarkdownRenderer(
+            mermaid_backend=self.renderer._mermaid_backend_requested
+        )
+
+        def plantuml_resolver(code: str, index: int, line_attrs: str) -> str:
+            prepared_code = worker_renderer._prepare_plantuml_source(code)
+            hash_key = hashlib.sha1(
+                prepared_code.encode("utf-8", errors="replace")
+            ).hexdigest()
+            placeholder_id = f"mdexplore-plantuml-{doc_id}-{index}"
+            placeholders_by_hash.setdefault(hash_key, []).append(placeholder_id)
+            prepared_plantuml_sources_by_hash.setdefault(hash_key, prepared_code)
+            return self._plantuml_block_html(
+                placeholder_id, line_attrs, "pending", "", hash_key=hash_key
+            )
+
+        html_doc = worker_renderer.render_document(
+            markdown_text,
+            resolved.name,
+            total_lines=total_lines,
+            plantuml_resolver=plantuml_resolver,
+        )
+        metadata: dict[str, object] = {
+            "total_lines": total_lines,
+            "has_math": has_math,
+            "has_mermaid": has_mermaid,
+            "has_plantuml": has_plantuml,
+            "placeholders_by_hash": placeholders_by_hash,
+            "prepared_plantuml_sources_by_hash": prepared_plantuml_sources_by_hash,
+            "pdf_mermaid_by_hash": worker_renderer.take_last_mermaid_pdf_svg_by_hash(),
+        }
+        return html_doc, int(stat.st_mtime_ns), int(stat.st_size), metadata
+
+    def _preview_feature_flags_for_key(self, path_key: str | None) -> tuple[bool, bool, bool]:
+        """Return cached (has_math, has_mermaid, has_plantuml) flags for one preview."""
+        if not path_key:
+            return (False, False, False)
+        flags = self._preview_feature_flags_by_key.get(path_key)
+        if not isinstance(flags, tuple) or len(flags) != 3:
+            return (False, False, False)
+        return bool(flags[0]), bool(flags[1]), bool(flags[2])
+
+    def _set_preview_feature_flags(
+        self,
+        path_key: str | None,
+        *,
+        has_math: bool,
+        has_mermaid: bool,
+        has_plantuml: bool,
+    ) -> None:
+        """Cache rich-render feature flags for one previewed markdown document."""
+        if not path_key:
+            return
+        self._preview_feature_flags_by_key[path_key] = (
+            bool(has_math),
+            bool(has_mermaid),
+            bool(has_plantuml),
+        )
+
+    def _has_persistent_preview_highlights_for_key(self, path_key: str | None) -> bool:
+        """Return whether the active file has persisted preview text highlights."""
+        if not path_key:
+            return False
+        return bool(self._normalize_text_highlight_entries(self._current_preview_text_highlights))
+
+    def _has_named_view_markers_for_key(self, path_key: str | None) -> bool:
+        """Return whether the active document currently exposes named-view markers."""
+        current_key = self._current_preview_path_key()
+        if not path_key or current_key != path_key:
+            return False
+        return bool(self._current_named_view_marker_entries())
+
+    def _has_saved_diagram_view_state_for_key(self, path_key: str | None) -> bool:
+        """Return whether a document currently has cached diagram zoom/pan state."""
+        if not path_key:
+            return False
+        payload = self._diagram_view_state_by_doc.get(path_key, {})
+        return isinstance(payload, dict) and bool(payload)
+
+    def _has_ready_plantuml_for_key(self, path_key: str | None) -> bool:
+        """Return whether the active document has any completed PlantUML jobs to patch in."""
+        if not path_key:
+            return False
+        placeholders_by_hash = self._plantuml_placeholders_by_doc.get(path_key, {})
+        if not isinstance(placeholders_by_hash, dict) or not placeholders_by_hash:
+            return False
+        for hash_key in placeholders_by_hash:
+            status, _payload = self._plantuml_results.get(hash_key, ("pending", ""))
+            if status in {"done", "error"}:
+                return True
+        return False
 
     def _serialized_diagram_view_state_json(self, path_key: str | None) -> str:
         """Serialize per-document diagram view state for HTML seed injection."""
@@ -8881,31 +8993,49 @@ class MdExploreWindow(QMainWindow):
         if current_key is None:
             self._stop_restore_overlay_monitor()
             return
+        has_math, has_mermaid, _has_plantuml = self._preview_feature_flags_for_key(
+            current_key
+        )
+        has_client_renderers = has_math or has_mermaid
+        has_ready_plantuml = self._has_ready_plantuml_for_key(current_key)
+        has_text_highlights = self._has_persistent_preview_highlights_for_key(
+            current_key
+        )
+        has_named_view_markers = self._has_named_view_markers_for_key(current_key)
+        has_saved_diagram_state = self._has_saved_diagram_view_state_for_key(
+            current_key
+        )
         # Kick client-side renderer startup now and a bit later to tolerate
         # delayed external script availability (MathJax/Mermaid).
-        self._trigger_client_renderers_for(current_key)
-        QTimer.singleShot(
-            450, lambda key=current_key: self._trigger_client_renderers_for(key)
-        )
-        QTimer.singleShot(
-            1500, lambda key=current_key: self._trigger_client_renderers_for(key)
-        )
+        if has_client_renderers:
+            self._trigger_client_renderers_for(current_key)
+            QTimer.singleShot(
+                450, lambda key=current_key: self._trigger_client_renderers_for(key)
+            )
+            QTimer.singleShot(
+                1500, lambda key=current_key: self._trigger_client_renderers_for(key)
+            )
         # PlantUML completions are patched in-place, but a full page load can
         # still happen from cache refreshes; re-apply any ready results.
-        self._apply_all_ready_plantuml_to_current_preview()
-        self._apply_persistent_preview_highlights(current_key)
-        self._refresh_named_view_markers_in_preview(current_key, force=True)
-        self._schedule_mermaid_cache_harvest_for(current_key)
-        self._reapply_diagram_view_state_for(current_key)
-        QTimer.singleShot(
-            120, lambda key=current_key: self._reapply_diagram_view_state_for(key)
-        )
-        QTimer.singleShot(
-            420, lambda key=current_key: self._reapply_diagram_view_state_for(key)
-        )
-        QTimer.singleShot(
-            980, lambda key=current_key: self._reapply_diagram_view_state_for(key)
-        )
+        if has_ready_plantuml:
+            self._apply_all_ready_plantuml_to_current_preview()
+        if has_text_highlights:
+            self._apply_persistent_preview_highlights(current_key)
+        if has_named_view_markers:
+            self._refresh_named_view_markers_in_preview(current_key, force=True)
+        if has_mermaid:
+            self._schedule_mermaid_cache_harvest_for(current_key)
+        if has_saved_diagram_state:
+            self._reapply_diagram_view_state_for(current_key)
+            QTimer.singleShot(
+                120, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+            )
+            QTimer.singleShot(
+                420, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+            )
+            QTimer.singleShot(
+                980, lambda key=current_key: self._reapply_diagram_view_state_for(key)
+            )
         has_saved_scroll = self._has_saved_scroll_for_current_preview()
         if self._pending_preview_search_terms:
             # Search normally scrolls to first hit. If this file has a saved
@@ -12650,7 +12780,9 @@ class MdExploreWindow(QMainWindow):
             if worker.request_id == request_id:
                 worker_to_remove = worker
                 break
+        render_metadata: dict[str, object] = {}
         if worker_to_remove is not None:
+            render_metadata = dict(getattr(worker_to_remove, "render_metadata", {}) or {})
             self._active_render_workers.remove(worker_to_remove)
 
         if request_id != self._render_request_id:
@@ -12670,7 +12802,56 @@ class MdExploreWindow(QMainWindow):
             html_doc = self._placeholder_html(
                 f"Could not render preview for {self.current_file.name}: {error_text}"
             )
+            self._set_preview_feature_flags(
+                path_key,
+                has_math=False,
+                has_mermaid=False,
+                has_plantuml=False,
+            )
         else:
+            total_lines = max(1, int(render_metadata.get("total_lines", 1)))
+            self._document_line_counts[path_key] = total_lines
+            self._current_document_total_lines = total_lines
+            self._sync_all_view_tab_progress()
+            self._set_preview_feature_flags(
+                path_key,
+                has_math=bool(render_metadata.get("has_math")),
+                has_mermaid=bool(render_metadata.get("has_mermaid")),
+                has_plantuml=bool(render_metadata.get("has_plantuml")),
+            )
+
+            previous_placeholders = self._plantuml_placeholders_by_doc.get(path_key, {})
+            for hash_key in previous_placeholders:
+                docs = self._plantuml_docs_by_hash.get(hash_key)
+                if docs is not None:
+                    docs.discard(path_key)
+                    if not docs:
+                        self._plantuml_docs_by_hash.pop(hash_key, None)
+
+            placeholders_by_hash = render_metadata.get("placeholders_by_hash", {})
+            if not isinstance(placeholders_by_hash, dict):
+                placeholders_by_hash = {}
+            self._plantuml_placeholders_by_doc[path_key] = placeholders_by_hash
+            for hash_key in placeholders_by_hash:
+                self._plantuml_docs_by_hash.setdefault(hash_key, set()).add(path_key)
+
+            prepared_sources = render_metadata.get(
+                "prepared_plantuml_sources_by_hash", {}
+            )
+            if not isinstance(prepared_sources, dict):
+                prepared_sources = {}
+            for hash_key, prepared_code in prepared_sources.items():
+                if not isinstance(hash_key, str) or not isinstance(prepared_code, str):
+                    continue
+                status, _payload = self._plantuml_results.get(hash_key, ("pending", ""))
+                if status not in {"done", "error"}:
+                    self._ensure_plantuml_render_started(hash_key, prepared_code)
+
+            self._merge_renderer_pdf_mermaid_cache_seed(
+                render_metadata.get("pdf_mermaid_by_hash")
+                if isinstance(render_metadata.get("pdf_mermaid_by_hash"), dict)
+                else None
+            )
             self.cache[path_key] = (mtime_ns, size, html_doc)
             self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
             self.statusBar().showMessage(f"Preview rendered: {self.current_file.name}")
@@ -13169,6 +13350,12 @@ class MdExploreWindow(QMainWindow):
                         cached_html=cached[2],
                     )
                 )
+                self._set_preview_feature_flags(
+                    cache_key,
+                    has_math=has_math,
+                    has_mermaid=has_mermaid,
+                    has_plantuml=has_plantuml,
+                )
                 self._begin_restore_overlay_monitor(
                     cache_key,
                     needs_math=has_math,
@@ -13184,64 +13371,18 @@ class MdExploreWindow(QMainWindow):
                 )
                 return
 
-            self.statusBar().showMessage(f"Rendering markdown: {resolved.name}...")
-            markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
-            total_lines = self._count_markdown_lines(markdown_text)
-            self._document_line_counts[cache_key] = total_lines
-            self._current_document_total_lines = total_lines
-            self._sync_all_view_tab_progress()
-            doc_id = self._doc_id_for_path(cache_key)
-
-            # Remove stale dependency links for this document before rebuilding.
-            previous_placeholders = self._plantuml_placeholders_by_doc.get(
-                cache_key, {}
-            )
-            for hash_key in previous_placeholders:
-                docs = self._plantuml_docs_by_hash.get(hash_key)
-                if docs is not None:
-                    docs.discard(cache_key)
-                    if not docs:
-                        self._plantuml_docs_by_hash.pop(hash_key, None)
-
-            placeholders_by_hash: dict[str, list[str]] = {}
-
-            def plantuml_resolver(code: str, index: int, line_attrs: str) -> str:
-                # Stable hash key lets the same diagram result be reused across
-                # multiple files and repeated blocks.
-                prepared_code = self.renderer._prepare_plantuml_source(code)
-                hash_key = hashlib.sha1(
-                    prepared_code.encode("utf-8", errors="replace")
-                ).hexdigest()
-                placeholder_id = f"mdexplore-plantuml-{doc_id}-{index}"
-
-                placeholders_by_hash.setdefault(hash_key, []).append(placeholder_id)
-                self._plantuml_docs_by_hash.setdefault(hash_key, set()).add(cache_key)
-
-                status, payload = self._plantuml_results.get(hash_key, ("pending", ""))
-                if status not in {"done", "error"}:
-                    self._ensure_plantuml_render_started(hash_key, prepared_code)
-                # Always emit a lightweight placeholder first so file restores
-                # are immediate; ready/error SVG payloads are patched in after
-                # the page mounts.
-                return self._plantuml_block_html(
-                    placeholder_id, line_attrs, "pending", "", hash_key=hash_key
-                )
-
-            html_doc = self.renderer.render_document(
-                markdown_text,
-                resolved.name,
-                total_lines=total_lines,
-                plantuml_resolver=plantuml_resolver,
-            )
-            self._merge_renderer_pdf_mermaid_cache_seed()
-            self._plantuml_placeholders_by_doc[cache_key] = placeholders_by_hash
-            self.cache[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
             self.statusBar().showMessage(
-                f"Preview rendered, loading in viewer: {resolved.name}..."
+                f"Rendering markdown in background: {resolved.name}..."
             )
-            self._set_preview_html(
-                self._inject_mermaid_cache_seed(html_doc, cache_key), base_url
+            request_id = self._render_request_id
+            worker = PreviewRenderWorker(
+                resolved,
+                request_id,
+                self._build_preview_render_payload,
             )
+            self._active_render_workers.add(worker)
+            worker.signals.finished.connect(self._on_preview_render_finished)
+            self._render_pool.start(worker)
         except Exception as exc:
             self._stop_restore_overlay_monitor()
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)

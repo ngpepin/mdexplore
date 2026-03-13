@@ -32,11 +32,20 @@ class PreviewRenderWorker(QRunnable):
         self.request_id = request_id
         self.render_callback = render_callback
         self.signals = PreviewRenderWorkerSignals()
+        self.render_metadata: dict[str, object] = {}
 
     def run(self) -> None:
         try:
             resolved = self.path.resolve()
-            html_doc, mtime_ns, size = self.render_callback(resolved)
+            result = self.render_callback(resolved)
+            if isinstance(result, tuple) and len(result) == 4:
+                html_doc, mtime_ns, size, metadata = result
+                self.render_metadata = (
+                    metadata if isinstance(metadata, dict) else {}
+                )
+            else:
+                html_doc, mtime_ns, size = result
+                self.render_metadata = {}
             self.signals.finished.emit(
                 self.request_id,
                 str(resolved),

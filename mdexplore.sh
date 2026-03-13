@@ -378,8 +378,8 @@ fi
 configure_local_renderer_overrides
 configure_mermaid_rs_override
 
-# Default to Rust Mermaid renderer for launcher-driven debugging, unless the
-# caller explicitly selected a backend on the command line.
+# Default to Rust Mermaid renderer, unless the caller explicitly selected a
+# backend on the command line.
 if [[ "${MERMAID_BACKEND_EXPLICIT}" -eq 0 ]]; then
   APP_ARGS+=("--mermaid-backend" "rust")
   echo "Defaulting Mermaid backend to rust (override with --mermaid-backend js)."
