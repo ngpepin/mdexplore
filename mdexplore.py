@@ -7813,6 +7813,13 @@ class MdExploreWindow(QMainWindow):
             return (False, False, False)
         return bool(flags[0]), bool(flags[1]), bool(flags[2])
 
+    def _has_diagram_features_for_key(self, path_key: str | None) -> bool:
+        """Return whether a document can produce interactive diagram viewport state."""
+        _has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+            path_key
+        )
+        return bool(has_mermaid or has_plantuml)
+
     def _set_preview_feature_flags(
         self,
         path_key: str | None,
@@ -7903,6 +7910,8 @@ class MdExploreWindow(QMainWindow):
         key = expected_key or self._current_preview_path_key()
         if key is None:
             return
+        if not self._has_diagram_features_for_key(key):
+            return
         js = """
 (() => {
   if (window.__mdexploreCollectDiagramViewState) {
@@ -7962,6 +7971,8 @@ class MdExploreWindow(QMainWindow):
         """Synchronously capture diagram zoom/pan state before preview navigation."""
         if not expected_key or self._current_preview_path_key() != expected_key:
             return
+        if not self._has_diagram_features_for_key(expected_key):
+            return
         js = """
 (() => {
   if (window.__mdexploreCollectDiagramViewState) {
@@ -7997,6 +8008,8 @@ class MdExploreWindow(QMainWindow):
         """Periodically mirror diagram zoom/pan state into Python memory."""
         path_key = self._current_preview_path_key()
         if path_key is None:
+            return
+        if not self._has_diagram_features_for_key(path_key):
             return
         self._capture_current_diagram_view_state(path_key)
 
@@ -13287,9 +13300,10 @@ class MdExploreWindow(QMainWindow):
         if previous_path_key is not None and previous_path_key != next_path_key:
             # Best-effort capture only: file switching should stay responsive
             # even if the embedded page is busy finishing diagram work.
-            self._capture_current_diagram_view_state_blocking(
-                previous_path_key, timeout_ms=90
-            )
+            if self._has_diagram_features_for_key(previous_path_key):
+                self._capture_current_diagram_view_state_blocking(
+                    previous_path_key, timeout_ms=90
+                )
             self._persist_document_view_session(previous_path_key)
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
