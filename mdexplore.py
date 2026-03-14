@@ -60,7 +60,6 @@ from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
-    QFileSystemModel,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -72,9 +71,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
-    QTabBar,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -132,537 +128,14 @@ from mdexplore_app.runtime import (
     pdf_print_layout_knobs as _pdf_print_layout_knobs,
     search_hit_count_font_family as _search_hit_count_font_family,
 )
+from mdexplore_app.tabs import ViewTabBar
+from mdexplore_app.tree import ColorizedMarkdownModel, MarkdownTreeItemDelegate
 from mdexplore_app.workers import (
     PdfExportWorker,
     PlantUmlRenderWorker,
     PreviewRenderWorker,
+    TreeMarkerScanWorker,
 )
-
-
-class ColorizedMarkdownModel(QFileSystemModel):
-    """Filesystem model with per-directory persisted file highlight colors."""
-
-    COLOR_FILE_NAME = ".mdexplore-colors.json"
-    _ICON_SIZE = 16
-    _ICON_GAP = 2
-    _VIEWS_ICON_SIZE = 12
-    _MARKER_ICON_SIZE = 13
-    _SEARCH_SLOT_WIDTH = 14
-    _SEARCH_COUNT_TEXT_MAX = 99
-    # Oversample the search-hit pill/count layer before downscaling it back
-    # into the fixed gutter slot so the pill edges and digits stay sharper
-    # than the surrounding small icons.
-    _SEARCH_COUNT_OVERSAMPLE = 8
-    _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        # Cache both persistence data and the small finite set of tree icons so
-        # the view stays responsive even in large directories.
-        self._dir_color_map: dict[str, dict[str, str]] = {}
-        self._loaded_dirs: set[str] = set()
-        self._search_match_counts: dict[str, int] = {}
-        self._multi_view_paths: set[str] = set()
-        self._highlighted_preview_paths: set[str] = set()
-        self._markdown_icon = _load_svg_icon("markdown.svg", QColor("#bcc5d1"))
-        if self._markdown_icon.isNull():
-            self._markdown_icon = _build_markdown_icon()
-        # Render the views badge in a very light gray so it stays crisp on the
-        # dark tree background without overpowering the markdown file icon.
-        self._views_icon = _load_svg_icon("views2.svg", QColor("#e3e7ee"))
-        # Persistent preview highlights are represented by the same pastel
-        # purple marker regardless of whether the file also has saved views.
-        self._marker_icon = _load_svg_icon("marker.svg", QColor("#c8b4f6"))
-        self._decorated_icon_cache: dict[tuple[bool, bool, str], QIcon] = {}
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        # This model only customizes markdown files; directories continue to use
-        # QFileSystemModel defaults so tree navigation behavior remains native.
-        if role == Qt.ItemDataRole.DecorationRole:
-            info = self.fileInfo(index)
-            if info.isFile() and info.suffix().lower() == "md":
-                path_key = self._path_key(Path(info.filePath()))
-                search_hit_count = self._search_match_counts.get(path_key, 0)
-                has_multi_view = path_key in self._multi_view_paths
-                has_persistent_highlight = path_key in self._highlighted_preview_paths
-                return self._decorated_markdown_icon(
-                    has_multi_view,
-                    has_persistent_highlight,
-                    search_hit_count,
-                )
-        if role == Qt.ItemDataRole.ForegroundRole:
-            info = self.fileInfo(index)
-            if info.isFile() and info.suffix().lower() == "md":
-                color_name = self._color_for_file(Path(info.filePath()))
-                if color_name:
-                    color = QColor(color_name)
-                    if color.isValid():
-                        luminance = (
-                            (0.299 * color.redF())
-                            + (0.587 * color.greenF())
-                            + (0.114 * color.blueF())
-                        )
-                        return QBrush(
-                            QColor("#101418") if luminance > 0.6 else QColor("#f8fafc")
-                        )
-        if role == Qt.ItemDataRole.FontRole:
-            info = self.fileInfo(index)
-            if info.isFile() and info.suffix().lower() == "md":
-                if self._search_match_counts.get(
-                    self._path_key(Path(info.filePath())), 0
-                ) > 0:
-                    base_font = super().data(index, role)
-                    font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
-                    font.setBold(True)
-                    font.setItalic(True)
-                    return font
-        return super().data(index, role)
-
-    def set_color_for_file(self, path: Path, color_name: str | None) -> None:
-        # Persist selected color immediately and notify the view.
-        directory = path.parent
-        color_map = self._load_directory_colors(directory)
-        if color_name:
-            color_map[path.name] = color_name
-        else:
-            color_map.pop(path.name, None)
-        self._save_directory_colors(directory)
-
-        index = self.index(str(path))
-        if index.isValid():
-            self.dataChanged.emit(
-                index,
-                index,
-                [Qt.ItemDataRole.ForegroundRole],
-            )
-
-    def highlight_background_for_path(self, path: Path) -> QColor | None:
-        color_name = self._color_for_file(path)
-        if not color_name:
-            return None
-        color = QColor(color_name)
-        return color if color.isValid() else None
-
-    def highlight_foreground_for_path(self, path: Path) -> QColor | None:
-        background = self.highlight_background_for_path(path)
-        if background is None:
-            return None
-        luminance = (
-            (0.299 * background.redF())
-            + (0.587 * background.greenF())
-            + (0.114 * background.blueF())
-        )
-        return QColor("#101418") if luminance > 0.6 else QColor("#f8fafc")
-
-    def collect_files_with_color(self, root: Path, color_name: str) -> list[Path]:
-        """Return files under root that are persisted with the requested color."""
-        if not root.is_dir():
-            return []
-        normalized_color = color_name.lower()
-        matches: list[Path] = []
-
-        def on_walk_error(_err) -> None:
-            # Permission errors are expected in some trees; skip quietly.
-            return
-
-        for dirpath, _dirnames, _filenames in os.walk(
-            root, onerror=on_walk_error, followlinks=False
-        ):
-            directory = Path(dirpath)
-            color_map = self._load_directory_colors(directory)
-            for file_name, file_color in color_map.items():
-                if file_color.lower() != normalized_color:
-                    continue
-                candidate = directory / file_name
-                try:
-                    if candidate.is_file():
-                        matches.append(candidate.resolve())
-                except Exception:
-                    # Broken symlink or inaccessible file; ignore quietly.
-                    pass
-
-        matches.sort(key=str)
-        return matches
-
-    def clear_all_highlights(self, root: Path) -> int:
-        """Clear all persisted highlights under root recursively."""
-        if not root.is_dir():
-            return 0
-
-        cleared_entries = 0
-
-        def on_walk_error(_err) -> None:
-            # Permission errors are expected in some trees; skip quietly.
-            return
-
-        for dirpath, _dirnames, _filenames in os.walk(
-            root, onerror=on_walk_error, followlinks=False
-        ):
-            directory = Path(dirpath)
-            color_map = self._load_directory_colors(directory)
-            if not color_map:
-                continue
-            cleared_entries += len(color_map)
-            color_map.clear()
-            self._save_directory_colors(directory)
-
-        return cleared_entries
-
-    def _color_for_file(self, path: Path) -> str | None:
-        color_map = self._load_directory_colors(path.parent)
-        return color_map.get(path.name)
-
-    def set_search_match_paths(self, paths: set[Path]) -> None:
-        self.set_search_match_counts({path: 1 for path in paths})
-
-    def set_search_match_counts(self, match_counts: dict[Path, int]) -> None:
-        """Replace active search-hit counts by path (non-positive counts omitted)."""
-        next_counts: dict[str, int] = {}
-        for path, raw_count in match_counts.items():
-            try:
-                count = int(raw_count)
-            except Exception:
-                continue
-            if count <= 0:
-                continue
-            next_counts[self._path_key(path)] = count
-        self._search_match_counts = next_counts
-        self._decorated_icon_cache.clear()
-
-    def clear_search_match_paths(self) -> None:
-        if not self._search_match_counts:
-            return
-        self._search_match_counts.clear()
-        self._decorated_icon_cache.clear()
-
-    def set_multi_view_paths(self, paths: set[Path]) -> None:
-        next_paths = {self._path_key(path) for path in paths}
-        if next_paths == self._multi_view_paths:
-            return
-        self._multi_view_paths = next_paths
-        self._decorated_icon_cache.clear()
-
-    def clear_multi_view_paths(self) -> None:
-        if not self._multi_view_paths:
-            return
-        self._multi_view_paths.clear()
-        self._decorated_icon_cache.clear()
-
-    def set_persistent_highlight_paths(self, paths: set[Path]) -> None:
-        """Replace markdown paths that have persisted preview text highlights."""
-        next_paths = {self._path_key(path) for path in paths}
-        if next_paths == self._highlighted_preview_paths:
-            return
-        self._highlighted_preview_paths = next_paths
-        self._decorated_icon_cache.clear()
-
-    def clear_persistent_highlight_paths(self) -> None:
-        """Clear persisted-preview-highlight badges in the tree."""
-        if not self._highlighted_preview_paths:
-            return
-        self._highlighted_preview_paths.clear()
-        self._decorated_icon_cache.clear()
-
-    def _path_key(self, path: Path) -> str:
-        try:
-            return str(path.resolve())
-        except Exception:
-            return str(path)
-
-    def _directory_key(self, directory: Path) -> str:
-        return str(directory)
-
-    def _load_directory_colors(self, directory: Path) -> dict[str, str]:
-        # Load once per directory and cache the mapping in-memory.
-        key = self._directory_key(directory)
-        if key in self._loaded_dirs:
-            return self._dir_color_map.setdefault(key, {})
-
-        self._loaded_dirs.add(key)
-        color_map: dict[str, str] = {}
-        color_file = directory / self.COLOR_FILE_NAME
-        try:
-            raw = color_file.read_text(encoding="utf-8")
-            payload = json.loads(raw)
-            if isinstance(payload, dict):
-                files_payload = payload.get("files", payload)
-                if isinstance(files_payload, dict):
-                    for name, color in files_payload.items():
-                        if isinstance(name, str) and isinstance(color, str):
-                            color_map[name] = color
-        except Exception:
-            # Missing file, access denied, or malformed JSON should not block browsing.
-            pass
-
-        self._dir_color_map[key] = color_map
-        return color_map
-
-    def _save_directory_colors(self, directory: Path) -> None:
-        # Writes are intentionally best-effort; unwritable directories are
-        # expected in some user environments.
-        key = self._directory_key(directory)
-        color_map = self._dir_color_map.get(key, {})
-        color_file = directory / self.COLOR_FILE_NAME
-        try:
-            if color_map:
-                payload = {"files": dict(sorted(color_map.items()))}
-                color_file.write_text(
-                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-            elif color_file.exists():
-                color_file.unlink()
-        except Exception:
-            # Requested behavior: fail quietly when persistence can't be written.
-            pass
-
-    @classmethod
-    def decorated_icon_size(cls) -> QSize:
-        return QSize(cls.max_decoration_width(), cls._ICON_SIZE)
-
-    @classmethod
-    def max_decoration_width(cls) -> int:
-        """Return the widest markdown decoration strip used by the tree."""
-        widths = [
-            cls._SEARCH_SLOT_WIDTH,
-            cls._MARKER_ICON_SIZE,
-            cls._VIEWS_ICON_SIZE,
-            cls._ICON_SIZE,
-        ]
-        return sum(widths) + (cls._ICON_GAP * max(0, len(widths) - 1))
-
-    def _search_count_display_text(self, search_hit_count: int) -> str:
-        """Render compact count text for the search slot."""
-        if search_hit_count <= 0:
-            return ""
-        if search_hit_count <= self._SEARCH_COUNT_TEXT_MAX:
-            return str(search_hit_count)
-        return "++"
-
-    def decoration_size_for_state(
-        self,
-        has_multi_view: bool,
-        has_persistent_highlight: bool,
-        search_hit_count: int,
-    ) -> QSize:
-        """Return packed decoration size for the active markdown row state."""
-        search_count_text = self._search_count_display_text(search_hit_count)
-        widths: list[int] = []
-        if search_count_text:
-            widths.append(self._SEARCH_SLOT_WIDTH)
-        if has_persistent_highlight:
-            widths.append(self._MARKER_ICON_SIZE)
-        if has_multi_view:
-            widths.append(self._VIEWS_ICON_SIZE)
-        widths.append(self._ICON_SIZE)
-        total_width = sum(widths) + (self._ICON_GAP * max(0, len(widths) - 1))
-        return QSize(total_width, self._ICON_SIZE)
-
-    def decoration_size_for_index(self, index) -> QSize:
-        """Return packed decoration size for one markdown model index."""
-        info = self.fileInfo(index)
-        if not (info.isFile() and info.suffix().lower() == "md"):
-            return QSize(self._ICON_SIZE, self._ICON_SIZE)
-        path_key = self._path_key(Path(info.filePath()))
-        search_hit_count = self._search_match_counts.get(path_key, 0)
-        has_multi_view = path_key in self._multi_view_paths
-        has_persistent_highlight = path_key in self._highlighted_preview_paths
-        return self.decoration_size_for_state(
-            has_multi_view, has_persistent_highlight, search_hit_count
-        )
-
-    def _decorated_markdown_icon(
-        self,
-        has_multi_view: bool,
-        has_persistent_highlight: bool,
-        search_hit_count: int,
-    ) -> QIcon:
-        search_count_text = self._search_count_display_text(search_hit_count)
-        cache_key = (has_multi_view, has_persistent_highlight, search_count_text)
-        cached = self._decorated_icon_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # Keep a fixed gutter width for every markdown row so the markdown file
-        # icon and the filename always start on the same vertical line. Inside
-        # that strip, badges are packed tightly together and right-aligned so
-        # any unused space appears only to the left of the icon cluster.
-        cluster_size = self.decoration_size_for_state(
-            has_multi_view, has_persistent_highlight, search_hit_count
-        )
-        total_width = self.max_decoration_width()
-        total_height = self._ICON_SIZE
-        canvas = QPixmap(total_width, total_height)
-        canvas.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-        cursor_x = max(0, total_width - cluster_size.width())
-        if search_count_text:
-            # Render the pill and the digits in separate passes so the text can
-            # be oversampled more aggressively than the background shape while
-            # still landing in the same fixed gutter slot.
-            oversample = max(1, int(self._SEARCH_COUNT_OVERSAMPLE))
-            text_oversample = max(oversample, int(self._SEARCH_COUNT_TEXT_OVERSAMPLE))
-            slot_w = self._SEARCH_SLOT_WIDTH
-            slot_h = self._ICON_SIZE
-            hi_w = slot_w * oversample
-            hi_h = slot_h * oversample
-
-            count_canvas = QPixmap(hi_w, hi_h)
-            count_canvas.fill(Qt.GlobalColor.transparent)
-            count_painter = QPainter(count_canvas)
-            count_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            count_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            count_painter.setRenderHint(
-                QPainter.RenderHint.SmoothPixmapTransform, True
-            )
-            font = count_painter.font()
-            base_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
-            font.setFamily(_search_hit_count_font_family())
-            font.setPointSizeF(max(6.5, base_size - 1.8) * oversample)
-            font.setBold(False)
-            count_painter.setFont(font)
-            metrics = QFontMetrics(font)
-            text_rect = metrics.boundingRect(search_count_text)
-            pill_padding_x = max(6 * oversample, int(metrics.height() * 0.42))
-            pill_padding_y = max(2 * oversample, int(metrics.height() * 0.12))
-            pill_width = min(
-                hi_w - (2 * oversample),
-                text_rect.width() + (2 * pill_padding_x),
-            )
-            pill_height = min(
-                hi_h - (2 * oversample),
-                text_rect.height() + (2 * pill_padding_y),
-            )
-            pill_x = max(0, (hi_w - pill_width) // 2)
-            pill_y = max(0, (hi_h - pill_height) // 2)
-            pill_rect = QRect(pill_x, pill_y, pill_width, pill_height)
-            radius = max(oversample, int(pill_height * 0.28))
-
-            count_painter.setPen(Qt.PenStyle.NoPen)
-            count_painter.setBrush(QColor("#f7e27a"))
-            count_painter.drawRoundedRect(pill_rect, radius, radius)
-            count_painter.end()
-
-            text_canvas = QPixmap(slot_w * text_oversample, slot_h * text_oversample)
-            text_canvas.fill(Qt.GlobalColor.transparent)
-            text_painter = QPainter(text_canvas)
-            text_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            text_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            text_painter.setRenderHint(
-                QPainter.RenderHint.SmoothPixmapTransform, True
-            )
-            text_font = text_painter.font()
-            text_base_size = (
-                text_font.pointSizeF() if text_font.pointSizeF() > 0 else 10.0
-            )
-            text_font.setFamily(_search_hit_count_font_family())
-            text_font.setPointSizeF(max(6.5, text_base_size - 1.8) * text_oversample)
-            text_font.setBold(False)
-            text_painter.setFont(text_font)
-            text_painter.setPen(QPen(QColor("#111111")))
-            text_painter.drawText(
-                QRect(0, 0, slot_w * text_oversample, slot_h * text_oversample),
-                Qt.AlignmentFlag.AlignCenter,
-                search_count_text,
-            )
-            text_painter.end()
-
-            count_layer = count_canvas.scaled(
-                slot_w,
-                slot_h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            text_layer = text_canvas.scaled(
-                slot_w,
-                slot_h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(cursor_x, 0, count_layer)
-            painter.drawPixmap(cursor_x, 0, text_layer)
-            cursor_x += self._SEARCH_SLOT_WIDTH + self._ICON_GAP
-
-        if has_persistent_highlight and not self._marker_icon.isNull():
-            marker_pixmap = self._marker_icon.pixmap(
-                self._MARKER_ICON_SIZE, self._MARKER_ICON_SIZE
-            )
-            marker_y = max(0, (self._ICON_SIZE - self._MARKER_ICON_SIZE) // 2)
-            painter.drawPixmap(cursor_x, marker_y, marker_pixmap)
-            cursor_x += self._MARKER_ICON_SIZE + self._ICON_GAP
-
-        if has_multi_view:
-            views_pixmap = self._views_icon.pixmap(
-                self._VIEWS_ICON_SIZE, self._VIEWS_ICON_SIZE
-            )
-            views_y = max(0, (self._ICON_SIZE - self._VIEWS_ICON_SIZE) // 2)
-            painter.drawPixmap(cursor_x, views_y, views_pixmap)
-            cursor_x += self._VIEWS_ICON_SIZE + self._ICON_GAP
-
-        icon_pixmap = self._markdown_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
-        painter.drawPixmap(cursor_x, 0, icon_pixmap)
-        painter.end()
-
-        decorated = QIcon(canvas)
-        self._decorated_icon_cache[cache_key] = decorated
-        return decorated
-
-
-class MarkdownTreeItemDelegate(QStyledItemDelegate):
-    """Paint filename-only highlight backgrounds for markdown rows."""
-
-    def paint(self, painter: QPainter, option, index) -> None:
-        model = index.model()
-        if not isinstance(model, ColorizedMarkdownModel):
-            super().paint(painter, option, index)
-            return
-
-        info = model.fileInfo(index)
-        if not (info.isFile() and info.suffix().lower() == "md"):
-            super().paint(painter, option, index)
-            return
-
-        file_path = Path(info.filePath())
-        background = model.highlight_background_for_path(file_path)
-        if background is None:
-            super().paint(painter, option, index)
-            return
-
-        super().paint(painter, option, index)
-
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        widget = opt.widget
-        style = widget.style() if widget is not None else QApplication.style()
-
-        text_rect = style.subElementRect(
-            QStyle.SubElement.SE_ItemViewItemText, opt, widget
-        )
-        highlight_rect = text_rect.adjusted(-2, 1, 2, -1)
-        painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRect(highlight_rect)
-        painter.restore()
-
-        foreground = model.highlight_foreground_for_path(file_path)
-        text_color = (
-            foreground
-            if foreground is not None
-            else opt.palette.color(QPalette.ColorRole.Text)
-        )
-        painter.save()
-        painter.setFont(opt.font)
-        painter.setPen(text_color)
-        elided_text = opt.fontMetrics.elidedText(
-            opt.text, opt.textElideMode, text_rect.width()
-        )
-        alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
-        painter.drawText(text_rect, alignment, elided_text)
-        painter.restore()
 
 
 class MarkdownRenderer:
@@ -5840,469 +5313,6 @@ class MarkdownRenderer:
 </html>
 """
 
-class ViewTabBar(QTabBar):
-    """Custom tab bar that paints dark-theme-friendly pastel tab backgrounds."""
-
-    homeRequested = Signal(int)
-
-    PASTEL_SEQUENCE = [
-        "#8fb8ff",
-        "#9fd8c9",
-        "#d7b8ff",
-        "#f6c89f",
-        "#f4b8c9",
-        "#c8d8a0",
-        "#b5d5f4",
-        "#e8c6a7",
-    ]
-    WIDTH_TEMPLATE_TEXT = "999999"
-    MAX_LABEL_CHARS = 48
-    WIDTH_SIDE_PADDING = 10
-    POSITION_BAR_WIDTH = 26
-    POSITION_BAR_HEIGHT = 8
-    POSITION_BAR_TEXT_GAP = 7
-    POSITION_BAR_SEGMENTS = 8
-    HOME_ICON_GAP = 6
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._home_icon = _load_png_icon_two_tone(
-            "home3.png",
-            QColor("#425066"),
-            QColor("#f8fafc"),
-            size=64,
-        )
-        if self._home_icon.isNull():
-            self._home_icon = _load_svg_icon_two_tone(
-                "home3.svg",
-                QColor("#425066"),
-                QColor("#f8fafc"),
-                size=64,
-            )
-        if self._home_icon.isNull():
-            self._home_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirHomeIcon)
-        # Drag state is tracked here instead of relying on Qt's default drag
-        # ghost so the whole tab, not just the close button, appears to move.
-        self._drag_candidate_index = -1
-        self._drag_start_pos = None
-        self._dragging_index = -1
-        self._dragging_tab_x = 0
-        self._dragging_tab_offset_x = 0
-
-    @staticmethod
-    def _event_pos(event):
-        """Return event position as QPoint across Qt6 API variants."""
-        try:
-            return event.position().toPoint()
-        except Exception:
-            return event.pos()
-
-    def _is_close_button_hit(self, tab_index: int, pos) -> bool:
-        """Detect whether a pointer position targets a tab close button."""
-        button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
-        return bool(
-            button is not None
-            and button.isVisible()
-            and button.geometry().contains(pos)
-        )
-
-    def _home_icon_size_px(self) -> int:
-        """Size home icon roughly to the close-button glyph size."""
-        close_w = self.style().pixelMetric(
-            QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
-        )
-        close_h = self.style().pixelMetric(
-            QStyle.PixelMetric.PM_TabCloseIndicatorHeight, None, self
-        )
-        icon_size = (
-            min(close_w, close_h)
-            if close_w > 0 and close_h > 0
-            else max(close_w, close_h)
-        )
-        if icon_size <= 0:
-            icon_size = 12
-        icon_size = int(round(icon_size * 1.10))
-        return max(11, min(20, icon_size))
-
-    def _home_icon_rect(self, tab_index: int) -> QRect:
-        """Return home icon hit box for a labeled tab, or empty rect."""
-        if (
-            tab_index < 0
-            or tab_index >= self.count()
-            or not self._tab_has_custom_label(tab_index)
-        ):
-            return QRect()
-        rect = self.tabRect(tab_index).adjusted(2, 2, -2, -1)
-        if rect.width() <= 2 or rect.height() <= 2:
-            return QRect()
-        icon_size = self._home_icon_size_px()
-        icon_x = rect.left() + self.WIDTH_SIDE_PADDING - 1
-        icon_y = rect.center().y() - (icon_size // 2)
-        return QRect(icon_x, icon_y, icon_size, icon_size)
-
-    def _set_all_close_buttons_visible(self, visible: bool) -> None:
-        """Show/hide close buttons while custom drag ghost is active."""
-        for index in range(self.count()):
-            button = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
-            if button is not None:
-                button.setVisible(visible)
-
-    def _begin_tab_drag(self, tab_index: int, pos) -> None:
-        """Start custom full-tab drag ghost for smoother visual feedback."""
-        if tab_index < 0 or tab_index >= self.count():
-            return
-        rect = self.tabRect(tab_index)
-        if not rect.isValid():
-            return
-
-        self._dragging_index = tab_index
-        self._dragging_tab_offset_x = max(0, min(rect.width() - 1, pos.x() - rect.x()))
-        self._dragging_tab_x = rect.x()
-        self._set_all_close_buttons_visible(False)
-        self.update()
-
-    def _target_index_for_x(self, center_x: int) -> int:
-        """Map cursor X position to closest insertion tab index."""
-        if self.count() <= 0:
-            return -1
-        for index in range(self.count()):
-            if center_x <= self.tabRect(index).center().x():
-                return index
-        return self.count() - 1
-
-    def _update_tab_drag(self, pos) -> None:
-        """Move drag ghost and reorder tabs as cursor crosses boundaries."""
-        if self._dragging_index < 0:
-            return
-        self._dragging_tab_x = pos.x() - self._dragging_tab_offset_x
-        target_index = self._target_index_for_x(pos.x())
-        if target_index >= 0 and target_index != self._dragging_index:
-            self.moveTab(self._dragging_index, target_index)
-            self._dragging_index = target_index
-        self.update()
-
-    def _end_tab_drag(self) -> None:
-        """Finish drag mode and restore normal close button visibility."""
-        self._drag_candidate_index = -1
-        self._drag_start_pos = None
-        self._dragging_index = -1
-        self._dragging_tab_x = 0
-        self._dragging_tab_offset_x = 0
-        self._set_all_close_buttons_visible(True)
-        self.update()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        """Record potential drag start while preserving regular tab behavior."""
-        if event.button() == Qt.MouseButton.LeftButton:
-            pos = self._event_pos(event)
-            tab_index = self.tabAt(pos)
-            if tab_index >= 0 and self._home_icon_rect(tab_index).contains(pos):
-                self.homeRequested.emit(tab_index)
-                event.accept()
-                return
-            if tab_index >= 0 and not self._is_close_button_hit(tab_index, pos):
-                self._drag_candidate_index = tab_index
-                self._drag_start_pos = pos
-            else:
-                self._drag_candidate_index = -1
-                self._drag_start_pos = None
-        else:
-            self._drag_candidate_index = -1
-            self._drag_start_pos = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        """Drive custom tab drag animation and reorder behavior."""
-        if (
-            self._drag_candidate_index >= 0
-            and self._drag_start_pos is not None
-            and (event.buttons() & Qt.MouseButton.LeftButton)
-        ):
-            pos = self._event_pos(event)
-            if self._dragging_index < 0:
-                if (
-                    pos - self._drag_start_pos
-                ).manhattanLength() >= QApplication.startDragDistance():
-                    self._begin_tab_drag(self._drag_candidate_index, pos)
-            if self._dragging_index >= 0:
-                self._update_tab_drag(pos)
-                event.accept()
-                return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        """End custom drag mode on release and continue normal processing."""
-        if event.button() == Qt.MouseButton.LeftButton and self._dragging_index >= 0:
-            self._end_tab_drag()
-            super().mouseReleaseEvent(event)
-            return
-        self._drag_candidate_index = -1
-        self._drag_start_pos = None
-        super().mouseReleaseEvent(event)
-
-    def _color_slot_for_index(self, tab_index: int) -> int:
-        """Resolve palette slot from tab metadata, with sequence fallback."""
-        palette_size = len(self.PASTEL_SEQUENCE)
-        data = self.tabData(tab_index)
-        if isinstance(data, dict):
-            raw_slot = data.get("color_slot")
-            try:
-                slot = int(raw_slot)
-            except Exception:
-                slot = -1
-            if 0 <= slot < palette_size:
-                return slot
-        sequence = self._sequence_for_index(tab_index)
-        return (max(1, sequence) - 1) % palette_size
-
-    def _sequence_for_index(self, tab_index: int) -> int:
-        """Extract open-sequence index from tab data with backward compatibility."""
-        data = self.tabData(tab_index)
-        if isinstance(data, dict):
-            raw = data.get("sequence")
-            if isinstance(raw, int) and raw > 0:
-                return raw
-        if isinstance(data, int) and data > 0:
-            return data
-        return tab_index + 1
-
-    def _base_color_for_index(self, tab_index: int) -> QColor:
-        """Return base color for a tab from the configured pastel sequence."""
-        color_slot = self._color_slot_for_index(tab_index)
-        color_hex = self.PASTEL_SEQUENCE[color_slot]
-        return QColor(color_hex)
-
-    def _paint_single_tab(
-        self,
-        painter: QPainter,
-        tab_index: int,
-        rect,
-        *,
-        selected: bool,
-        force_opaque: bool,
-    ) -> None:
-        """Paint one tab using shared logic for static and drag-ghost rendering."""
-        base = self._base_color_for_index(tab_index)
-        fill = QColor(base)
-        if selected:
-            fill = fill.lighter(107)
-            if force_opaque:
-                fill.setAlpha(255)
-            else:
-                fill.setAlpha(236)
-            border = QColor(fill).darker(130)
-        else:
-            if force_opaque:
-                fill.setAlpha(244)
-            else:
-                fill.setAlpha(172)
-            border = QColor(fill).darker(155)
-
-        painter.setPen(QPen(border, 1.1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(rect, 6.0, 6.0)
-
-        has_custom_label = self._tab_has_custom_label(tab_index)
-
-        house_offset = 0
-        if has_custom_label:
-            # A house icon marks tabs that have an explicit labeled "beginning".
-            icon_rect = self._home_icon_rect(tab_index)
-            if icon_rect.isValid():
-                icon_pixmap = self._home_icon.pixmap(icon_rect.size())
-                if not icon_pixmap.isNull():
-                    painter.drawPixmap(icon_rect, icon_pixmap)
-                house_offset = icon_rect.width() + self.HOME_ICON_GAP
-
-        # Draw a compact segmented bargraph at the left to indicate each
-        # tab's approximate position within the current document.
-        bar_x = rect.left() + self.WIDTH_SIDE_PADDING - 1 + house_offset
-        bar_y = rect.center().y() - (self.POSITION_BAR_HEIGHT // 2)
-        bar_w = self.POSITION_BAR_WIDTH
-        bar_h = self.POSITION_BAR_HEIGHT
-        track_fill = QColor("#1f2937" if selected else "#182233")
-        if force_opaque:
-            track_fill.setAlpha(236 if selected else 214)
-        else:
-            track_fill.setAlpha(188 if selected else 152)
-        track_border = QColor("#314156")
-        painter.setPen(QPen(track_border, 0.9))
-        painter.setBrush(track_fill)
-        painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 2.2, 2.2)
-
-        inner_x = bar_x + 1
-        inner_y = bar_y + 1
-        inner_w = max(1, bar_w - 2)
-        inner_h = max(1, bar_h - 2)
-        segments = self.POSITION_BAR_SEGMENTS
-        segment_gap = 1
-        segment_w = max(1, (inner_w - ((segments - 1) * segment_gap)) // segments)
-        used_w = (segment_w * segments) + ((segments - 1) * segment_gap)
-        start_x = inner_x + max(0, (inner_w - used_w) // 2)
-        progress = self._progress_for_index(tab_index)
-        filled_segments = int(round(progress * segments))
-        if progress > 0.0 and filled_segments <= 0:
-            filled_segments = 1
-        filled_segments = max(0, min(segments, filled_segments))
-        segment_active = QColor(base).darker(116 if selected else 128)
-        segment_inactive = QColor("#425066")
-        if force_opaque:
-            segment_inactive.setAlpha(148 if selected else 126)
-        else:
-            segment_inactive.setAlpha(115 if selected else 92)
-        painter.setPen(Qt.PenStyle.NoPen)
-        for segment_index in range(segments):
-            segment_x = start_x + (segment_index * (segment_w + segment_gap))
-            segment_color = (
-                segment_active if segment_index < filled_segments else segment_inactive
-            )
-            painter.setBrush(segment_color)
-            painter.drawRect(segment_x, inner_y, segment_w, inner_h)
-
-        text_left = bar_x + bar_w + self.POSITION_BAR_TEXT_GAP
-        text_rect = rect.adjusted(text_left - rect.left(), 0, -9, 0)
-        close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
-        if close_button is not None and close_button.isVisible():
-            text_rect.setRight(
-                min(text_rect.right(), close_button.geometry().left() - 4)
-            )
-
-        text_color = QColor("#0b1220" if selected else "#1b2436")
-        if not self.isTabEnabled(tab_index):
-            text_color.setAlpha(130)
-        painter.setPen(text_color)
-        painter.drawText(
-            text_rect, Qt.AlignmentFlag.AlignCenter, self.tabText(tab_index)
-        )
-
-    def _progress_for_index(self, tab_index: int) -> float:
-        """Read normalized document-position progress (0..1) from tab metadata."""
-        data = self.tabData(tab_index)
-        if isinstance(data, dict):
-            raw = data.get("progress")
-            try:
-                value = float(raw)
-            except Exception:
-                value = 0.0
-            if math.isfinite(value):
-                return max(0.0, min(1.0, value))
-        return 0.0
-
-    def _constant_tab_width(self) -> int:
-        """Compute a stable tab width sized for six digits plus close button."""
-        text_width = self.fontMetrics().horizontalAdvance(self.WIDTH_TEMPLATE_TEXT)
-        close_width = 0
-        if self.tabsClosable():
-            close_width = (
-                self.style().pixelMetric(
-                    QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
-                )
-                + 8
-            )
-        return (
-            text_width
-            + (self.WIDTH_SIDE_PADDING * 2)
-            + self.POSITION_BAR_WIDTH
-            + self.POSITION_BAR_TEXT_GAP
-            + close_width
-        )
-
-    def _tab_width_for_text(self, text: str) -> int:
-        """Return tab width for one label, bounded below by the default width."""
-        text_width = self.fontMetrics().horizontalAdvance(
-            text or self.WIDTH_TEMPLATE_TEXT
-        )
-        close_width = 0
-        if self.tabsClosable():
-            close_width = (
-                self.style().pixelMetric(
-                    QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
-                )
-                + 8
-            )
-        dynamic_width = (
-            text_width
-            + (self.WIDTH_SIDE_PADDING * 2)
-            + self.POSITION_BAR_WIDTH
-            + self.POSITION_BAR_TEXT_GAP
-            + close_width
-        )
-        return max(self._constant_tab_width(), dynamic_width)
-
-    def _tab_has_custom_label(self, index: int) -> bool:
-        """Return whether a tab currently has a non-empty custom label."""
-        data = self.tabData(index)
-        if not isinstance(data, dict):
-            return False
-        raw = data.get("custom_label")
-        return isinstance(raw, str) and bool(raw.strip())
-
-    def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
-        """Return per-tab width, expanding for custom labels when needed."""
-        base = super().tabSizeHint(index)
-        width = self._tab_width_for_text(self.tabText(index))
-        if self._tab_has_custom_label(index):
-            width += self._home_icon_size_px() + self.HOME_ICON_GAP
-        return QSize(width, base.height())
-
-    def minimumTabSizeHint(self, index: int) -> QSize:  # noqa: N802
-        """Match minimum width to the rendered label width."""
-        base = super().minimumTabSizeHint(index)
-        width = self._tab_width_for_text(self.tabText(index))
-        if self._tab_has_custom_label(index):
-            width += self._home_icon_size_px() + self.HOME_ICON_GAP
-        return QSize(width, base.height())
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        """Draw rounded pastel tabs while preserving built-in tab close buttons."""
-        del event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-        for tab_index in range(self.count()):
-            if self._dragging_index >= 0 and tab_index == self._dragging_index:
-                # Draw active dragged tab as a floating ghost after static tabs.
-                continue
-            rect = self.tabRect(tab_index).adjusted(2, 2, -2, -1)
-            if rect.width() <= 2 or rect.height() <= 2:
-                continue
-
-            selected = tab_index == self.currentIndex()
-            self._paint_single_tab(
-                painter, tab_index, rect, selected=selected, force_opaque=False
-            )
-
-        if self._dragging_index >= 0 and self.count() > 0:
-            current_rect = self.tabRect(
-                max(0, min(self._dragging_index, self.count() - 1))
-            )
-            ghost_rect = current_rect.adjusted(2, 2, -2, -1)
-            if ghost_rect.width() <= 2 or ghost_rect.height() <= 2:
-                painter.end()
-                return
-            draw_y = max(2, current_rect.y() + 2)
-            draw_x = int(self._dragging_tab_x + 2)
-            max_x = max(2, self.width() - ghost_rect.width() - 2)
-            draw_x = max(2, min(max_x, draw_x))
-            ghost_rect.moveLeft(draw_x)
-            ghost_rect.moveTop(draw_y)
-            painter.save()
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(5, 10, 18, 108))
-            painter.drawRoundedRect(ghost_rect.adjusted(1, 1, 3, 3), 6.0, 6.0)
-            selected = self._dragging_index == self.currentIndex()
-            self._paint_single_tab(
-                painter,
-                self._dragging_index,
-                ghost_rect,
-                selected=selected,
-                force_opaque=True,
-            )
-            painter.restore()
-
-        painter.end()
 
 
 class MdExploreWindow(QMainWindow):
@@ -6350,6 +5360,11 @@ class MdExploreWindow(QMainWindow):
         self._render_pool.setMaxThreadCount(1)
         self._render_request_id = 0
         self._active_render_workers: set[PreviewRenderWorker] = set()
+        self._tree_marker_scan_pool = QThreadPool(self)
+        self._tree_marker_scan_pool.setMaxThreadCount(1)
+        self._tree_marker_scan_request_id = 0
+        self._active_tree_marker_scan_workers: set[TreeMarkerScanWorker] = set()
+        self._tree_marker_scan_dirty_paths: set[str] = set()
         self._plantuml_pool = QThreadPool(self)
         # Let independent PlantUML blocks render concurrently; keep a modest
         # upper bound to avoid CPU saturation on large documents.
@@ -6399,6 +5414,12 @@ class MdExploreWindow(QMainWindow):
         # Per-directory disk-backed view session cache loaded on demand from
         # .mdexplore-views.json files.
         self._persisted_view_sessions_by_dir: dict[str, dict[str, dict]] = {}
+        # Tree gutter badges are cached by root so navigation and tab changes
+        # can update only the affected file instead of recursively rescanning
+        # the whole tree on every selection.
+        self._tree_multi_view_marker_paths: set[str] = set()
+        self._tree_highlight_marker_paths: set[str] = set()
+        self._tree_marker_cache_root_key: str | None = None
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
         # Cache per-document rich-render feature flags so post-load startup can
@@ -6544,7 +5565,6 @@ class MdExploreWindow(QMainWindow):
         self.view_tabs.homeRequested.connect(self._on_view_tab_home_requested)
         self.view_tabs.setVisible(False)
         self._reset_document_views()
-        self._refresh_tree_multi_view_markers()
 
         # Top-left document controls operate on directory scope and current file
         # scope; the right side hosts clipboard/search operations.
@@ -7588,7 +6608,7 @@ class MdExploreWindow(QMainWindow):
             target_key = self._path_key(target_path)
             root_key = self._path_key(root)
             if target_key == root_key or target_key.startswith(root_key + os.sep):
-                self._refresh_tree_multi_view_markers()
+                self._refresh_tree_multi_view_markers(changed_path_key=target_key)
 
     def _directory_view_sessions(self, directory: Path) -> dict[str, dict]:
         """Load or return cached persisted view sessions for one directory."""
@@ -7717,7 +6737,7 @@ class MdExploreWindow(QMainWindow):
         else:
             sessions.pop(file_name, None)
         self._save_directory_view_sessions(directory)
-        self._refresh_tree_multi_view_markers()
+        self._refresh_tree_multi_view_markers(changed_path_key=path_key)
 
     def _serialized_mermaid_cache_json(self) -> str:
         """Serialize in-memory Mermaid SVG cache for template injection."""
@@ -8483,7 +7503,9 @@ class MdExploreWindow(QMainWindow):
 
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
-        self._refresh_tree_multi_view_markers()
+        path_key = self._current_preview_path_key()
+        if path_key is not None:
+            self._refresh_tree_multi_view_markers(changed_path_key=path_key)
         self.statusBar().showMessage(
             f"Added view {self.view_tabs.count()} of {self.MAX_DOCUMENT_VIEWS} at line {top_line}",
             3000,
@@ -8519,7 +7541,6 @@ class MdExploreWindow(QMainWindow):
                 self.view_tabs.update()
                 self._update_view_tabs_visibility()
                 self._persist_document_view_session()
-                self._refresh_tree_multi_view_markers()
                 self._refresh_named_view_markers_in_preview()
                 self.statusBar().showMessage(
                     "Closed labeled tab and returned to hidden default view", 3000
@@ -8544,7 +7565,8 @@ class MdExploreWindow(QMainWindow):
 
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
-        self._refresh_tree_multi_view_markers()
+        if path_key is not None:
+            self._refresh_tree_multi_view_markers(changed_path_key=path_key)
         self._refresh_named_view_markers_in_preview()
 
     def _on_view_tab_changed(self, tab_index: int) -> None:
@@ -8993,7 +8015,7 @@ class MdExploreWindow(QMainWindow):
         self._cancel_pending_preview_render()
         self._rerun_active_search_for_scope()
         self._update_add_view_button_state()
-        self._refresh_tree_multi_view_markers()
+        self._refresh_tree_multi_view_markers(full_scan=True)
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
@@ -9174,7 +8196,7 @@ class MdExploreWindow(QMainWindow):
         self.model.setRootPath("")
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
-        self._refresh_tree_multi_view_markers()
+        self._refresh_tree_multi_view_markers(full_scan=True)
 
         if expanded_paths:
             self._restore_expanded_directory_paths(expanded_paths)
@@ -9284,6 +8306,130 @@ class MdExploreWindow(QMainWindow):
         self._render_request_id += 1
         self._render_pool.clear()
 
+    def _cancel_pending_tree_marker_scan(self) -> None:
+        """Drop queued tree-sidecar scans and invalidate stale worker results."""
+        self._tree_marker_scan_request_id += 1
+        self._tree_marker_scan_pool.clear()
+        self._tree_marker_scan_dirty_paths.clear()
+
+    def _merge_live_tree_marker_state(
+        self,
+        multi_view_paths: set[str] | None = None,
+        highlighted_paths: set[str] | None = None,
+        *,
+        root_key: str | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """Merge worker/disk marker sets with current in-memory document state."""
+        merged_multi_view = set(multi_view_paths or ())
+        merged_highlighted = set(highlighted_paths or ())
+        if root_key is None:
+            root = getattr(self, "root", None)
+            if isinstance(root, Path):
+                root_key = self._path_key(root)
+
+        for raw_path_key, session in self._document_view_sessions.items():
+            if self._session_has_multiple_views(session) and self._is_path_key_under_root(
+                raw_path_key, root_key
+            ):
+                merged_multi_view.add(raw_path_key)
+
+        current_path_key = self._current_preview_path_key()
+        if (
+            current_path_key
+            and self.view_tabs.count() > 1
+            and self._is_path_key_under_root(current_path_key, root_key)
+        ):
+            merged_multi_view.add(current_path_key)
+
+        return merged_multi_view, merged_highlighted
+
+    def _start_tree_marker_scan(self) -> None:
+        """Scan the current root for tree badge sidecars in the background."""
+        root = getattr(self, "root", None)
+        if not isinstance(root, Path) or not root.exists():
+            self._tree_multi_view_marker_paths.clear()
+            self._tree_highlight_marker_paths.clear()
+            self._tree_marker_cache_root_key = None
+            self._sync_tree_multi_view_markers_to_model()
+            return
+
+        self._cancel_pending_tree_marker_scan()
+        request_id = self._tree_marker_scan_request_id
+        self._tree_marker_scan_dirty_paths.clear()
+        worker = TreeMarkerScanWorker(
+            root,
+            request_id,
+            self.VIEWS_FILE_NAME,
+            self.HIGHLIGHTING_FILE_NAME,
+        )
+        self._active_tree_marker_scan_workers.add(worker)
+        worker.signals.finished.connect(self._on_tree_marker_scan_finished)
+        self._tree_marker_scan_pool.start(worker)
+
+    def _on_tree_marker_scan_finished(
+        self,
+        request_id: int,
+        root_key: str,
+        multi_view_paths,
+        highlighted_paths,
+        error_text: str,
+    ) -> None:
+        """Apply finished tree-sidecar scan if it still matches the current root."""
+        worker_to_remove = None
+        for worker in self._active_tree_marker_scan_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_tree_marker_scan_workers.remove(worker_to_remove)
+
+        if request_id != self._tree_marker_scan_request_id:
+            return
+
+        current_root = getattr(self, "root", None)
+        if not isinstance(current_root, Path):
+            return
+        current_root_key = self._path_key(current_root)
+        if root_key != current_root_key:
+            return
+
+        if error_text:
+            self.statusBar().showMessage(
+                f"Tree badge scan failed: {self._truncate_error_text(error_text, 220)}",
+                4000,
+            )
+            return
+
+        next_multi_view_paths = {
+            str(path_key)
+            for path_key in (multi_view_paths or ())
+            if isinstance(path_key, str)
+        }
+        next_highlighted_paths = {
+            str(path_key)
+            for path_key in (highlighted_paths or ())
+            if isinstance(path_key, str)
+        }
+        next_multi_view_paths, next_highlighted_paths = self._merge_live_tree_marker_state(
+            next_multi_view_paths,
+            next_highlighted_paths,
+            root_key=current_root_key,
+        )
+        self._tree_multi_view_marker_paths = next_multi_view_paths
+        self._tree_highlight_marker_paths = next_highlighted_paths
+        self._tree_marker_cache_root_key = current_root_key
+        dirty_paths = [
+            path_key
+            for path_key in self._tree_marker_scan_dirty_paths
+            if self._is_path_key_under_root(path_key, current_root_key)
+        ]
+        self._tree_marker_scan_dirty_paths.clear()
+        for path_key in dirty_paths:
+            self._update_tree_multi_view_markers_for_path_key(
+                path_key, root_key=current_root_key
+            )
+        self._sync_tree_multi_view_markers_to_model()
+
     def _rerun_active_search_for_scope(self) -> None:
         """Re-run search immediately when scope changes and query is active."""
         if not self.match_input.text().strip():
@@ -9366,44 +8512,99 @@ class MdExploreWindow(QMainWindow):
         tabs = session.get("tabs")
         return isinstance(tabs, list) and len(tabs) > 1
 
-    def _refresh_tree_multi_view_markers(self) -> None:
-        """Update left-tree badges for markdown files with views and/or highlights."""
+    def _is_path_key_under_root(
+        self, path_key: str | None, root_key: str | None = None
+    ) -> bool:
+        """Return whether a file path key belongs to the current tree root."""
+        if not path_key:
+            return False
+        if root_key is None:
+            root = getattr(self, "root", None)
+            if not isinstance(root, Path):
+                return False
+            root_key = self._path_key(root)
+        return path_key == root_key or path_key.startswith(root_key + os.sep)
+
+    def _sync_tree_multi_view_markers_to_model(self) -> None:
+        """Push cached tree badge sets to the model and repaint only on change."""
         if not hasattr(self, "model"):
             return
-        root = getattr(self, "root", None)
-        if not isinstance(root, Path) or not root.exists():
-            self.model.clear_multi_view_paths()
-            self.model.clear_persistent_highlight_paths()
-            if hasattr(self, "tree"):
-                self.tree.viewport().update()
+        should_update = (
+            self._tree_multi_view_marker_paths != self.model._multi_view_paths
+            or self._tree_highlight_marker_paths
+            != self.model._highlighted_preview_paths
+        )
+        self.model.set_multi_view_path_keys(self._tree_multi_view_marker_paths)
+        self.model.set_persistent_highlight_path_keys(
+            self._tree_highlight_marker_paths
+        )
+        if should_update and hasattr(self, "tree"):
+            self.tree.viewport().update()
+
+    def _update_tree_multi_view_markers_for_path_key(
+        self, path_key: str | None, *, root_key: str | None = None
+    ) -> None:
+        """Incrementally refresh tree badges for one markdown file path."""
+        if not path_key:
+            return
+        if root_key is None:
+            root = getattr(self, "root", None)
+            if not isinstance(root, Path):
+                return
+            root_key = self._path_key(root)
+        if not self._is_path_key_under_root(path_key, root_key):
+            self._tree_multi_view_marker_paths.discard(path_key)
+            self._tree_highlight_marker_paths.discard(path_key)
             return
 
-        marked_paths: set[Path] = set()
-        highlighted_paths: set[Path] = set()
+        has_multi_view = self._session_has_multiple_views(
+            self._document_view_sessions.get(path_key)
+        )
+        current_path_key = self._current_preview_path_key()
+        if (
+            not has_multi_view
+            and current_path_key == path_key
+            and self.view_tabs.count() > 1
+        ):
+            has_multi_view = True
+
+        if has_multi_view:
+            self._tree_multi_view_marker_paths.add(path_key)
+        else:
+            self._tree_multi_view_marker_paths.discard(path_key)
+
+        if self._load_text_highlights_for_path_key(path_key):
+            self._tree_highlight_marker_paths.add(path_key)
+        else:
+            self._tree_highlight_marker_paths.discard(path_key)
+
+    def _rebuild_tree_multi_view_marker_cache(self) -> None:
+        """Rebuild root-scoped tree badges with one recursive scan per root."""
+        root = getattr(self, "root", None)
+        if not isinstance(root, Path) or not root.exists():
+            self._tree_multi_view_marker_paths.clear()
+            self._tree_highlight_marker_paths.clear()
+            self._tree_marker_cache_root_key = None
+            self._sync_tree_multi_view_markers_to_model()
+            return
+
         root_key = self._path_key(root)
+        marked_paths: set[str] = set()
+        highlighted_paths: set[str] = set()
 
         for raw_path_key, session in self._document_view_sessions.items():
-            if not self._session_has_multiple_views(session):
-                continue
-            try:
-                path = Path(raw_path_key).resolve()
-            except Exception:
-                path = Path(raw_path_key)
-            path_key = self._path_key(path)
-            if path_key == root_key or not path_key.startswith(root_key + os.sep):
-                continue
-            marked_paths.add(path)
-
-        if self.current_file is not None and self.view_tabs.count() > 1:
-            try:
-                current_path = self.current_file.resolve()
-            except Exception:
-                current_path = self.current_file
-            current_path_key = self._path_key(current_path)
-            if current_path_key != root_key and current_path_key.startswith(
-                root_key + os.sep
+            if self._session_has_multiple_views(session) and self._is_path_key_under_root(
+                raw_path_key, root_key
             ):
-                marked_paths.add(current_path)
+                marked_paths.add(raw_path_key)
+
+        current_path_key = self._current_preview_path_key()
+        if (
+            current_path_key
+            and self.view_tabs.count() > 1
+            and self._is_path_key_under_root(current_path_key, root_key)
+        ):
+            marked_paths.add(current_path_key)
 
         def on_walk_error(_err) -> None:
             return
@@ -9412,31 +8613,47 @@ class MdExploreWindow(QMainWindow):
             root, onerror=on_walk_error, followlinks=False
         ):
             directory = Path(dirpath)
-            if self.VIEWS_FILE_NAME not in filenames:
-                sessions = {}
-            else:
+            if self.VIEWS_FILE_NAME in filenames:
                 sessions = self._directory_view_sessions(directory)
-            for file_name, session in sessions.items():
-                if self._session_has_multiple_views(session):
-                    marked_paths.add(directory / file_name)
+                for file_name, session in sessions.items():
+                    if self._session_has_multiple_views(session):
+                        marked_paths.add(self._path_key(directory / file_name))
 
-            if self.HIGHLIGHTING_FILE_NAME not in filenames:
-                continue
-            highlights_by_file = self._directory_text_highlights(directory)
-            for file_name, entries in highlights_by_file.items():
-                if self._normalize_text_highlight_entries(entries):
-                    highlighted_paths.add(directory / file_name)
+            if self.HIGHLIGHTING_FILE_NAME in filenames:
+                highlights_by_file = self._directory_text_highlights(directory)
+                for file_name, entries in highlights_by_file.items():
+                    if self._normalize_text_highlight_entries(entries):
+                        highlighted_paths.add(self._path_key(directory / file_name))
 
-        multi_view_keys = {self.model._path_key(path) for path in marked_paths}
-        highlight_keys = {self.model._path_key(path) for path in highlighted_paths}
-        should_update = (
-            multi_view_keys != self.model._multi_view_paths
-            or highlight_keys != self.model._highlighted_preview_paths
-        )
-        self.model.set_multi_view_paths(marked_paths)
-        self.model.set_persistent_highlight_paths(highlighted_paths)
-        if should_update and hasattr(self, "tree"):
-            self.tree.viewport().update()
+        self._tree_multi_view_marker_paths = marked_paths
+        self._tree_highlight_marker_paths = highlighted_paths
+        self._tree_marker_cache_root_key = root_key
+        self._sync_tree_multi_view_markers_to_model()
+
+    def _refresh_tree_multi_view_markers(
+        self,
+        *,
+        full_scan: bool = False,
+        changed_path_key: str | None = None,
+    ) -> None:
+        """Update tree badges cheaply and reserve recursive scans for root refreshes."""
+        root = getattr(self, "root", None)
+        if not isinstance(root, Path) or not root.exists():
+            self._rebuild_tree_multi_view_marker_cache()
+            return
+
+        root_key = self._path_key(root)
+        if full_scan or self._tree_marker_cache_root_key != root_key:
+            self._start_tree_marker_scan()
+            return
+
+        if changed_path_key:
+            if self._active_tree_marker_scan_workers:
+                self._tree_marker_scan_dirty_paths.add(changed_path_key)
+            self._update_tree_multi_view_markers_for_path_key(
+                changed_path_key, root_key=root_key
+            )
+            self._sync_tree_multi_view_markers_to_model()
 
     def _current_search_terms(self) -> list[str]:
         """Extract searchable terms from the current query (operators excluded)."""
@@ -13328,7 +12545,6 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_text_highlights = self._load_text_highlights_for_path_key(
             next_path_key
         )
-        self._refresh_tree_multi_view_markers()
         # Explicitly clear any stale overlay at document entry before
         # considering whether the new document needs one.
         self._stop_restore_overlay_monitor()

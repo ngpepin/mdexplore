@@ -10,6 +10,8 @@ still lives primarily in `mdexplore.py`. In practice:
 
 - `mdexplore.py` still owns preview HTML generation, cache injection, and all
   in-page JavaScript orchestration.
+- `mdexplore_app/tree.py` and `mdexplore_app/tabs.py` now own the extracted
+  tree-pane and tab-bar UI support classes, but not render control flow.
 - `mdexplore_app/pdf.py` owns PDF footer stamping and related PDF post-pass
   helpers.
 - `mdexplore_app/workers.py` owns the background worker classes used by the
