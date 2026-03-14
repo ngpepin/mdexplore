@@ -9,10 +9,10 @@ This UML file keeps those areas abstracted at system/class boundaries to avoid
 duplicating low-level render logic across two docs.
 
 Low-risk modularization note: support code now lives in `mdexplore_app/`
-(`constants.py`, `runtime.py`, `pdf.py`, `icons.py`, `workers.py`), while the
-main orchestration, renderer/template logic, and UI state machine remain in
-`mdexplore.py`. The diagrams below show that split at subsystem boundaries
-rather than expanding every extracted helper inline.
+(`constants.py`, `runtime.py`, `pdf.py`, `icons.py`, `workers.py`, `tree.py`,
+`tabs.py`), while the main orchestration, renderer/template logic, and UI
+state machine remain in `mdexplore.py`. The diagrams below show that split at
+subsystem boundaries rather than expanding every extracted helper inline.
 
 ## 1. System Architecture
 
@@ -34,6 +34,8 @@ node "Ubuntu Desktop Session" as Desktop {
     component "runtime.py" as RuntimeSupport
     component "pdf.py" as PdfSupport
     component "icons.py" as IconSupport
+    component "tree.py" as TreeSupport
+    component "tabs.py" as TabSupport
     component "workers.py" as WorkerSupport
   }
   component "QWebEngineView\nPreview Pane" as WebView
@@ -78,6 +80,8 @@ Window --> ConstantsSupport
 Window --> RuntimeSupport
 Window --> PdfSupport
 Window --> IconSupport
+Window --> TreeSupport
+Window --> TabSupport
 Window --> WorkerSupport
 
 Model --> MdFS : list dirs + *.md
@@ -254,6 +258,8 @@ class "mdexplore_app.constants" as ConstantsSupportBoundary
 class "mdexplore_app.runtime" as RuntimeSupportBoundary
 class "mdexplore_app.pdf" as PdfSupportBoundary
 class "mdexplore_app.icons" as IconSupportBoundary
+class "mdexplore_app.tree" as TreeSupportBoundary
+class "mdexplore_app.tabs" as TabSupportBoundary
 class "mdexplore_app.workers" as WorkerSupportBoundary
 
 class QApplication
@@ -279,8 +285,12 @@ MdExploreWindow ..> ConstantsSupportBoundary
 MdExploreWindow ..> RuntimeSupportBoundary
 MdExploreWindow ..> PdfSupportBoundary
 MdExploreWindow ..> IconSupportBoundary
+MdExploreWindow ..> TreeSupportBoundary
+MdExploreWindow ..> TabSupportBoundary
 MdExploreWindow ..> WorkerSupportBoundary
 ColorizedMarkdownModel ..> IconSupportBoundary
+ColorizedMarkdownModel ..> TreeSupportBoundary
+ViewTabBar ..> TabSupportBoundary
 MarkdownRenderer ..> ConstantsSupportBoundary
 @enduml
 ```
