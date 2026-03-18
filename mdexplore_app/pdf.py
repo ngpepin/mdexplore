@@ -510,8 +510,12 @@ def stamp_pdf_page_numbers(
         content_source_width = crop_right - crop_left
         content_source_height = crop_top - crop_bottom
 
-        page_width = source_height if is_landscape_page else source_width
-        page_height = source_width if is_landscape_page else source_height
+        if is_landscape_page:
+            page_width = max(source_width, source_height)
+            page_height = min(source_width, source_height)
+        else:
+            page_width = min(source_width, source_height)
+            page_height = max(source_width, source_height)
 
         side_margin, top_margin, footer_band_height = page_layout_bands(
             page_width=page_width,

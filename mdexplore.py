@@ -5374,6 +5374,12 @@ class MdExploreWindow(QMainWindow):
         self._active_pdf_workers: set[PdfExportWorker] = set()
         self._pdf_export_in_progress = False
         self._pdf_export_source_key: str | None = None
+        self._preview_load_in_progress = False
+        self._pdf_diagram_ready_by_key: dict[str, bool] = {}
+        self._pdf_diagram_settle_deadline_by_key: dict[str, float] = {}
+        self._pdf_diagram_probe_expected_key: str | None = None
+        self._pdf_diagram_probe_inflight = False
+        self._pdf_diagram_probe_started_at = 0.0
         # PDF export should ignore preview-only zoom. Capture the user's
         # current QWebEngine zoom factor so export can temporarily reset to
         # 100% and then restore the original interactive scale afterward.
@@ -5492,6 +5498,11 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay_show_timer.setSingleShot(True)
         self._restore_overlay_show_timer.setInterval(RESTORE_OVERLAY_SHOW_DELAY_MS)
         self._restore_overlay_show_timer.timeout.connect(self._show_restore_overlay_now)
+        self._pdf_diagram_probe_timer = QTimer(self)
+        self._pdf_diagram_probe_timer.setInterval(220)
+        self._pdf_diagram_probe_timer.timeout.connect(
+            self._probe_pdf_diagram_readiness
+        )
         # Keep user-adjusted tree/preview pane widths for this app run.
         self._session_splitter_sizes: list[int] | None = None
         self._initial_split_applied = False
@@ -5575,6 +5586,9 @@ class MdExploreWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_directory_view)
 
         self.pdf_btn = QPushButton("PDF")
+        self.pdf_btn.setToolTip(
+            "Export the currently previewed markdown rendering to PDF"
+        )
         self.pdf_btn.clicked.connect(self._export_current_preview_pdf)
 
         self.add_view_btn = QPushButton("Add View")
@@ -5760,6 +5774,7 @@ class MdExploreWindow(QMainWindow):
             )
         # Root is initialized after widgets exist so view/model indexes are valid.
         self._set_root_directory(self.root)
+        self._update_pdf_button_state()
         self._add_shortcuts()
         self.model.directoryLoaded.connect(self._maybe_apply_initial_split)
         QTimer.singleShot(0, self._maybe_apply_initial_split)
@@ -7940,6 +7955,225 @@ class MdExploreWindow(QMainWindow):
                 pending += 1
         return (done, pending, failed)
 
+    def _has_preview_render_inflight_for_key(self, path_key: str | None) -> bool:
+        """Return whether the current preview request is still rendering in background."""
+        if not path_key:
+            return False
+        active_request_id = int(self._render_request_id)
+        for worker in tuple(self._active_render_workers):
+            if int(getattr(worker, "request_id", -1)) != active_request_id:
+                continue
+            worker_path = getattr(worker, "path", None)
+            if not isinstance(worker_path, Path):
+                continue
+            try:
+                worker_key = str(worker_path.resolve())
+            except Exception:
+                worker_key = str(worker_path)
+            if worker_key == path_key:
+                return True
+        return False
+
+    def _preview_has_pending_plantuml_for_key(self, path_key: str | None) -> bool:
+        """Return whether any PlantUML placeholder for one document is still pending."""
+        if not path_key:
+            return False
+        placeholders = self._plantuml_placeholders_by_doc.get(path_key, {})
+        if not isinstance(placeholders, dict) or not placeholders:
+            return False
+        for hash_key in placeholders:
+            status, _payload = self._plantuml_results.get(hash_key, ("pending", ""))
+            if status not in {"done", "error"}:
+                return True
+        return False
+
+    def _stop_pdf_diagram_readiness_monitor(self) -> None:
+        """Stop periodic JS readiness probing for PDF button gating."""
+        self._pdf_diagram_probe_expected_key = None
+        self._pdf_diagram_probe_inflight = False
+        self._pdf_diagram_probe_started_at = 0.0
+        if hasattr(self, "_pdf_diagram_probe_timer"):
+            self._pdf_diagram_probe_timer.stop()
+
+    def _start_pdf_diagram_readiness_monitor(self, expected_key: str) -> None:
+        """Start periodic JS readiness probing for one active preview key."""
+        if not expected_key:
+            return
+        if self._pdf_diagram_probe_expected_key != expected_key:
+            self._pdf_diagram_probe_expected_key = expected_key
+            self._pdf_diagram_probe_inflight = False
+            self._pdf_diagram_probe_started_at = 0.0
+        if not self._pdf_diagram_probe_timer.isActive():
+            self._pdf_diagram_probe_timer.start()
+
+    def _probe_pdf_diagram_readiness(self) -> None:
+        """Probe in-page diagram readiness so PDF button reflects true export readiness."""
+        expected_key = self._pdf_diagram_probe_expected_key
+        if not expected_key:
+            self._stop_pdf_diagram_readiness_monitor()
+            return
+        if self._current_preview_path_key() != expected_key:
+            self._stop_pdf_diagram_readiness_monitor()
+            return
+        if self._preview_load_in_progress or self._pdf_export_in_progress:
+            return
+
+        _has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+            expected_key
+        )
+        if not (has_mermaid or has_plantuml):
+            self._pdf_diagram_ready_by_key[expected_key] = True
+            self._stop_pdf_diagram_readiness_monitor()
+            self._update_pdf_button_state()
+            return
+        if self._preview_has_pending_plantuml_for_key(expected_key):
+            self._pdf_diagram_ready_by_key[expected_key] = False
+            return
+        if has_plantuml and not has_mermaid:
+            self._pdf_diagram_ready_by_key[expected_key] = True
+            self._stop_pdf_diagram_readiness_monitor()
+            self._update_pdf_button_state()
+            return
+
+        if self._pdf_diagram_probe_inflight:
+            if (time.monotonic() - self._pdf_diagram_probe_started_at) < 1.8:
+                return
+            self._pdf_diagram_probe_inflight = False
+            self._pdf_diagram_probe_started_at = 0.0
+
+        self._pdf_diagram_probe_inflight = True
+        self._pdf_diagram_probe_started_at = time.monotonic()
+        js = """
+(() => {
+  const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid"));
+  const hasMermaidNodes = mermaidBlocks.length > 0;
+  const hasPendingMermaid = mermaidBlocks.some((block) =>
+    block instanceof HTMLElement && block.classList.contains("mermaid-pending")
+  );
+  const mermaidReady =
+    !hasMermaidNodes || (!!window.__mdexploreMermaidReady && !hasPendingMermaid);
+
+  const hasPendingPlantUml = !!document.querySelector(".plantuml-pending");
+  const plantumlImages = Array.from(document.querySelectorAll("img.plantuml"));
+  const plantumlImagesReady = plantumlImages.every((img) =>
+    !(img instanceof HTMLImageElement) || (img.complete && img.naturalWidth > 0)
+  );
+  const plantumlDomReady = !hasPendingPlantUml && plantumlImagesReady;
+
+  return { mermaidReady, plantumlDomReady };
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, key=expected_key: self._on_pdf_diagram_readiness_probe_result(
+                key, result
+            ),
+        )
+
+    def _on_pdf_diagram_readiness_probe_result(self, expected_key: str, result) -> None:
+        """Handle JS readiness probe response for diagram-aware PDF button gating."""
+        self._pdf_diagram_probe_inflight = False
+        self._pdf_diagram_probe_started_at = 0.0
+        if self._pdf_diagram_probe_expected_key != expected_key:
+            return
+        if self._current_preview_path_key() != expected_key:
+            self._stop_pdf_diagram_readiness_monitor()
+            self._update_pdf_button_state()
+            return
+
+        parsed_result = result
+        if isinstance(result, str):
+            result_text = result.strip()
+            if result_text.startswith("{") and result_text.endswith("}"):
+                try:
+                    parsed_result = json.loads(result_text)
+                except Exception:
+                    parsed_result = result
+
+        _has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+            expected_key
+        )
+        parsed_is_dict = isinstance(parsed_result, dict)
+        settle_deadline = float(
+            self._pdf_diagram_settle_deadline_by_key.get(expected_key, 0.0)
+        )
+        settle_window_elapsed = settle_deadline <= 0.0 or (
+            time.monotonic() >= settle_deadline
+        )
+        mermaid_ready = True
+        plantuml_dom_ready = True
+        if has_mermaid:
+            if parsed_is_dict:
+                mermaid_ready = bool(parsed_result.get("mermaidReady"))
+            else:
+                mermaid_ready = settle_window_elapsed
+        if has_plantuml:
+            if parsed_is_dict:
+                plantuml_dom_ready = bool(parsed_result.get("plantumlDomReady"))
+            else:
+                plantuml_dom_ready = True
+        if self._preview_has_pending_plantuml_for_key(expected_key):
+            plantuml_dom_ready = False
+
+        diagrams_ready = mermaid_ready and plantuml_dom_ready
+        self._pdf_diagram_ready_by_key[expected_key] = diagrams_ready
+        if diagrams_ready:
+            self._stop_pdf_diagram_readiness_monitor()
+        self._update_pdf_button_state()
+
+    def _update_pdf_button_state(self) -> None:
+        """Enable PDF action only when export can run against a stable preview."""
+        if not hasattr(self, "pdf_btn"):
+            return
+
+        default_tooltip = "Export the currently previewed markdown rendering to PDF"
+        enabled = not self._pdf_export_in_progress
+        tooltip = default_tooltip
+        current_key = self._current_preview_path_key()
+
+        if self._pdf_export_in_progress:
+            tooltip = "PDF export unavailable while another PDF export is in progress"
+        elif current_key is not None:
+            _has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+                current_key
+            )
+            has_diagrams = bool(has_mermaid or has_plantuml)
+            if self._preview_load_in_progress:
+                enabled = False
+                tooltip = "PDF export unavailable while preview content is loading"
+                if has_diagrams:
+                    self._pdf_diagram_ready_by_key[current_key] = False
+            elif self._has_preview_render_inflight_for_key(current_key):
+                enabled = False
+                tooltip = "PDF export unavailable while preview rendering is still in progress"
+                if has_diagrams:
+                    self._pdf_diagram_ready_by_key[current_key] = False
+            elif has_diagrams:
+                has_pending_plantuml = self._preview_has_pending_plantuml_for_key(
+                    current_key
+                )
+                if has_pending_plantuml:
+                    self._pdf_diagram_ready_by_key[current_key] = False
+                diagrams_ready = bool(self._pdf_diagram_ready_by_key.get(current_key, False))
+                if not diagrams_ready:
+                    enabled = False
+                    tooltip = (
+                        "PDF export unavailable while diagrams are rendering or "
+                        "cached diagram output is being restored"
+                    )
+                    self._start_pdf_diagram_readiness_monitor(current_key)
+                elif self._pdf_diagram_probe_expected_key == current_key:
+                    self._stop_pdf_diagram_readiness_monitor()
+            else:
+                self._pdf_diagram_ready_by_key[current_key] = True
+                if self._pdf_diagram_probe_expected_key == current_key:
+                    self._stop_pdf_diagram_readiness_monitor()
+        elif self._pdf_diagram_probe_expected_key is not None:
+            self._stop_pdf_diagram_readiness_monitor()
+
+        self.pdf_btn.setEnabled(enabled)
+        self.pdf_btn.setToolTip(tooltip)
+
     def _show_preview_progress_status(self) -> None:
         """Publish a detailed current-file status while preview assets settle."""
         if self.current_file is None:
@@ -7986,6 +8220,7 @@ class MdExploreWindow(QMainWindow):
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self._stop_restore_overlay_monitor()
+        self._stop_pdf_diagram_readiness_monitor()
         self._capture_current_preview_scroll(force=True)
         self._persist_document_view_session()
         self._capture_splitter_sizes_for_session()
@@ -7993,6 +8228,8 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         self.last_directory_selection = self.root
         self.current_file = None
+        self._preview_load_in_progress = False
+        self._pdf_diagram_settle_deadline_by_key.clear()
         self._current_document_total_lines = 1
         self._reset_document_views()
         self._clear_current_preview_signature()
@@ -8015,20 +8252,26 @@ class MdExploreWindow(QMainWindow):
         self._cancel_pending_preview_render()
         self._rerun_active_search_for_scope()
         self._update_add_view_button_state()
+        self._update_pdf_button_state()
         self._refresh_tree_multi_view_markers(full_scan=True)
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
         """Apply deferred in-preview highlighting after a page finishes loading."""
+        self._preview_load_in_progress = False
         if not ok:
             self._stop_restore_overlay_monitor()
+            self._stop_pdf_diagram_readiness_monitor()
             self.statusBar().showMessage("Preview load failed", 5000)
+            self._update_pdf_button_state()
             return
         current_key = self._current_preview_path_key()
         if current_key is None:
             self._stop_restore_overlay_monitor()
+            self._stop_pdf_diagram_readiness_monitor()
+            self._update_pdf_button_state()
             return
-        has_math, has_mermaid, _has_plantuml = self._preview_feature_flags_for_key(
+        has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
             current_key
         )
         has_client_renderers = has_math or has_mermaid
@@ -8104,6 +8347,22 @@ class MdExploreWindow(QMainWindow):
         self._request_active_view_top_line_update(force=True)
         self._show_preview_progress_status()
         self._check_restore_overlay_progress()
+        has_diagrams = bool(has_mermaid or has_plantuml)
+        if has_diagrams:
+            settle_deadline = 0.0
+            if has_mermaid:
+                # Cached Mermaid restore and post-load renderer retries are
+                # intentionally staggered; keep PDF disabled during this window.
+                settle_deadline = time.monotonic() + 2.8
+            self._pdf_diagram_settle_deadline_by_key[current_key] = settle_deadline
+            self._pdf_diagram_ready_by_key[current_key] = False
+            self._start_pdf_diagram_readiness_monitor(current_key)
+        else:
+            self._pdf_diagram_settle_deadline_by_key[current_key] = 0.0
+            self._pdf_diagram_ready_by_key[current_key] = True
+            if self._pdf_diagram_probe_expected_key == current_key:
+                self._stop_pdf_diagram_readiness_monitor()
+        self._update_pdf_button_state()
 
     def _trigger_client_renderers_for(self, expected_key: str) -> None:
         """Run in-page renderer helpers only if the same preview is still active."""
@@ -12093,6 +12352,7 @@ class MdExploreWindow(QMainWindow):
         self._set_preview_html(
             self._inject_mermaid_cache_seed(html_doc, path_key), base_url
         )
+        self._update_pdf_button_state()
 
     @staticmethod
     def _doc_id_for_path(path_key: str) -> str:
@@ -12414,6 +12674,8 @@ class MdExploreWindow(QMainWindow):
             if hash_key in current_placeholders:
                 self._show_preview_progress_status()
                 self._check_restore_overlay_progress()
+                self._start_pdf_diagram_readiness_monitor(current_key)
+        self._update_pdf_button_state()
 
     def _apply_plantuml_result_to_current_preview(self, hash_key: str) -> None:
         if self.current_file is None:
@@ -12540,8 +12802,13 @@ class MdExploreWindow(QMainWindow):
             self._current_close_term_groups() if should_highlight_search else []
         )
         self.statusBar().showMessage(f"Loading preview content: {path.name}...")
+        self._preview_load_in_progress = True
+        self._pdf_diagram_ready_by_key[next_path_key] = False
+        self._pdf_diagram_settle_deadline_by_key[next_path_key] = 0.0
+        self._stop_pdf_diagram_readiness_monitor()
 
         self.current_file = path
+        self._update_pdf_button_state()
         self._current_preview_text_highlights = self._load_text_highlights_for_path_key(
             next_path_key
         )
@@ -12645,7 +12912,7 @@ class MdExploreWindow(QMainWindow):
     def _set_pdf_export_busy(self, busy: bool) -> None:
         """Toggle PDF export UI state while async export is running."""
         self._pdf_export_in_progress = busy
-        self.pdf_btn.setEnabled(not busy)
+        self._update_pdf_button_state()
 
     def _prepare_preview_zoom_for_pdf_export(self) -> None:
         """Temporarily reset preview-wide zoom so PDF snapshots use 100% scale."""
@@ -12755,13 +13022,19 @@ class MdExploreWindow(QMainWindow):
     break-before: page !important;
     page-break-before: always !important;
   }
+  .mdexplore-print-landscape-start {
+    display: block !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    break-before: page !important;
+    page-break-before: always !important;
+    page: mdexploreLandscape !important;
+  }
   hr.mdexplore-print-skip {
     display: none !important;
   }
   .mdexplore-print-block.mdexplore-print-landscape-page {
-    page: mdexploreLandscape;
-    break-before: page;
-    page-break-before: always;
     break-after: page;
     page-break-after: always;
   }
@@ -12799,9 +13072,6 @@ class MdExploreWindow(QMainWindow):
     page-break-inside: avoid !important;
   }
   .mdexplore-fence.mdexplore-print-landscape-page {
-    page: mdexploreLandscape;
-    break-before: page;
-    page-break-before: always;
     break-after: page;
     page-break-after: always;
   }
@@ -12869,6 +13139,10 @@ class MdExploreWindow(QMainWindow):
     white-space: pre-wrap !important;
     overflow-wrap: anywhere !important;
     word-break: break-word !important;
+  }
+  pre.mdexplore-print-pre-keep {
+    break-inside: avoid-page !important;
+    page-break-inside: avoid !important;
   }
   pre > code,
   pre code,
@@ -14053,6 +14327,48 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     const collectHeadingClusterBeforeFence = (fence) => {
       const headings = [];
       let cursor = previousMeaningfulElement(fence);
+      const isShortLeadParagraph = (node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        if (String(node.tagName || "").toLowerCase() !== "p") {
+          return false;
+        }
+        const leadText = String(node.textContent || "").trim();
+        const leadWords = leadText ? leadText.split(/\s+/).filter(Boolean).length : 0;
+        return leadWords > 0 && leadWords <= 48;
+      };
+      if (
+        cursor instanceof HTMLElement &&
+        cursor.classList.contains("mdexplore-print-block")
+      ) {
+        const children = Array.from(cursor.children).filter(
+          (child) => child instanceof HTMLElement
+        );
+        let headingCount = 0;
+        let paragraphCount = 0;
+        let valid = children.length > 0;
+        for (const child of children) {
+          if (headingLevel(child) > 0) {
+            headingCount += 1;
+            continue;
+          }
+          if (isShortLeadParagraph(child)) {
+            paragraphCount += 1;
+            continue;
+          }
+          valid = false;
+          break;
+        }
+        if (valid && headingCount > 0 && paragraphCount <= 1) {
+          return children;
+        }
+      }
+      let leadParagraph = null;
+      if (isShortLeadParagraph(cursor)) {
+        leadParagraph = cursor;
+        cursor = previousMeaningfulElement(cursor);
+      }
       while (cursor instanceof HTMLElement) {
         const level = headingLevel(cursor);
         if (level <= 0) {
@@ -14060,6 +14376,12 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         }
         headings.unshift(cursor);
         cursor = previousMeaningfulElement(cursor);
+      }
+      if (headings.length <= 0) {
+        return [];
+      }
+      if (leadParagraph instanceof HTMLElement) {
+        headings.push(leadParagraph);
       }
       return headings;
     };
@@ -14110,6 +14432,26 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const marker = document.createElement("div");
       marker.className = "mdexplore-print-sequence-page-break";
       fence.parentNode.insertBefore(marker, fence);
+    };
+
+    // Landscape page name assignment is separated into an explicit start marker
+    // so Chromium does not name the preceding prose page as landscape.
+    const ensureLandscapeStartMarker = (targetBlock) => {
+      if (!(targetBlock instanceof HTMLElement) || !targetBlock.parentNode) {
+        return null;
+      }
+      const previousSibling = targetBlock.previousSibling;
+      const alreadyMarked =
+        previousSibling instanceof HTMLElement &&
+        previousSibling.classList.contains("mdexplore-print-landscape-start");
+      if (alreadyMarked) {
+        return previousSibling;
+      }
+      const marker = document.createElement("div");
+      marker.className = "mdexplore-print-landscape-start";
+      marker.dataset.mdexplorePrintLandscapeStart = "1";
+      targetBlock.parentNode.insertBefore(marker, targetBlock);
+      return marker;
     };
 
     // Landscape sections need an explicit block wrapper so Chromium applies
@@ -14182,7 +14524,37 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       listNode.parentNode.insertBefore(wrapper, previous);
       wrapper.appendChild(previous);
       wrapper.appendChild(listNode);
+      const next = nextMeaningfulElement(wrapper);
+      if (next instanceof HTMLElement && next.parentNode === wrapper.parentNode) {
+        const nextLevel = headingLevel(next);
+        if (nextLevel > 0 && nextLevel <= 6) {
+          const nextFence = nextMeaningfulElement(next);
+          if (
+            nextFence instanceof HTMLElement &&
+            nextFence.classList.contains("mdexplore-fence") &&
+            nextFence.parentNode === wrapper.parentNode &&
+            items.length <= 2
+          ) {
+            wrapper.appendChild(next);
+            wrapper.appendChild(nextFence);
+          }
+        }
+      }
       return wrapper;
+    };
+
+    const markShortPreKeep = (preNode) => {
+      if (!(preNode instanceof HTMLElement) || preNode.closest(".mdexplore-fence")) {
+        return;
+      }
+      const text = String(preNode.textContent || "");
+      const lines = text
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (lines.length > 0 && lines.length <= 12) {
+        preNode.classList.add("mdexplore-print-pre-keep");
+      }
     };
 
     // Keep-together sections receive explicit width/height CSS variables so
@@ -14237,10 +14609,28 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       };
     };
 
+    // Preflight can rerun while waiting for async readiness; clear any prior
+    // landscape tokens first so wrapper unwrapping cannot strand stale tokens
+    // as standalone nodes that later paginate into blank pages.
+    for (const token of Array.from(document.querySelectorAll(".mdexplore-pdf-landscape-token"))) {
+      if (token instanceof HTMLElement) {
+        token.remove();
+      }
+    }
     unwrapPrintBlocks();
     for (const marker of Array.from(document.querySelectorAll(".mdexplore-print-sequence-page-break"))) {
       if (marker instanceof HTMLElement) {
         marker.remove();
+      }
+    }
+    for (const marker of Array.from(document.querySelectorAll(".mdexplore-print-landscape-start[data-mdexplore-print-landscape-start='1']"))) {
+      if (marker instanceof HTMLElement) {
+        marker.remove();
+      }
+    }
+    for (const preNode of Array.from(document.querySelectorAll("pre.mdexplore-print-pre-keep"))) {
+      if (preNode instanceof HTMLElement) {
+        preNode.classList.remove("mdexplore-print-pre-keep");
       }
     }
     for (const fence of Array.from(document.querySelectorAll(".mdexplore-fence"))) {
@@ -14285,6 +14675,26 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           }
           cluster.push(next);
           cursor = next;
+        }
+      }
+
+      // Prevent orphaned section headings: when a major heading is followed by
+      // a subordinate heading (for example H3 then H4), keep them together so
+      // the parent heading is not left alone at a page boundary.
+      if (level <= 3) {
+        const clusterTail = cluster[cluster.length - 1];
+        const nextHeading = nextMeaningfulElement(clusterTail);
+        const nextHeadingLevel = headingLevel(nextHeading);
+        if (
+          nextHeading instanceof HTMLElement &&
+          nextHeading.parentNode === heading.parentNode &&
+          !(nextHeading.parentElement instanceof HTMLElement &&
+            nextHeading.parentElement.classList.contains("mdexplore-print-block")) &&
+          nextHeadingLevel > level &&
+          nextHeadingLevel <= 6 &&
+          !nextHeading.classList.contains("mdexplore-fence")
+        ) {
+          cluster.push(nextHeading);
         }
       }
 
@@ -14367,6 +14777,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     for (const listNode of Array.from(document.querySelectorAll("ol, ul"))) {
       maybeWrapLeadInList(listNode);
     }
+    for (const preNode of Array.from(document.querySelectorAll("pre"))) {
+      markShortPreKeep(preNode);
+    }
 
     for (const fence of Array.from(document.querySelectorAll(".mdexplore-fence"))) {
       if (!(fence instanceof HTMLElement)) {
@@ -14381,11 +14794,22 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       }
       // Move any immediately-preceding heading cluster into the fence so the
       // pagination solver can treat "heading + diagram" as one print section.
+      const headingSourceBlock = previousMeaningfulElement(fence);
       const headingCluster = collectHeadingClusterBeforeFence(fence);
       if (headingCluster.length > 0) {
-        for (const heading of headingCluster) {
-          fence.insertBefore(heading, fence.firstChild);
-          heading.classList.add("mdexplore-print-heading-anchor");
+        for (const node of Array.from(headingCluster).reverse()) {
+          fence.insertBefore(node, fence.firstChild);
+          if (headingLevel(node) > 0) {
+            node.classList.add("mdexplore-print-heading-anchor");
+          }
+        }
+        if (
+          headingSourceBlock instanceof HTMLElement &&
+          headingSourceBlock.classList.contains("mdexplore-print-block") &&
+          headingSourceBlock.childElementCount <= 0 &&
+          !String(headingSourceBlock.textContent || "").trim()
+        ) {
+          headingSourceBlock.remove();
         }
         fence.classList.add("mdexplore-print-with-heading");
       }
@@ -14438,6 +14862,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         availableHeightLandscape / size.height,
         fontCapScale,
       );
+      const portraitWidthScale = printableWidthPortrait / Math.max(1, size.width);
+      const portraitHeightScale = availableHeightPortrait / Math.max(1, size.height);
 
       const portraitFontPx = portraitScale * maxFontPx;
       const landscapeFontPx = landscapeScale * maxFontPx;
@@ -14448,16 +14874,34 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         landscapeScale > (portraitScale * PRINT_LAYOUT_KNOBS.wideDiagramLandscapeGain);
       const shortWideFlowchartCandidate =
         isFlowchartMermaid &&
-        landscapeScale > (portraitScale * 1.02) &&
-        size.width > (printableWidthPortrait * 0.92) &&
-        size.height < (availableHeightPortrait * 0.72);
+        landscapeScale >= (portraitScale * 0.99) &&
+        size.width > (printableWidthPortrait * 0.62) &&
+        aspectRatio >= 1.45;
+      const sequenceLandscapeCandidate =
+        isSequenceMermaid &&
+        aspectRatio >= 1.35 &&
+        portraitScale <= 0.45 &&
+        landscapeScale >= (portraitScale * 0.93) &&
+        size.width > (printableWidthPortrait * 0.9);
+      const plantumlWideLandscapeCandidate =
+        hasPlantUml &&
+        aspectRatio >= 1.08 &&
+        portraitWidthScale <= (portraitHeightScale + 0.01) &&
+        landscapeScale >= (portraitScale * 1.03) &&
+        size.width > (printableWidthPortrait * 0.84);
 
       // Landscape is only selected when it provides a meaningful improvement;
       // portrait should remain the default so later pages resume normal flow.
       let useLandscape = false;
       if (
         canKeepLandscape &&
-        (!canKeepPortrait || wideLandscapeCandidate || shortWideFlowchartCandidate)
+        (
+          !canKeepPortrait ||
+          wideLandscapeCandidate ||
+          shortWideFlowchartCandidate ||
+          sequenceLandscapeCandidate ||
+          plantumlWideLandscapeCandidate
+        )
       ) {
         useLandscape = true;
       } else if (
@@ -14483,7 +14927,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const diagramHeight = Math.max(1, Math.round(size.height * chosenScale));
 
       if (useLandscape) {
-        ensurePrintBlockWrapper(fence, ["mdexplore-print-landscape-page"]);
+        const landscapeBlock = ensurePrintBlockWrapper(fence, ["mdexplore-print-landscape-page"]);
+        ensureLandscapeStartMarker(landscapeBlock || fence);
         if (headingText) {
           landscapeHeadings.push(headingText);
         }
@@ -14585,7 +15030,16 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
   const mermaidReady = !hasMermaid || !!window.__mdexplorePdfMermaidReady;
   const fontsReady = !document.fonts || document.fonts.status === "loaded";
 
-  return { mathReady, mermaidReady, plantumlReady, fontsReady, hasMath, hasMermaid, hasPlantUml, diagramLayout };
+  return JSON.stringify({
+    mathReady,
+    mermaidReady,
+    plantumlReady,
+    fontsReady,
+    hasMath,
+    hasMermaid,
+    hasPlantUml,
+    diagramLayout,
+  });
 })();
 """
         js = js.replace(
@@ -14611,16 +15065,25 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         self, output_path: Path, attempt: int, source_key: str, result
     ) -> None:
         """Continue waiting until print assets are ready, then trigger print."""
+        parsed_result = result
+        if isinstance(result, str):
+            result_text = result.strip()
+            if result_text.startswith("{") and result_text.endswith("}"):
+                try:
+                    parsed_result = json.loads(result_text)
+                except Exception:
+                    parsed_result = result
+
         math_ready = False
         mermaid_ready = False
         plantuml_ready = False
         fonts_ready = False
-        if isinstance(result, dict):
-            math_ready = bool(result.get("mathReady"))
-            mermaid_ready = bool(result.get("mermaidReady"))
-            plantuml_ready = bool(result.get("plantumlReady"))
-            fonts_ready = bool(result.get("fontsReady"))
-            diagram_layout = result.get("diagramLayout")
+        if isinstance(parsed_result, dict):
+            math_ready = bool(parsed_result.get("mathReady"))
+            mermaid_ready = bool(parsed_result.get("mermaidReady"))
+            plantuml_ready = bool(parsed_result.get("plantumlReady"))
+            fonts_ready = bool(parsed_result.get("fontsReady"))
+            diagram_layout = parsed_result.get("diagramLayout")
             if isinstance(diagram_layout, dict):
                 self._pending_pdf_layout_hints = dict(diagram_layout)
 
