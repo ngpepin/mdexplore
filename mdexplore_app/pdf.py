@@ -77,15 +77,34 @@ def stamp_pdf_page_numbers(
             return True
         collapsed = re.sub(r"\s+", "", normalized)
         return landscape_token_compact in collapsed
-    landscape_flags = [
-        contains_landscape_token(raw_text)
-        or any(heading and heading in page_text for heading in landscape_headings)
-        for raw_text, page_text in zip(raw_page_texts, normalized_page_texts)
+    token_page_flags = [
+        contains_landscape_token(raw_text) for raw_text in raw_page_texts
+    ]
+    landscape_heading_page_flags = [
+        any(heading and heading in page_text for heading in landscape_headings)
+        for page_text in normalized_page_texts
     ]
     diagram_page_flags = [
         any(heading and heading in page_text for heading in diagram_headings)
         for page_text in normalized_page_texts
     ]
+    landscape_flags = list(token_page_flags)
+    for page_index, heading_hit in enumerate(landscape_heading_page_flags):
+        if not heading_hit:
+            continue
+        landscape_flags[page_index] = True
+        previous_index = page_index - 1
+        if (
+            previous_index >= 0
+            and token_page_flags[previous_index]
+            and not landscape_heading_page_flags[previous_index]
+            and not diagram_page_flags[previous_index]
+        ):
+            # Chromium can leak the invisible landscape token onto the
+            # preceding prose page while the real heading+diagram stays on the
+            # next page. Prefer the page that actually contains the landscape
+            # heading/diagram block.
+            landscape_flags[previous_index] = False
 
     def raster_page_bounds() -> list[tuple[float, float, float, float] | None]:
         if not reader.pages:
@@ -423,6 +442,35 @@ def stamp_pdf_page_numbers(
 
     base_body_font_size = estimate_majority_font_size()
 
+    def page_layout_bands(
+        *, page_width: float, page_height: float, is_landscape_page: bool
+    ) -> tuple[float, float, float]:
+        if is_landscape_page:
+            side_margin = max(18.0, min(page_width * 0.05, base_body_font_size * 2.2))
+            top_margin = max(22.0, min(page_height * 0.07, base_body_font_size * 2.7))
+            footer_band_height = max(
+                34.0, min(page_height * 0.11, base_body_font_size * 3.5)
+            )
+            return side_margin, top_margin, footer_band_height
+
+        side_margin = max(34.0, min(page_width * 0.12, base_body_font_size * 4.2))
+        top_margin = max(30.0, min(page_height * 0.10, base_body_font_size * 3.8))
+        footer_band_height = max(
+            42.0, min(page_height * 0.16, base_body_font_size * 4.4)
+        )
+        return side_margin, top_margin, footer_band_height
+
+    def max_page_content_scale(page, *, is_landscape_page: bool, is_diagram_page: bool) -> float:
+        if not (is_diagram_page or is_landscape_page):
+            return 1.0
+
+        page_diagram_font_size = estimate_page_diagram_font_size(page)
+        if page_diagram_font_size <= 0:
+            return 2.75 if is_landscape_page else 1.8
+
+        target_font_size = 30.0 if is_landscape_page else 16.0
+        return max(1.0, min(2.75, target_font_size / page_diagram_font_size))
+
     writer = PdfWriter()
     for page_number, (
         page,
@@ -465,10 +513,10 @@ def stamp_pdf_page_numbers(
         page_width = source_height if is_landscape_page else source_width
         page_height = source_width if is_landscape_page else source_height
 
-        side_margin = max(34.0, min(page_width * 0.12, base_body_font_size * 4.2))
-        top_margin = max(30.0, min(page_height * 0.10, base_body_font_size * 3.8))
-        footer_band_height = max(
-            42.0, min(page_height * 0.16, base_body_font_size * 4.4)
+        side_margin, top_margin, footer_band_height = page_layout_bands(
+            page_width=page_width,
+            page_height=page_height,
+            is_landscape_page=is_landscape_page,
         )
         attached_heading_font_size = 0.0
         attached_heading_block_height = 0.0
@@ -486,13 +534,11 @@ def stamp_pdf_page_numbers(
             - attached_heading_block_height,
         )
 
-        max_safe_scale = 1.0
-        if is_diagram_page or is_landscape_page:
-            page_diagram_font_size = estimate_page_diagram_font_size(page)
-            if page_diagram_font_size > 0:
-                max_safe_scale = max(1.0, min(2.75, 16.0 / page_diagram_font_size))
-            else:
-                max_safe_scale = 2.75 if is_landscape_page else 1.8
+        max_safe_scale = max_page_content_scale(
+            page,
+            is_landscape_page=is_landscape_page,
+            is_diagram_page=is_diagram_page,
+        )
         content_scale = min(
             max_safe_scale,
             content_box_width / content_source_width,

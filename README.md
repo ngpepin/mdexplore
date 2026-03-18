@@ -244,6 +244,10 @@ through `rustup` so it can build `mmdr` locally.
     (multi-shade, with readable dark text).
 - Export auto-scales page content into a print-style layout with top/side margins
   and an uncluttered footer band.
+- Landscape diagram sections are isolated onto dedicated print blocks and use a
+  tighter horizontal margin budget so wide diagrams can make use of the rotated page.
+- Headed landscape sections are anchored to the page that actually contains the
+  diagram heading/content, avoiding earlier prose pages being rotated instead.
 - Footer number font size is matched to the document's dominant scaled body text size.
 - Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
 

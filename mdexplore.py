@@ -14112,6 +14112,79 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       fence.parentNode.insertBefore(marker, fence);
     };
 
+    // Landscape sections need an explicit block wrapper so Chromium applies
+    // page breaks to the section boundary instead of letting adjacent prose
+    // remain on the later rotated page.
+    const ensurePrintBlockWrapper = (node, classNames = []) => {
+      if (!(node instanceof HTMLElement) || !node.parentNode) {
+        return null;
+      }
+      const parent = node.parentElement;
+      if (parent instanceof HTMLElement && parent.classList.contains("mdexplore-print-block")) {
+        parent.dataset.mdexplorePrintBlock = "1";
+        for (const className of classNames) {
+          if (className) {
+            parent.classList.add(className);
+          }
+        }
+        return parent;
+      }
+      const wrapper = document.createElement("div");
+      wrapper.className = "mdexplore-print-block";
+      wrapper.dataset.mdexplorePrintBlock = "1";
+      for (const className of classNames) {
+        if (className) {
+          wrapper.classList.add(className);
+        }
+      }
+      node.parentNode.insertBefore(wrapper, node);
+      wrapper.appendChild(node);
+      return wrapper;
+    };
+
+    // Short lead-in lists read poorly when Chromium leaves only the tail of
+    // the list on a fresh page. Keep a small intro paragraph and the
+    // immediately-following short list together when practical.
+    const maybeWrapLeadInList = (listNode) => {
+      if (!(listNode instanceof HTMLElement) || !listNode.parentNode) {
+        return null;
+      }
+      if (listNode.closest(".mdexplore-fence")) {
+        return null;
+      }
+      const parent = listNode.parentElement;
+      if (parent instanceof HTMLElement && parent.classList.contains("mdexplore-print-block")) {
+        return null;
+      }
+      const items = Array.from(listNode.children).filter((child) => child instanceof HTMLElement);
+      if (items.length <= 0 || items.length > 3) {
+        return null;
+      }
+      const previous = previousMeaningfulElement(listNode);
+      if (!(previous instanceof HTMLElement) || previous.parentNode !== listNode.parentNode) {
+        return null;
+      }
+      if (previous.closest(".mdexplore-fence")) {
+        return null;
+      }
+      const previousParent = previous.parentElement;
+      if (previousParent instanceof HTMLElement && previousParent.classList.contains("mdexplore-print-block")) {
+        return null;
+      }
+      const previousTag = String(previous.tagName || "").toLowerCase();
+      const previousText = String(previous.textContent || "").trim();
+      if (previousTag !== "p" || !previousText || !/[.:]$/.test(previousText)) {
+        return null;
+      }
+      const wrapper = document.createElement("div");
+      wrapper.className = "mdexplore-print-block mdexplore-print-keep";
+      wrapper.dataset.mdexplorePrintBlock = "1";
+      listNode.parentNode.insertBefore(wrapper, previous);
+      wrapper.appendChild(previous);
+      wrapper.appendChild(listNode);
+      return wrapper;
+    };
+
     // Keep-together sections receive explicit width/height CSS variables so
     // the print snapshot path honors the same geometry this solver chose.
     const applyKeepSizing = (fence, sectionWidth, diagramWidth, diagramHeight, headingHeight) => {
@@ -14291,6 +14364,10 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       wrapper.appendChild(nextBlock);
     }
 
+    for (const listNode of Array.from(document.querySelectorAll("ol, ul"))) {
+      maybeWrapLeadInList(listNode);
+    }
+
     for (const fence of Array.from(document.querySelectorAll(".mdexplore-fence"))) {
       if (!(fence instanceof HTMLElement)) {
         continue;
@@ -14326,7 +14403,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
         continue;
       }
 
-      const isSequenceMermaid = hasMermaid && detectMermaidKindForFence(fence) === "sequence";
+      const mermaidKind = hasMermaid ? detectMermaidKindForFence(fence) : "";
+      const isSequenceMermaid = mermaidKind === "sequence";
+      const isFlowchartMermaid = mermaidKind === "flowchart";
       const aspectRatio = size.width / Math.max(1, size.height);
       const maxFontPx = maxSvgFontPxForFence(fence);
       const fontCapScale = maxFontPx > 0 ? (maxPrintDiagramFontPx / maxFontPx) : 1;
@@ -14367,11 +14446,19 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const wideLandscapeCandidate =
         aspectRatio >= PRINT_LAYOUT_KNOBS.wideDiagramAspectRatio &&
         landscapeScale > (portraitScale * PRINT_LAYOUT_KNOBS.wideDiagramLandscapeGain);
+      const shortWideFlowchartCandidate =
+        isFlowchartMermaid &&
+        landscapeScale > (portraitScale * 1.02) &&
+        size.width > (printableWidthPortrait * 0.92) &&
+        size.height < (availableHeightPortrait * 0.72);
 
       // Landscape is only selected when it provides a meaningful improvement;
       // portrait should remain the default so later pages resume normal flow.
       let useLandscape = false;
-      if (canKeepLandscape && (!canKeepPortrait || wideLandscapeCandidate)) {
+      if (
+        canKeepLandscape &&
+        (!canKeepPortrait || wideLandscapeCandidate || shortWideFlowchartCandidate)
+      ) {
         useLandscape = true;
       } else if (
         !canKeepPortrait &&
@@ -14396,7 +14483,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
       const diagramHeight = Math.max(1, Math.round(size.height * chosenScale));
 
       if (useLandscape) {
-        fence.classList.add("mdexplore-print-landscape-page");
+        ensurePrintBlockWrapper(fence, ["mdexplore-print-landscape-page"]);
         if (headingText) {
           landscapeHeadings.push(headingText);
         }
