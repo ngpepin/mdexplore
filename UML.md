@@ -1,6 +1,8 @@
 # mdexplore UML
 
-This document provides a comprehensive PlantUML view of the current `mdexplore` implementation.
+This document provides a subsystem-level PlantUML view of the current
+`mdexplore` implementation across `mdexplore.py`, `mdexplore.sh`, and
+`mdexplore_app/*`.
 All diagrams are embedded so they can be rendered directly by mdexplore (or any Markdown viewer with PlantUML support).
 
 Detailed render/caching forks (GUI vs PDF, JS Mermaid vs Rust Mermaid, cache mode
@@ -40,11 +42,14 @@ node "Ubuntu Desktop Session" as Desktop {
   }
   component "QWebEngineView\nPreview Pane" as WebView
   component "ColorizedMarkdownModel\n(QFileSystemModel)" as Model
+  component "MarkdownTreeItemDelegate\n(tree row painter)" as TreeDelegate
   component "MarkdownRenderer\n(markdown-it + HTML template)" as Renderer
   component "ViewTabBar\n(multi-view tabs)" as ViewTabs
   component "PreviewRenderWorker\n(QThreadPool: render)" as PreviewWorker
+  component "TreeMarkerScanWorker\n(QThreadPool: sidecar scan)" as MarkerWorker
   component "PlantUmlRenderWorker\n(QThreadPool: plantuml)" as PumlWorker
   component "PdfExportWorker\n(QThreadPool: pdf)" as PdfWorker
+  component "mmdr\n(Rust Mermaid renderer)" as MermaidRs
   database "Preview Cache\nmtime+size+html" as PreviewCache
   database "PlantUML Result Cache\nstatus/payload by hash" as PumlCache
   database "Mermaid SVG Cache\nauto/pdf by hash" as MermaidCache
@@ -66,11 +71,13 @@ User --> Launcher : start app
 Launcher --> AppEntry : exec .venv/bin/python mdexplore.py [PATH]
 Launcher --> LocalAssets : detect local JS paths
 AppEntry --> Window : construct UI + timers + pools
-Window --> Model : tree model and color persistence
-Window --> WebView : setHtml + JS bridge
+Window --> Model : tree model, search-hit counts,\nand badge persistence
+Window --> TreeDelegate : filename-only background painting
+Window --> WebView : setHtml/load + JS bridge
 Window --> Renderer : markdown -> HTML
 Window --> ViewTabs : tab state, drag/reorder
-Window --> PreviewWorker : optional background render jobs
+Window --> PreviewWorker : background preview render on cache miss/stale
+Window --> MarkerWorker : async sidecar badge scans
 Window --> PumlWorker : async diagram jobs
 Window --> PdfWorker : async footer stamping
 Window --> PreviewCache
@@ -89,9 +96,13 @@ Model <--> ColorCfg : read/write highlight metadata
 Window <--> UserCfg : persist effective root on close
 Window <--> ViewCfg : persist saved view sessions
 Window <--> HighlightCfg : persist preview text highlights
+MarkerWorker --> ViewCfg : scan persisted view state
+MarkerWorker --> HighlightCfg : scan persisted preview highlights
 Window --> Clipboard : copy files/text/source markdown
 Window --> Vscode : Edit action
-Renderer --> PlantJar : local PlantUML render request
+Renderer --> MermaidRs : local Rust Mermaid render request
+Renderer --> PlantJar : direct PlantUML render when no async resolver
+PumlWorker --> PlantJar : async PlantUML render request
 PlantJar --> Java : java -jar
 Renderer --> LocalAssets : prefer local MathJax/Mermaid
 Renderer --> CDN : fallback when local assets unavailable
@@ -139,10 +150,22 @@ endif
 
 :Configure local renderer overrides
 (MDEXPLORE_MATHJAX_JS / MDEXPLORE_MERMAID_JS);
+:Configure local Rust Mermaid override
+(MDEXPLORE_MERMAID_RS_BIN);
+if (backend explicitly set?) then (no)
+  :Append --mermaid-backend rust;
+endif
+if (DEBUG_MODE=true?) then (yes)
+  :Append --debug;
+endif
 if (TARGET_PATH resolved?) then (yes)
   :Launch mdexplore.py TARGET_PATH;
 else (no)
   :Launch mdexplore.py (cfg/home fallback);
+endif
+if (initial launch failed?) then (yes)
+  :Configure Qt software-render fallback;
+  :Retry launch once;
 endif
 stop
 @enduml
@@ -172,14 +195,24 @@ class ColorizedMarkdownModel {
   +set_persistent_highlight_paths(paths)
 }
 
+class MarkdownTreeItemDelegate {
+  +paint(painter, option, index)
+}
+
 class MarkdownRenderer {
+  -_mermaid_backend_requested: str
+  -_mermaid_backend: str
+  -_mermaid_rs_binary: Path|None
+  -_mermaid_rs_setup_issue: str|None
   -_mathjax_local_script: Path|None
   -_mermaid_local_script: Path|None
   -_plantuml_jar_path: Path|None
   -_plantuml_setup_issue: str|None
   -_plantuml_svg_cache: dict[str, str]
+  -_last_mermaid_pdf_svg_by_hash: dict[str, str]
   -_md: MarkdownIt
-  +render_document(markdown_text, title, plantuml_resolver=None): str
+  +render_document(markdown_text, title, total_lines=None, plantuml_resolver=None): str
+  +take_last_mermaid_pdf_svg_by_hash(): dict[str, str]
   -_render_plantuml_data_uri(code): (str|None, str|None)
   -_prepare_plantuml_source(code): str
   -_prepare_mermaid_source(code): str
@@ -217,9 +250,22 @@ class PdfExportWorkerSignals {
   +finished(output_path_text, error_text)
 }
 
+class TreeMarkerScanWorker {
+  +root: Path
+  +request_id: int
+  +views_file_name: str
+  +highlighting_file_name: str
+  +signals: TreeMarkerScanWorkerSignals
+  +run()
+}
+class TreeMarkerScanWorkerSignals {
+  +finished(request_id, root_key, multi_view_paths, highlighted_paths, error_text)
+}
+
 class ViewTabBar {
   +PASTEL_SEQUENCE: list[str]
   +POSITION_BAR_SEGMENTS: int
+  +MAX_LABEL_CHARS: int
   -_drag_candidate_index: int
   -_dragging_index: int
   +paintEvent(event)
@@ -238,6 +284,8 @@ class MdExploreWindow {
   -cache: dict[path_key -> (mtime,size,html)]
   -_plantuml_results: dict[hash -> (status,payload)]
   -_mermaid_svg_cache_by_mode: dict[mode -> dict[hash->svg]]
+  -_tree_multi_view_marker_paths: set[str]
+  -_tree_highlight_marker_paths: set[str]
   -_preview_scroll_positions: dict[key->y]
   -_document_view_sessions: dict[path_key->session]
   -_current_preview_text_highlights: list[dict]
@@ -245,6 +293,8 @@ class MdExploreWindow {
   +_load_preview(path)
   +_refresh_directory_view()
   +_refresh_tree_multi_view_markers()
+  +_start_tree_marker_scan()
+  +_on_tree_marker_scan_finished(...)
   +_refresh_named_view_markers_in_preview()
   +_run_match_search()
   +_export_current_preview_pdf()
@@ -266,17 +316,22 @@ class QApplication
 class QWebEngineView
 class QFileSystemModel
 class QThreadPool
+class QStyledItemDelegate
 
 MdExploreWindow *-- MarkdownRenderer
 MdExploreWindow *-- ColorizedMarkdownModel
+MdExploreWindow *-- MarkdownTreeItemDelegate
 MdExploreWindow *-- ViewTabBar
 MdExploreWindow *-- QWebEngineView
 MdExploreWindow o-- PreviewRenderWorker
+MdExploreWindow o-- TreeMarkerScanWorker
 MdExploreWindow o-- PlantUmlRenderWorker
 MdExploreWindow o-- PdfExportWorker
 MdExploreWindow o-- QThreadPool
 ColorizedMarkdownModel --|> QFileSystemModel
+MarkdownTreeItemDelegate --|> QStyledItemDelegate
 PreviewRenderWorker --> PreviewRenderWorkerSignals
+TreeMarkerScanWorker --> TreeMarkerScanWorkerSignals
 PlantUmlRenderWorker --> PlantUmlRenderWorkerSignals
 PdfExportWorker --> PdfExportWorkerSignals
 PreviewRenderWorker ..> MarkdownRenderer : creates renderer in worker
@@ -289,6 +344,7 @@ MdExploreWindow ..> TreeSupportBoundary
 MdExploreWindow ..> TabSupportBoundary
 MdExploreWindow ..> WorkerSupportBoundary
 ColorizedMarkdownModel ..> IconSupportBoundary
+ColorizedMarkdownModel ..> RuntimeSupportBoundary
 ColorizedMarkdownModel ..> TreeSupportBoundary
 ViewTabBar ..> TabSupportBoundary
 MarkdownRenderer ..> ConstantsSupportBoundary
@@ -306,6 +362,7 @@ actor User
 participant "QTreeView" as Tree
 participant "MdExploreWindow" as Win
 participant "Preview Cache\nmtime+size+html" as Cache
+participant "PreviewRenderWorker" as Worker
 participant "MarkdownRenderer" as Renderer
 participant "QWebEngineView" as Web
 participant "Worker Pools\n(PlantUML/PDF/optional render)" as Pools
@@ -316,17 +373,23 @@ Win -> Cache : lookup by resolved path + stat
 
 alt cache hit
   Cache --> Win : html
-  Win -> Web : setHtml(injected cache seed)
+  Win -> Web : _set_preview_html(injected cache seed)
 else cache miss/stale
-  Win -> Renderer : render_document(...)
-  Renderer --> Win : html (+ diagram metadata)
+  Win -> Worker : start background render payload build
+  Worker -> Renderer : render_document(...)
+  Renderer --> Worker : html (+ metadata)
+  Worker --> Win : finished(request_id, html, metadata)
   Win -> Cache : store html snapshot
-  Win -> Web : setHtml(injected cache seed)
+  Win -> Web : _set_preview_html(injected cache seed)
 end
 
 Win -> Pools : async diagram/export jobs as needed
 Pools --> Win : completion signals
 Win -> Web : in-place JS patch updates
+note over Win,Web
+  _set_preview_html() uses direct setHtml for
+  normal payloads and temp-file load() for oversized HTML.
+end note
 @enduml
 ```
 
@@ -392,8 +455,8 @@ loop each file
   Win -> Scope : read file name + content
   Win -> Win : predicate(name, content)
 end
-Win -> Model : set_search_match_paths(matches)
-Model --> Tree : bold+italic matched rows
+Win -> Model : set_search_match_counts(match_counts)
+Model --> Tree : hit-count pill + bold/italic matched rows
 Win -> Web : highlight matches in preview (if open file matched)
 
 alt user clicks a color button next to Search
@@ -458,6 +521,7 @@ participant "PdfExportWorker" as PdfWorker
 participant "pypdf + reportlab" as PdfLib
 
 User -> Win : click PDF
+Win -> Win : capture diagram state + reset preview zoom to 100%
 Win -> Web : prepare preview for print snapshot
 Web -> JsRuntime : apply print mode + readiness checks
 JsRuntime --> Win : ready/not-ready loop result
@@ -467,6 +531,7 @@ Win -> PdfWorker : stamp page numbers
 PdfWorker -> PdfLib : page footer processing
 PdfWorker --> Win : export result
 Win -> Web : restore GUI render mode
+Win -> Win : restore interactive preview zoom
 @enduml
 ```
 
@@ -487,6 +552,11 @@ state SingleView {
   [*] --> ActiveView1
   ActiveView1 : one logical view
 }
+note right of SingleView
+  Also covers a sole custom-labeled view:
+  its tab stays visible and supports
+  Return to beginning.
+end note
 
 SingleView --> MultiView : Add View
 MultiView --> MultiView : Add View (max 8)
@@ -505,6 +575,11 @@ SingleView --> SessionSaved : switch to another document
 MultiView --> SessionSaved : switch to another document
 SessionSaved --> SingleView : return document with 1-view session
 SessionSaved --> MultiView : return document with multi-view session
+note right of SessionSaved
+  Per-run state stays in memory.
+  Only explicit multi-view or custom-labeled
+  docs persist to .mdexplore-views.json.
+end note
 
 SingleView --> NoFile : root change / file removed
 MultiView --> NoFile : root change / file removed
@@ -517,7 +592,7 @@ MultiView --> [*] : window close (persist effective root)
 
 ## Notes
 
-- Diagrams are based on current code in `mdexplore.py` and `mdexplore.sh`.
+- Diagrams are based on current code in `mdexplore.py`, `mdexplore.sh`, and `mdexplore_app/*`.
 - Render/caching branch internals are intentionally abstracted here and documented in
   `RENDER-PATHS.md` to keep a single authoritative deep map.
 - Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is also intentionally kept out

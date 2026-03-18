@@ -528,20 +528,29 @@ MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh 
   - Cache ownership and data flow between Python and in-page JavaScript.
   - Restore path after PDF export and why separate Mermaid cache modes exist.
 
+## Behavior Rules Map
+
+- See `RULES.md` for the formal behavior model:
+  - rule hierarchy and precedence,
+  - symbolic invariants and guard/action notation,
+  - decision tables for root selection, backend defaults, and persistence,
+  - state/decision diagrams for launch, preview lifecycle, and PDF export.
+
 ## Project Structure
 
 ```text
-mdexplore.py       # Qt application, file tree, renderer integration
-mdexplore.sh       # launcher (venv create/install/run)
-setup-mdexplore.sh # full bootstrap script (venv/assets/mmdr)
-mdexplore.desktop.sample # sample desktop launcher entry for user customization
-mdexplor-icon.png  # primary app icon asset (preferred)
-requirements.txt   # Python runtime dependencies
-README.md          # project docs
-RENDER-PATHS.md    # detailed render/caching path diagrams + maintenance narrative
-AGENTS.md          # coding-agent maintenance guide
-DESCRIPTION.md     # repository description + suggested topic tags
-LICENSE            # MIT license
+mdexplore.py                  # Qt application, file tree, renderer integration
+mdexplore.sh                  # launcher (venv create/install/run)
+setup-mdexplore.sh            # full bootstrap script (venv/assets/mmdr)
+mdexplore.desktop.sample      # sample desktop launcher entry for user customization
+mdexplor-icon.png             # primary app icon asset (preferred)
+requirements.txt              # Python runtime dependencies
+README.md                     # project docs
+RULES.md                      # formal behavior rules, precedence, and decision diagrams
+RENDER-PATHS.md               # detailed render/caching path diagrams + maintenance narrative
+DEVELOPERS-AGENTS.md          # developer and coding-agent maintenance guide
+DESCRIPTION.md                # repository description + suggested topic tags
+LICENSE                       # MIT license
 ```
 
 ## Development
@@ -597,7 +606,7 @@ If running the launcher appears to do nothing:
 
 1. Keep changes focused and small.
 2. Run syntax checks before submitting.
-3. Update docs (`README.md`, `AGENTS.md`) when behavior changes.
+3. Update docs (`README.md`, `RULES.md`, `DEVELOPERS-AGENTS.md`, and `RENDER-PATHS.md` when relevant) when behavior changes.
 
 ## License
 
