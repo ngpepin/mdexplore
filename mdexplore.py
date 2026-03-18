@@ -5329,6 +5329,8 @@ class MdExploreWindow(QMainWindow):
         ("Blue", "#7bb9ff"),
         ("Orange", "#f6a05f"),
         ("Purple", "#bb9df5"),
+        ("Light Gray", "#d1d5db"),
+        ("Medium Gray", "#9ca3af"),
         ("Red", "#ef7d7d"),
     ]
 
@@ -9854,6 +9856,7 @@ class MdExploreWindow(QMainWindow):
         menu = QMenu(self)
         color_actions: dict[QAction, str] = {}
         clear_action: QAction | None = None
+        clear_in_folder_action: QAction | None = None
 
         if path.is_file() and path.suffix.lower() == ".md":
             for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
@@ -9865,12 +9868,18 @@ class MdExploreWindow(QMainWindow):
             menu.addSeparator()
             clear_action = menu.addAction("Clear Highlight")
 
+        clear_scope = path if path.is_dir() else path.parent
+        clear_in_folder_action = menu.addAction("Clear in Folder")
         clear_all_action = menu.addAction("Clear All")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
             return
+        if clear_in_folder_action is not None and chosen == clear_in_folder_action:
+            self._confirm_and_clear_directory_highlighting(clear_scope)
+            self.tree.viewport().update()
+            return
         if chosen == clear_all_action:
-            self._confirm_and_clear_all_highlighting()
+            self._confirm_and_clear_all_highlighting(clear_scope)
             self.tree.viewport().update()
             return
 
@@ -12151,22 +12160,59 @@ class MdExploreWindow(QMainWindow):
         self._cleanup_preview_temp_files()
         super().closeEvent(event)
 
-    def _confirm_and_clear_all_highlighting(self) -> None:
-        """Prompt and clear all highlight metadata recursively under current scope."""
-        scope = self._highlight_scope_directory()
+    def _confirm_and_clear_directory_highlighting(
+        self, scope: Path | None = None
+    ) -> None:
+        """Prompt and clear file highlights in one directory (non-recursive)."""
+        target_scope = (
+            scope if isinstance(scope, Path) else self._highlight_scope_directory()
+        )
+        if not target_scope.is_dir():
+            return
+        try:
+            display_scope = target_scope.resolve()
+        except Exception:
+            display_scope = target_scope
         reply = QMessageBox.question(
             self,
-            "Clear All Highlights",
-            f"Clear all file highlights recursively under:\n{scope}\n\nThis cannot be undone.",
+            "Clear Folder Highlights",
+            f"Clear all file highlights in this folder only:\n{display_scope}\n\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        cleared = self.model.clear_all_highlights(scope)
+        cleared = self.model.clear_directory_highlights(target_scope)
         self.statusBar().showMessage(
-            f"Cleared {cleared} highlight assignment(s) under {scope}",
+            f"Cleared {cleared} highlight assignment(s) in {display_scope}",
+            4500,
+        )
+
+    def _confirm_and_clear_all_highlighting(self, scope: Path | None = None) -> None:
+        """Prompt and clear all highlight metadata recursively under current scope."""
+        target_scope = (
+            scope if isinstance(scope, Path) else self._highlight_scope_directory()
+        )
+        if not target_scope.is_dir():
+            return
+        try:
+            display_scope = target_scope.resolve()
+        except Exception:
+            display_scope = target_scope
+        reply = QMessageBox.question(
+            self,
+            "Clear All Highlights",
+            f"Clear all file highlights recursively under:\n{display_scope}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        cleared = self.model.clear_all_highlights(target_scope)
+        self.statusBar().showMessage(
+            f"Cleared {cleared} highlight assignment(s) under {display_scope}",
             4500,
         )
 

@@ -199,6 +199,20 @@ class ColorizedMarkdownModel(QFileSystemModel):
 
         return cleared_entries
 
+    def clear_directory_highlights(self, directory: Path) -> int:
+        """Clear persisted highlights in one directory (non-recursive)."""
+        if not directory.is_dir():
+            return 0
+
+        color_map = self._load_directory_colors(directory)
+        if not color_map:
+            return 0
+
+        cleared_entries = len(color_map)
+        color_map.clear()
+        self._save_directory_colors(directory)
+        return cleared_entries
+
     def _color_for_file(self, path: Path) -> str | None:
         color_map = self._load_directory_colors(path.parent)
         return color_map.get(path.name)
@@ -277,7 +291,10 @@ class ColorizedMarkdownModel(QFileSystemModel):
             return str(path)
 
     def _directory_key(self, directory: Path) -> str:
-        return str(directory)
+        try:
+            return str(directory.resolve())
+        except Exception:
+            return str(directory)
 
     def _load_directory_colors(self, directory: Path) -> dict[str, str]:
         # Load once per directory and cache the mapping in-memory.
