@@ -2,8 +2,8 @@
   // Rebuild highlight spans from plain text each pass so updates are idempotent.
   const terms = __TERMS_JSON__;
   const shouldScroll = __SCROLL_BOOL__;
-  const closeWordGap = __CLOSE_WORD_GAP__;
-  const closeTermGroups = __CLOSE_GROUPS_JSON__;
+  const nearWordGap = __NEAR_WORD_GAP__;
+  const nearTermGroups = __NEAR_GROUPS_JSON__;
   const root = document.querySelector("main") || document.body;
   if (!root || !terms.length) return 0;
 
@@ -89,7 +89,7 @@
     return normalized;
   }
 
-  function normalizeCloseGroups(groups) {
+  function normalizeNearGroups(groups) {
     if (!Array.isArray(groups)) return [];
     const normalized = [];
     for (const group of groups) {
@@ -168,7 +168,7 @@
   }
 
   const normalizedTerms = normalizeTerms(terms);
-  const normalizedCloseGroups = normalizeCloseGroups(closeTermGroups);
+  const normalizedCloseGroups = normalizeNearGroups(nearTermGroups);
   const closeFocusWindows = [];
 
   if (normalizedCloseGroups.length) {
@@ -308,7 +308,7 @@
                 ? occurrence.endWord
                 : Math.max(maxEndWord, occurrence.endWord);
             const span = nextMaxEndWord - nextMinStartWord;
-            if (span > closeWordGap) {
+            if (span > nearWordGap) {
               continue;
             }
             const nextMinStartChar =

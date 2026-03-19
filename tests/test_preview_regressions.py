@@ -58,7 +58,7 @@ Joe met Anne Smith yesterday.
 Another joe met anne smith today.
 draft copy only.
 """
-MULTIWORD_CLOSE_DOCUMENT_TEXT = """# Multiword CLOSE Fixture
+MULTIWORD_NEAR_DOCUMENT_TEXT = """# Multiword NEAR Fixture
 
 Exact Case and other phrase appear here.
 
@@ -66,7 +66,7 @@ Program Director's RAG pipeline.
 
 Joe met Anne Smith yesterday.
 """
-REPEATED_CLOSE_DOCUMENT_TEXT = """# Repeated CLOSE Fixture
+REPEATED_NEAR_DOCUMENT_TEXT = """# Repeated NEAR Fixture
 
 Nicolas Pepin
 
@@ -348,6 +348,17 @@ class PreviewRegressionHarness(unittest.TestCase):
         self.assertIsInstance(result, dict)
         return dict(result)
 
+    def request_preview_context_menu_selection_info(
+        self, click_x: int, click_y: int, hint: str = ""
+    ) -> dict:
+        result = self.await_callback_result(
+            lambda done: self.window._request_preview_context_menu_selection_info(
+                int(click_x), int(click_y), hint, done
+            )
+        )
+        self.assertIsInstance(result, dict)
+        return dict(result)
+
     def run_search_and_expect_highlights(
         self, query: str, expected_texts: list[str]
     ) -> None:
@@ -489,7 +500,7 @@ class SearchHighlightRegressionTests(PreviewRegressionHarness):
         texts = json.loads(raw)
         self.assertEqual(texts, ["The "])
 
-    def test_close_highlighting_requires_distinct_occurrences_for_overlapping_terms(self) -> None:
+    def test_near_highlighting_requires_distinct_occurrences_for_overlapping_terms(self) -> None:
         precise_path = self.root / "close-overlap.md"
         precise_path.write_text(
             "The quick brown fox.\nThey said hello.\nA later the appears here.\n",
@@ -521,8 +532,8 @@ class SearchHighlightRegressionTests(PreviewRegressionHarness):
         self.assertEqual(texts, ["The ", "the"])
         self.assertEqual(self.current_file_hit_count(), 1)
 
-    def test_close_highlighting_marks_all_multiword_terms_in_focus_window(self) -> None:
-        self.load_markdown_text("close-multiword.md", MULTIWORD_CLOSE_DOCUMENT_TEXT)
+    def test_near_highlighting_marks_all_multiword_terms_in_focus_window(self) -> None:
+        self.load_markdown_text("near-multiword.md", MULTIWORD_NEAR_DOCUMENT_TEXT)
 
         cases = [
             ('NEAR("other phrase", "Exact Case")', ["Exact Case", "other phrase"]),
@@ -542,8 +553,8 @@ class SearchHighlightRegressionTests(PreviewRegressionHarness):
                 self.run_search_and_expect_highlights(query, expected_texts)
                 self.assertEqual(self.current_file_hit_count(), 1)
 
-    def test_close_highlighting_marks_all_repeated_windows(self) -> None:
-        self.load_markdown_text("close-repeated.md", REPEATED_CLOSE_DOCUMENT_TEXT)
+    def test_near_highlighting_marks_all_repeated_windows(self) -> None:
+        self.load_markdown_text("near-repeated.md", REPEATED_NEAR_DOCUMENT_TEXT)
         self.run_search_and_expect_highlights(
             """NEAR('Nicolas', 'Pepin')""",
             ["Nicolas", "Pepin", "Nicolas", "Pepin"],
@@ -682,6 +693,85 @@ class PreviewMarkerRegressionTests(PreviewRegressionHarness):
         self.assertEqual(live_selection.get("selectedText"), "beta")
         self.assertEqual(int(live_selection.get("selectionOffsetStart", -1)), start)
         self.assertEqual(int(live_selection.get("selectionOffsetEnd", -1)), end)
+
+    def test_context_menu_probe_matches_selection_and_highlight_metadata(self) -> None:
+        tall_text = "\n\n".join(
+            [f"filler line {index}" for index in range(1, 60)]
+            + ["alpha beta gamma"]
+            + [f"tail line {index}" for index in range(60, 120)]
+        ) + "\n"
+        self.load_markdown_text("context-menu-probe.md", tall_text)
+
+        seed_result = self.run_js(
+            """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  if (!root) return "missing-root";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const index = value.indexOf("beta");
+    if (index < 0) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + 4);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return "beta";
+  }
+  return "missing-beta";
+})();
+"""
+        )
+        self.assertEqual(seed_result, "beta")
+        selected_offsets = self.request_live_selection_offsets()
+        start = int(selected_offsets["selectionOffsetStart"])
+        end = int(selected_offsets["selectionOffsetEnd"])
+
+        self.apply_persistent_highlights(
+            [{"id": "case1", "start": start, "end": end, "kind": "normal"}]
+        )
+        self.wait_until(
+            lambda: bool(self.persistent_highlight_spans()),
+            timeout_ms=4000,
+        )
+
+        raw_coords = self.run_js(
+            """
+(() => {
+  const node = document.querySelector('span[data-mdexplore-persistent-highlight="1"]');
+  if (!node) return JSON.stringify({});
+  node.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  const rect = node.getBoundingClientRect();
+  return JSON.stringify({
+    x: Math.round(rect.left + Math.max(1, rect.width / 2)),
+    y: Math.round(rect.top + Math.max(1, rect.height / 2)),
+  });
+})();
+"""
+        )
+        self.assertIsInstance(raw_coords, str)
+        coords = json.loads(raw_coords)
+        self.wait_ms(150)
+
+        probe = self.request_preview_context_menu_selection_info(
+            int(coords["x"]), int(coords["y"]), "beta"
+        )
+        self.assertTrue(bool(probe.get("hasSelection")))
+        self.assertEqual(probe.get("selectedText"), "beta")
+        self.assertEqual(int(probe.get("selectionOffsetStart", -1)), start)
+        self.assertEqual(int(probe.get("selectionOffsetEnd", -1)), end)
+        self.assertEqual(probe.get("clickedHighlightId"), "case1")
+        self.assertIn("case1", list(probe.get("selectedHighlightIds") or []))
+        self.assertTrue(bool(probe.get("selectionHasHighlightedPart")))
+        self.assertFalse(bool(probe.get("selectionHasUnhighlightedPart")))
 
     def test_search_marker_positions_track_scrollable_document_offsets(self) -> None:
         self.load_markdown_text("search-marker-positions.md", SEARCH_MARKER_POSITION_TEXT)

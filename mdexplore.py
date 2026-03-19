@@ -9258,29 +9258,49 @@ class MdExploreWindow(QMainWindow):
             return []
         return _search_query.extract_search_terms(query)
 
-    def _current_close_term_groups(self) -> list[list[tuple[str, bool]]]:
+    def _current_near_term_groups(self) -> list[list[tuple[str, bool]]]:
         """Extract NEAR(...) argument groups from the current query."""
         query = self.match_input.text().strip()
         if not query:
             return []
 
-        return self._extract_close_term_groups(query)
+        return self._extract_near_term_groups(query)
 
-    def _extract_close_term_groups(self, query: str) -> list[list[tuple[str, bool]]]:
+    def _current_close_term_groups(self) -> list[list[tuple[str, bool]]]:
+        """Backward-compatible alias for NEAR(...) term-group extraction."""
+        return self._current_near_term_groups()
+
+    def _extract_near_term_groups(self, query: str) -> list[list[tuple[str, bool]]]:
         """Extract NEAR(...) argument groups from an arbitrary search query."""
         return _search_query.extract_near_term_groups(query)
 
-    def _collect_close_focus_windows(
+    def _extract_close_term_groups(self, query: str) -> list[list[tuple[str, bool]]]:
+        """Backward-compatible alias for NEAR(...) term-group extraction."""
+        return self._extract_near_term_groups(query)
+
+    def _collect_near_focus_windows(
         self, content: str, groups: list[list[tuple[str, bool]]]
     ) -> list[dict[str, object]]:
         """Return qualifying non-overlapping NEAR() windows in document order."""
         return _search_query.collect_near_focus_windows(content, groups)
 
-    def _best_close_focus_window(
+    def _collect_close_focus_windows(
+        self, content: str, groups: list[list[tuple[str, bool]]]
+    ) -> list[dict[str, object]]:
+        """Backward-compatible alias for NEAR() focus-window collection."""
+        return self._collect_near_focus_windows(content, groups)
+
+    def _best_near_focus_window(
         self, content: str, groups: list[list[tuple[str, bool]]]
     ) -> dict[str, object] | None:
         """Return the first qualifying NEAR() window used for preview focus."""
         return _search_query.best_near_focus_window(content, groups)
+
+    def _best_close_focus_window(
+        self, content: str, groups: list[list[tuple[str, bool]]]
+    ) -> dict[str, object] | None:
+        """Backward-compatible alias for NEAR() preview focus selection."""
+        return self._best_near_focus_window(content, groups)
 
     def _count_highlighted_term_ranges(
         self,
@@ -9339,8 +9359,8 @@ class MdExploreWindow(QMainWindow):
             {
                 "__TERMS_JSON__": json.dumps(cleaned_terms),
                 "__SCROLL_BOOL__": "true" if scroll_to_first else "false",
-                "__CLOSE_WORD_GAP__": str(int(SEARCH_CLOSE_WORD_GAP)),
-                "__CLOSE_GROUPS_JSON__": json.dumps(close_groups_payload),
+                "__NEAR_WORD_GAP__": str(int(SEARCH_CLOSE_WORD_GAP)),
+                "__NEAR_GROUPS_JSON__": json.dumps(close_groups_payload),
             },
         )
         # Mutates preview DOM by inserting mark spans (and optional scroll).
@@ -9480,467 +9500,64 @@ class MdExploreWindow(QMainWindow):
         selected_text_hint = request.selectedText() if request is not None else ""
         click_x = int(pos.x())
         click_y = int(pos.y())
-        hint_json = json.dumps(selected_text_hint or "", ensure_ascii=True)
-
-        # Capture selection mapping before context-menu interaction to avoid
-        # losing selection state when the menu action is triggered.
-        js = """
-(() => {
-  const sel = window.getSelection();
-  const root = document.querySelector("main") || document.body;
-  const hintedText = __SELECTED_HINT__;
-  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
-
-  function shouldSkipTextNode(node) {
-    if (!node || typeof node.nodeValue !== "string") return true;
-    const value = node.nodeValue;
-    if (!value.length) return true;
-    // Ignore formatting-only whitespace that contains newlines/tabs so
-    // highlight offsets do not drift into structural gaps between blocks.
-    if (!/[^\s]/.test(value) && /[\\r\\n\\t]/.test(value)) return true;
-    return false;
-  }
-
-  function lineInfo(node) {
-    if (!node) return null;
-    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
-    if (!(node instanceof Element)) return null;
-    const el = node.closest('[data-md-line-start][data-md-line-end]');
-    if (!el) return null;
-    const start = parseInt(el.getAttribute('data-md-line-start'), 10);
-    const end = parseInt(el.getAttribute('data-md-line-end'), 10);
-    if (Number.isNaN(start) || Number.isNaN(end)) return null;
-    return { start, end };
-  }
-
-  function normalizeRange(startInfo, endInfo) {
-    let start = startInfo ? startInfo.start : endInfo.start;
-    let end = endInfo ? endInfo.end : startInfo.end;
-    if (start > end) {
-      const tmp = start;
-      start = end;
-      end = tmp;
-    }
-    if (end <= start) end = start + 1;
-    return { start, end };
-  }
-
-  function selectionOffsets(range) {
-    if (!(range instanceof Range) || !root) return null;
-    try {
-      function textLengthToBoundary(container, offset) {
-        const probe = document.createRange();
-        probe.selectNodeContents(root);
-        probe.setEnd(container, offset);
-        const fragment = probe.cloneContents();
-        const walker = document.createTreeWalker(
-          fragment,
-          NodeFilter.SHOW_TEXT,
-          {
-            acceptNode(node) {
-              if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
-              const parent = node.parentElement;
-              if (!parent) return NodeFilter.FILTER_REJECT;
-              if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-              return NodeFilter.FILTER_ACCEPT;
-            },
-          },
-        );
-        let total = 0;
-        while (walker.nextNode()) {
-          total += (walker.currentNode.nodeValue || "").length;
-        }
-        return total;
-      }
-
-      let start = textLengthToBoundary(range.startContainer, range.startOffset);
-      let end = textLengthToBoundary(range.endContainer, range.endOffset);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-      if (start > end) {
-        const tmp = start;
-        start = end;
-        end = tmp;
-      }
-      if (end <= start) end = start + 1;
-      return { start, end };
-    } catch (_err) {
-      return null;
-    }
-  }
-
-  function clickTextOffset(clickX, clickY) {
-    if (!root) return null;
-    try {
-      let pointRange = null;
-      if (document.caretRangeFromPoint) {
-        pointRange = document.caretRangeFromPoint(clickX, clickY);
-      } else if (document.caretPositionFromPoint) {
-        const pos = document.caretPositionFromPoint(clickX, clickY);
-        if (pos && pos.offsetNode) {
-          pointRange = document.createRange();
-          pointRange.setStart(pos.offsetNode, pos.offset || 0);
-          pointRange.collapse(true);
-        }
-      }
-      if (!(pointRange instanceof Range)) return null;
-      const probe = document.createRange();
-      probe.selectNodeContents(root);
-      probe.setEnd(pointRange.startContainer, pointRange.startOffset);
-      const fragment = probe.cloneContents();
-      const walker = document.createTreeWalker(
-        fragment,
-        NodeFilter.SHOW_TEXT,
-        {
-            acceptNode(node) {
-            if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
-            const parent = node.parentElement;
-            if (!parent) return NodeFilter.FILTER_REJECT;
-            if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_ACCEPT;
-          },
-        },
-      );
-      let offset = 0;
-      while (walker.nextNode()) {
-        offset += (walker.currentNode.nodeValue || "").length;
-      }
-      return Number.isFinite(offset) && offset >= 0 ? offset : null;
-    } catch (_err) {
-      return null;
-    }
-  }
-
-  function rootTextContent() {
-    if (!root) return "";
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          if (shouldSkipTextNode(node)) return NodeFilter.FILTER_REJECT;
-          const parent = node.parentElement;
-          if (!parent) return NodeFilter.FILTER_REJECT;
-          if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-          return NodeFilter.FILTER_ACCEPT;
-        },
-      },
-    );
-    let out = "";
-    while (walker.nextNode()) {
-      out += walker.currentNode.nodeValue || "";
-    }
-    return out;
-  }
-
-  function nearestTextOffsets(selected, clickX, clickY) {
-    if (!selected || !selected.length) return null;
-    const haystack = rootTextContent();
-    if (!haystack.length) return null;
-    const candidates = [];
-    const collapsed = selected.replace(/\\s+/g, " ").trim();
-    if (collapsed) candidates.push(collapsed);
-    const trimmed = selected.trim();
-    if (trimmed && !candidates.includes(trimmed)) candidates.push(trimmed);
-    const noCR = selected.replace(/\\r/g, "");
-    if (noCR && !candidates.includes(noCR)) candidates.push(noCR);
-    if (selected && !candidates.includes(selected)) candidates.push(selected);
-
-    const clickOffset = clickTextOffset(clickX, clickY);
-    let best = null;
-    for (const candidate of candidates) {
-      let idx = haystack.indexOf(candidate);
-      while (idx >= 0) {
-        const score = clickOffset === null ? 0 : Math.abs(idx - clickOffset);
-        if (!best || score < best.score) {
-          best = { start: idx, end: idx + candidate.length, score };
-        }
-        idx = haystack.indexOf(candidate, idx + Math.max(1, candidate.length));
-      }
-    }
-    if (!best) return null;
-    return { start: best.start, end: best.end };
-  }
-
-  function elementFromClick(x, y) {
-    const dpr = window.devicePixelRatio || 1;
-    const sx =
-      window.scrollX ||
-      window.pageXOffset ||
-      document.documentElement.scrollLeft ||
-      document.body.scrollLeft ||
-      0;
-    const sy =
-      window.scrollY ||
-      window.pageYOffset ||
-      document.documentElement.scrollTop ||
-      document.body.scrollTop ||
-      0;
-    const candidates = [
-      [x, y],
-      [x - sx, y - sy],
-      [x + sx, y + sy],
-      [x * dpr, y * dpr],
-      [(x - sx) * dpr, (y - sy) * dpr],
-      [x / dpr, y / dpr],
-      [(x - sx) / dpr, (y - sy) / dpr],
-    ];
-    for (const pair of candidates) {
-      if (!Number.isFinite(pair[0]) || !Number.isFinite(pair[1])) {
-        continue;
-      }
-      const el = document.elementFromPoint(pair[0], pair[1]);
-      if (el) return el;
-    }
-    return null;
-  }
-
-  function normalizeHighlightEntries(raw) {
-    if (!Array.isArray(raw)) return [];
-    const prepared = [];
-    for (const item of raw) {
-      if (!item || typeof item !== "object") continue;
-      const id = typeof item.id === "string" ? item.id.trim() : "";
-      const start = Number(item.start);
-      const end = Number(item.end);
-      if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
-      if (end <= start || start < 0) continue;
-      prepared.push({ id, start: Math.floor(start), end: Math.floor(end) });
-    }
-    if (!prepared.length) return [];
-    prepared.sort((a, b) => (a.start - b.start) || (a.end - b.end));
-    const merged = [];
-    for (const item of prepared) {
-      if (!merged.length) {
-        merged.push(item);
-        continue;
-      }
-      const prev = merged[merged.length - 1];
-      if (item.start <= prev.end) {
-        prev.end = Math.max(prev.end, item.end);
-        continue;
-      }
-      merged.push(item);
-    }
-    return merged;
-  }
-
-  function overlapInfo(rangeStart, rangeEnd, entries) {
-    const ids = new Set();
-    const overlaps = [];
-    for (const item of entries) {
-      const start = Math.max(rangeStart, item.start);
-      const end = Math.min(rangeEnd, item.end);
-      if (end <= start) continue;
-      overlaps.push({ start, end });
-      ids.add(item.id);
-    }
-    if (!overlaps.length) {
-      return { highlightedLength: 0, ids: [] };
-    }
-    overlaps.sort((a, b) => (a.start - b.start) || (a.end - b.end));
-    const merged = [overlaps[0]];
-    for (let i = 1; i < overlaps.length; i += 1) {
-      const item = overlaps[i];
-      const prev = merged[merged.length - 1];
-      if (item.start <= prev.end) {
-        prev.end = Math.max(prev.end, item.end);
-      } else {
-        merged.push(item);
-      }
-    }
-    let highlightedLength = 0;
-    for (const item of merged) {
-      highlightedLength += Math.max(0, item.end - item.start);
-    }
-    return { highlightedLength, ids: Array.from(ids) };
-  }
-
-  function collectIntersectingRange(range) {
-    if (!(range instanceof Range)) return null;
-    let root = range.commonAncestorContainer;
-    if (root && root.nodeType === Node.TEXT_NODE) root = root.parentElement;
-    const scope =
-      root instanceof Element
-        ? root
-        : (document.body || document.documentElement || document);
-    const tagged = scope.querySelectorAll
-      ? scope.querySelectorAll('[data-md-line-start][data-md-line-end]')
-      : document.querySelectorAll('[data-md-line-start][data-md-line-end]');
-    let minStart = null;
-    let maxEnd = null;
-    for (const el of tagged) {
-      try {
-        if (!range.intersectsNode(el)) continue;
-      } catch (_err) {
-        continue;
-      }
-      const start = parseInt(el.getAttribute('data-md-line-start') || '', 10);
-      const end = parseInt(el.getAttribute('data-md-line-end') || '', 10);
-      if (Number.isNaN(start) || Number.isNaN(end)) continue;
-      minStart = minStart === null ? start : Math.min(minStart, start);
-      maxEnd = maxEnd === null ? end : Math.max(maxEnd, end);
-    }
-    if (minStart === null || maxEnd === null) return null;
-    return { start: minStart, end: Math.max(minStart + 1, maxEnd) };
-  }
-
-  let selectedText = sel && sel.toString ? sel.toString() : "";
-  if (!selectedText.trim() && hintedText) {
-    selectedText = hintedText;
-  }
-  const hasSelection = !!(selectedText && selectedText.trim());
-  const highlightEntries = normalizeHighlightEntries(window.__mdexplorePersistentHighlights || []);
-  const fallbackClickX =
-    typeof window.__mdexploreLastContextClientX === "number" &&
-    Number.isFinite(window.__mdexploreLastContextClientX)
-      ? window.__mdexploreLastContextClientX
-      : null;
-  const fallbackClickY =
-    typeof window.__mdexploreLastContextClientY === "number" &&
-    Number.isFinite(window.__mdexploreLastContextClientY)
-      ? window.__mdexploreLastContextClientY
-      : null;
-  const clickedNode =
-    elementFromClick(__CLICK_X__, __CLICK_Y__) ||
-    (Number.isFinite(fallbackClickX) && Number.isFinite(fallbackClickY)
-      ? elementFromClick(fallbackClickX, fallbackClickY)
-      : null);
-  const clickedHighlight = clickedNode && clickedNode.closest
-    ? clickedNode.closest('span[data-mdexplore-persistent-highlight="1"]')
-    : null;
-  const fallbackClickedHighlightId =
-    typeof window.__mdexploreLastPersistentHighlightId === "string"
-      ? window.__mdexploreLastPersistentHighlightId.trim()
-      : "";
-  const clickedHighlightId = clickedHighlight
-    ? String(clickedHighlight.getAttribute("data-mdexplore-persistent-highlight-id") || "")
-    : fallbackClickedHighlightId;
-  let clickedOffset = clickTextOffset(__CLICK_X__, __CLICK_Y__);
-  if (clickedOffset === null && Number.isFinite(fallbackClickX) && Number.isFinite(fallbackClickY)) {
-    clickedOffset = clickTextOffset(fallbackClickX, fallbackClickY);
-  }
-  if (
-    clickedOffset === null &&
-    typeof window.__mdexploreLastPersistentHighlightOffset === "number" &&
-    Number.isFinite(window.__mdexploreLastPersistentHighlightOffset)
-  ) {
-    clickedOffset = Math.max(0, Math.floor(window.__mdexploreLastPersistentHighlightOffset));
-  }
-  let selectionOffsetStart = null;
-  let selectionOffsetEnd = null;
-  let selectionHasHighlightedPart = false;
-  let selectionHasUnhighlightedPart = false;
-  let selectedHighlightIds = [];
-
-  // Preferred path: map the active text selection to source line metadata.
-  if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-    const range = sel.getRangeAt(0);
-    const offsets = selectionOffsets(range);
-    if (offsets) {
-      selectionOffsetStart = offsets.start;
-      selectionOffsetEnd = offsets.end;
-      const overlap = overlapInfo(offsets.start, offsets.end, highlightEntries);
-      selectedHighlightIds = overlap.ids;
-      selectionHasHighlightedPart = overlap.highlightedLength > 0;
-      selectionHasUnhighlightedPart = overlap.highlightedLength < Math.max(1, offsets.end - offsets.start);
-    } else {
-      selectionHasUnhighlightedPart = true;
-    }
-    const intersecting = collectIntersectingRange(range);
-    if (intersecting) {
-      return {
-        hasSelection: true,
-        selectedText,
-        ...intersecting,
-        via: "selection-intersects",
-        selectionOffsetStart,
-        selectionOffsetEnd,
-        selectionHasHighlightedPart,
-        selectionHasUnhighlightedPart,
-        selectedHighlightIds,
-        clickedHighlightId,
-        clickedOffset,
-      };
-    }
-    const startInfo = lineInfo(range.startContainer);
-    const endInfo = lineInfo(range.endContainer);
-    if (startInfo || endInfo) {
-      return {
-        hasSelection: true,
-        selectedText,
-        ...normalizeRange(startInfo, endInfo),
-        via: "selection",
-        selectionOffsetStart,
-        selectionOffsetEnd,
-        selectionHasHighlightedPart,
-        selectionHasUnhighlightedPart,
-        selectedHighlightIds,
-        clickedHighlightId,
-        clickedOffset,
-      };
-    }
-  }
-
-  // Robust fallback: selection may collapse before the context menu action
-  // is handled. Recover offsets using selected text near the click location.
-  if ((selectionOffsetStart === null || selectionOffsetEnd === null) && selectedText) {
-    const guessed = nearestTextOffsets(selectedText, __CLICK_X__, __CLICK_Y__);
-    if (guessed && guessed.end > guessed.start) {
-      selectionOffsetStart = guessed.start;
-      selectionOffsetEnd = guessed.end;
-      const overlap = overlapInfo(guessed.start, guessed.end, highlightEntries);
-      selectedHighlightIds = overlap.ids;
-      selectionHasHighlightedPart = overlap.highlightedLength > 0;
-      selectionHasUnhighlightedPart =
-        overlap.highlightedLength < Math.max(1, guessed.end - guessed.start);
-    }
-  }
-
-  // Fallback: map from right-clicked block location.
-  const clicked = elementFromClick(__CLICK_X__, __CLICK_Y__);
-  const clickedInfo = lineInfo(clicked);
-  if (clickedInfo) {
-    return {
-      hasSelection,
-      selectedText,
-      start: clickedInfo.start,
-      end: clickedInfo.end,
-      via: "click",
-      selectionOffsetStart,
-      selectionOffsetEnd,
-      selectionHasHighlightedPart,
-      selectionHasUnhighlightedPart,
-      selectedHighlightIds,
-      clickedHighlightId,
-      clickedOffset,
-    };
-  }
-
-  return {
-    hasSelection,
-    selectedText,
-    selectionOffsetStart,
-    selectionOffsetEnd,
-    selectionHasHighlightedPart,
-    selectionHasUnhighlightedPart: hasSelection ? true : false,
-    selectedHighlightIds,
-    clickedHighlightId,
-    clickedOffset,
-  };
-})();
-"""
-        js = (
-            js.replace("__CLICK_X__", str(click_x))
-            .replace("__CLICK_Y__", str(click_y))
-            .replace("__SELECTED_HINT__", hint_json)
-        )
-        # Returns selection + line-range metadata used to build copy actions.
-        self.preview.page().runJavaScript(
-            js,
+        self._request_preview_context_menu_selection_info(
+            click_x,
+            click_y,
+            selected_text_hint,
             lambda result: self._show_preview_context_menu_with_cached_selection(
                 pos, result, selected_text_hint
             ),
         )
+
+    def _request_preview_context_menu_selection_info(
+        self, click_x: int, click_y: int, selected_text_hint: str, callback
+    ) -> None:
+        """Read preview selection/click metadata used to build the context menu."""
+        js_expr = _render_js_asset(
+            "preview/context_menu_selection_probe.js",
+            {
+                "__CLICK_X__": str(int(click_x)),
+                "__CLICK_Y__": str(int(click_y)),
+                "__SELECTED_HINT__": json.dumps(
+                    selected_text_hint or "", ensure_ascii=True
+                ),
+            },
+        )
+        js = f"""
+(() => {{
+  try {{
+    const __result = {js_expr};
+    return JSON.stringify(__result || {{}});
+  }} catch (err) {{
+    return JSON.stringify({{
+      __error__: String(err),
+      __stack__: err && err.stack ? String(err.stack) : "",
+    }});
+  }}
+}})();
+"""
+
+        def _on_result(result) -> None:
+            normalized: dict = {}
+            if isinstance(result, dict):
+                normalized = result
+            elif isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    normalized = parsed
+            self._debug_log(
+                "preview-menu-probe result "
+                f"has_selection={bool(normalized.get('hasSelection'))} "
+                f"offsets={self._selection_offsets_from_info(normalized)} "
+                f"clicked_highlight={'yes' if bool(str(normalized.get('clickedHighlightId') or '').strip()) else 'no'} "
+                f"clicked_offset={normalized.get('clickedOffset')}"
+            )
+            callback(normalized)
+
+        self.preview.page().runJavaScript(js, _on_result)
 
     def _show_preview_context_menu_with_cached_selection(
         self, pos, selection_info, selected_text_hint: str

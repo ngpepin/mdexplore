@@ -628,7 +628,7 @@ mdexplore.desktop.sample      # sample desktop launcher entry for user customiza
 mdexplore_app/                # extracted support modules for search, tree, tabs, icons, PDF, runtime, and workers
 assets/js/                    # externalized preview/PDF JavaScript templates loaded into a startup registry at startup
 assets/js/pdf/                # PDF export/preflight/restore JavaScript templates
-assets/js/preview/            # preview search/highlight/selection JavaScript templates
+assets/js/preview/            # preview search/highlight/selection/context-menu JavaScript templates
 assets/ui/                    # local UI icons/font assets used by tree, tabs, copy controls, and search pills
 mdexplor-icon.png             # primary app icon asset kept at repo root for desktop launchers
 requirements.txt              # Python runtime dependencies

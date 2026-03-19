@@ -1,6 +1,7 @@
 import unittest
 
 import mdexplore
+from mdexplore_app import search as search_query
 
 
 class SearchQuerySyntaxTests(unittest.TestCase):
@@ -42,10 +43,10 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         self.window.match_input = self._FakeLineEdit("'The '")
         self.assertEqual(self.window._current_search_terms(), [("The ", True)])
 
-    def test_current_close_groups_preserve_quoted_trailing_space(self) -> None:
+    def test_current_near_groups_preserve_quoted_trailing_space(self) -> None:
         self.window.match_input = self._FakeLineEdit("""NEAR('The ' "quick brown")""")
         self.assertEqual(
-            self.window._current_close_term_groups(),
+            self.window._current_near_term_groups(),
             [[("The ", True), ("quick brown", False)]],
         )
 
@@ -76,14 +77,14 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         self.assertTrue(predicate("example.md", "the quick brown fox"))
         self.assertFalse(predicate("example.md", "There is no trailing separator"))
 
-    def test_close_query_respects_mixed_case_modes(self) -> None:
+    def test_near_query_respects_mixed_case_modes(self) -> None:
         predicate = self.window._compile_match_predicate(
             """NEAR('Exact Case' "other phrase")"""
         )
         self.assertTrue(predicate("example.md", "Exact Case and OTHER PHRASE"))
         self.assertFalse(predicate("example.md", "exact case and OTHER PHRASE"))
 
-    def test_close_query_requires_distinct_occurrences_for_overlapping_terms(self) -> None:
+    def test_near_query_requires_distinct_occurrences_for_overlapping_terms(self) -> None:
         predicate = self.window._compile_match_predicate("""NEAR('The ', the)""")
         self.assertFalse(predicate("example.md", "The quick brown fox"))
         self.assertTrue(predicate("example.md", "The quick brown the fox"))
@@ -92,11 +93,11 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         counter = self.window._compile_match_hit_counter("'Alpha' alpha")
         self.assertEqual(counter("example.md", "Alpha alpha ALPHA"), 4)
 
-    def test_hit_counter_for_close_query_matches_close_window_highlights(self) -> None:
+    def test_hit_counter_for_near_query_matches_near_window_highlights(self) -> None:
         counter = self.window._compile_match_hit_counter("""NEAR('The ',the)""")
         self.assertEqual(counter("example.md", "The quick brown fox.\nThey said hello.\nA later the appears here.\n"), 1)
 
-    def test_hit_counter_for_close_query_counts_repeated_windows(self) -> None:
+    def test_hit_counter_for_near_query_counts_repeated_windows(self) -> None:
         counter = self.window._compile_match_hit_counter(
             """NEAR('Nicolas','Pepin')"""
         )
@@ -105,7 +106,7 @@ class SearchQuerySyntaxTests(unittest.TestCase):
             2,
         )
 
-    def test_best_close_focus_window_covers_full_multiword_terms(self) -> None:
+    def test_best_near_focus_window_covers_full_multiword_terms(self) -> None:
         content = (
             "Exact Case and other phrase appear here.\n"
             "Program Director's RAG pipeline.\n"
@@ -128,17 +129,17 @@ class SearchQuerySyntaxTests(unittest.TestCase):
 
         for group, expected_window_text in cases:
             with self.subTest(group=group):
-                chosen = self.window._best_close_focus_window(content, [group])
+                chosen = self.window._best_near_focus_window(content, [group])
                 self.assertIsNotNone(chosen)
                 assert chosen is not None
                 window_text = content[chosen["start_char"] : chosen["end_char"]]
                 self.assertEqual(window_text, expected_window_text)
                 self.assertEqual(
-                    self.window._count_highlighted_term_ranges(
+                    search_query.count_highlighted_term_ranges(
                         content,
                         group,
-                        close_focus_range=(chosen["start_char"], chosen["end_char"]),
-                        enforce_close_boundaries=True,
+                        near_focus_range=(chosen["start_char"], chosen["end_char"]),
+                        enforce_near_boundaries=True,
                     ),
                     2,
                 )

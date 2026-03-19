@@ -13,6 +13,7 @@ class JsAssetTests(unittest.TestCase):
         self.assertTrue(JS_ASSET_DIR.is_dir())
         self.assertIn("preview/apply_persistent_highlights.js", sources)
         self.assertIn("preview/clear_search_highlights.js", sources)
+        self.assertIn("preview/context_menu_selection_probe.js", sources)
         self.assertIn("preview/highlight_search_terms.js", sources)
         self.assertIn("preview/live_highlight_target.js", sources)
         self.assertIn("preview/live_selection_offsets.js", sources)
@@ -21,6 +22,7 @@ class JsAssetTests(unittest.TestCase):
         self.assertIn("pdf/restore_preview_palette.js", sources)
         self.assertTrue(sources["preview/apply_persistent_highlights.js"].strip())
         self.assertTrue(sources["preview/clear_search_highlights.js"].strip())
+        self.assertTrue(sources["preview/context_menu_selection_probe.js"].strip())
         self.assertTrue(sources["preview/highlight_search_terms.js"].strip())
         self.assertTrue(sources["preview/live_highlight_target.js"].strip())
         self.assertTrue(sources["preview/live_selection_offsets.js"].strip())
@@ -34,16 +36,16 @@ class JsAssetTests(unittest.TestCase):
             {
                 "__TERMS_JSON__": '[{"text":"alpha","caseSensitive":false}]',
                 "__SCROLL_BOOL__": "true",
-                "__CLOSE_WORD_GAP__": "50",
-                "__CLOSE_GROUPS_JSON__": "[]",
+                "__NEAR_WORD_GAP__": "50",
+                "__NEAR_GROUPS_JSON__": "[]",
             },
         )
         self.assertIn('const shouldScroll = true;', rendered)
-        self.assertIn('const closeWordGap = 50;', rendered)
+        self.assertIn('const nearWordGap = 50;', rendered)
         self.assertNotIn("__TERMS_JSON__", rendered)
         self.assertNotIn("__SCROLL_BOOL__", rendered)
-        self.assertNotIn("__CLOSE_WORD_GAP__", rendered)
-        self.assertNotIn("__CLOSE_GROUPS_JSON__", rendered)
+        self.assertNotIn("__NEAR_WORD_GAP__", rendered)
+        self.assertNotIn("__NEAR_GROUPS_JSON__", rendered)
 
     def test_rendered_live_selection_template_has_no_unresolved_placeholders(self) -> None:
         rendered = render_js_asset(
@@ -51,6 +53,23 @@ class JsAssetTests(unittest.TestCase):
             {"__SELECTED_HINT__": json.dumps("Selected text")},
         )
         self.assertIn('selectedText = "Selected text";', rendered)
+        self.assertNotIn("__SELECTED_HINT__", rendered)
+
+    def test_rendered_context_menu_probe_template_has_no_unresolved_placeholders(
+        self,
+    ) -> None:
+        rendered = render_js_asset(
+            "preview/context_menu_selection_probe.js",
+            {
+                "__CLICK_X__": "12",
+                "__CLICK_Y__": "34",
+                "__SELECTED_HINT__": json.dumps("Hint text"),
+            },
+        )
+        self.assertIn('const hintedText = "Hint text";', rendered)
+        self.assertIn("elementFromClick(12, 34)", rendered)
+        self.assertNotIn("__CLICK_X__", rendered)
+        self.assertNotIn("__CLICK_Y__", rendered)
         self.assertNotIn("__SELECTED_HINT__", rendered)
 
     def test_rendered_apply_persistent_highlights_template_has_no_unresolved_placeholders(
