@@ -6,15 +6,17 @@ This document provides a subsystem-level PlantUML view of the current
 All diagrams are embedded so they can be rendered directly by mdexplore (or any Markdown viewer with PlantUML support).
 
 Detailed render/caching forks (GUI vs PDF, JS Mermaid vs Rust Mermaid, cache mode
-ownership, and restore behavior) are intentionally documented in `RENDER-PATHS.md`.
+ownership, and restore behavior) are intentionally consolidated in the deeper
+render/debugging sections of `DEVELOPERS-AGENTS.md`.
 This UML file keeps those areas abstracted at system/class boundaries to avoid
 duplicating low-level render logic across two docs.
 
 Low-risk modularization note: support code now lives in `mdexplore_app/`
-(`constants.py`, `runtime.py`, `pdf.py`, `icons.py`, `workers.py`, `tree.py`,
-`tabs.py`), while the main orchestration, renderer/template logic, and UI
-state machine remain in `mdexplore.py`. The diagrams below show that split at
-subsystem boundaries rather than expanding every extracted helper inline.
+(`constants.py`, `runtime.py`, `search.py`, `templates.py`, `pdf.py`,
+`icons.py`, `workers.py`, `tree.py`, `tabs.py`), while the main orchestration,
+renderer/template wiring, and UI state machine remain in `mdexplore.py`. The
+diagrams below show that split at subsystem boundaries rather than expanding
+every extracted helper inline.
 
 ## 1. System Architecture
 
@@ -34,6 +36,8 @@ node "Ubuntu Desktop Session" as Desktop {
   package "mdexplore_app\nsupport package" as Support {
     component "constants.py" as ConstantsSupport
     component "runtime.py" as RuntimeSupport
+    component "search.py" as SearchSupport
+    component "templates.py" as TemplateSupport
     component "pdf.py" as PdfSupport
     component "icons.py" as IconSupport
     component "tree.py" as TreeSupport
@@ -86,6 +90,7 @@ Window --> PumlCache
 Window --> MermaidCache
 Window --> ConstantsSupport
 Window --> RuntimeSupport
+Window --> SearchSupport
 Window --> PdfSupport
 Window --> IconSupport
 Window --> TreeSupport
@@ -107,6 +112,7 @@ Window --> Clipboard : copy files/text/source markdown
 Window --> Vscode : Edit action
 Renderer --> MermaidRs : local Rust Mermaid render request
 Renderer --> PlantJar : direct PlantUML render when no async resolver
+Renderer --> TemplateSupport : render preview/document.html
 PumlWorker --> PlantJar : async PlantUML render request
 PlantJar --> Java : java -jar
 Renderer --> LocalAssets : prefer local MathJax/Mermaid
@@ -321,6 +327,8 @@ class MdExploreWindow {
 
 class "mdexplore_app.constants" as ConstantsSupportBoundary
 class "mdexplore_app.runtime" as RuntimeSupportBoundary
+class "mdexplore_app.search" as SearchSupportBoundary
+class "mdexplore_app.templates" as TemplateSupportBoundary
 class "mdexplore_app.pdf" as PdfSupportBoundary
 class "mdexplore_app.icons" as IconSupportBoundary
 class "mdexplore_app.tree" as TreeSupportBoundary
@@ -353,6 +361,7 @@ PreviewRenderWorker ..> MarkdownRenderer : creates renderer in worker
 MdExploreWindow ..> QApplication
 MdExploreWindow ..> ConstantsSupportBoundary
 MdExploreWindow ..> RuntimeSupportBoundary
+MdExploreWindow ..> SearchSupportBoundary
 MdExploreWindow ..> PdfSupportBoundary
 MdExploreWindow ..> IconSupportBoundary
 MdExploreWindow ..> TreeSupportBoundary
@@ -363,13 +372,15 @@ ColorizedMarkdownModel ..> RuntimeSupportBoundary
 ColorizedMarkdownModel ..> TreeSupportBoundary
 ViewTabBar ..> TabSupportBoundary
 MarkdownRenderer ..> ConstantsSupportBoundary
+MarkdownRenderer ..> TemplateSupportBoundary
 @enduml
 ```
 
 ## 4. Preview Pipeline (Abstracted)
 
-The detailed render/cache branches are covered in `RENDER-PATHS.md`.
-This section intentionally keeps an architectural boundary view only.
+The detailed render/cache branches are covered in the render/debugging sections
+of `DEVELOPERS-AGENTS.md`. This section intentionally keeps an architectural
+boundary view only.
 
 ```plantuml
 @startuml
@@ -411,7 +422,8 @@ end note
 ## 4.1 Preview Navigation Overlays
 
 These are intentionally shown here only as boundary-level UI overlays. The
-exact DOM/CSS/JS mechanics remain in `RENDER-PATHS.md`.
+exact DOM/CSS/JS mechanics remain in the deeper render/debugging sections of
+`DEVELOPERS-AGENTS.md`.
 
 ```plantuml
 @startuml
@@ -533,7 +545,8 @@ Win -> User : status message (exact/fuzzy/full fallback)
 ## 7. PDF Export Pipeline (Abstracted)
 
 Detailed PDF mode branching (JS Mermaid grayscale path vs Rust Mermaid default-themed
-PDF cache path) is documented in `RENDER-PATHS.md`.
+PDF cache path) is documented in the deeper render/debugging sections of
+`DEVELOPERS-AGENTS.md`.
 
 ```plantuml
 @startuml
@@ -624,15 +637,19 @@ MultiView --> [*] : window close (persist effective root)
 ## Notes
 
 - Diagrams are based on current code in `mdexplore.py`, `mdexplore.sh`, and `mdexplore_app/*`.
-- Render/caching branch internals are intentionally abstracted here and documented in
-  `RENDER-PATHS.md` to keep a single authoritative deep map.
+- Render/caching branch internals are intentionally abstracted here and
+  documented in the deeper render/debugging sections of `DEVELOPERS-AGENTS.md`
+  to keep a single authoritative deep map.
 - Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is also intentionally kept out
   of the UML internals here because it is a `QWebEngineView` scale adjustment,
   not a separate renderer/cache branch.
 - Preview gutter overlays (search-hit markers, persistent-highlight markers,
   named-view home markers) are similarly abstracted here and described in more
-  detail in `RENDER-PATHS.md`, because they are post-render navigation aids
+  detail in `DEVELOPERS-AGENTS.md`, because they are post-render navigation aids
   rather than renderer/cache forks.
+- Search accepts canonical `NEAR(...)` syntax while continuing to treat
+  `CLOSE(...)` as a backward-compatible alias normalized to `NEAR(...)`
+  internally.
 - Named-view gutter markers now route back through the same saved-view restore
   path as tab selection, so marker navigation and tab selection land on the
   same saved location.
@@ -641,7 +658,9 @@ MultiView --> [*] : window close (persist effective root)
   into destination `.mdexplore-*` sidecars.
 - Headless regressions for saved-view restore, preview markers, and search
   quoting now live in `tests/test_preview_regressions.py` and
-  `tests/test_search_query_syntax.py`.
+  `tests/test_search_query_syntax.py`, while template-asset regressions live in
+  `tests/test_template_assets.py` and tab-bar layout regressions live in
+  `tests/test_tab_bar_layout.py`.
 - Worker/threadpool usage is intentionally separated by concern:
   - render pool (preview HTML jobs),
   - PlantUML pool (diagram jobs),

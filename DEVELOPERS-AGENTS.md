@@ -3,6 +3,52 @@
 Canonical maintenance, behavior, and render-architecture guide for developers and automated
 coding agents that add features or maintain `mdexplore`.
 
+## Table Of Contents
+
+- [Mission](#mission)
+- [Repository Map](#repository-map)
+- [Runtime Assumptions](#runtime-assumptions)
+- [Entry Points And Hotspots](#entry-points-and-hotspots)
+- [Core Behavior You Must Preserve](#core-behavior-you-must-preserve)
+- [Formal Behavior Rules Model](#formal-behavior-rules-model)
+  - [1. Rule Language](#1-rule-language)
+  - [2. Source and Precedence Model](#2-source-and-precedence-model)
+  - [3. Hierarchy of Rule Domains](#3-hierarchy-of-rule-domains)
+  - [4. Global Invariants](#4-global-invariants)
+  - [5. Entry, Launch, and Root Resolution](#5-entry-launch-and-root-resolution)
+  - [6. Tree, Scope, and File Model](#6-tree-scope-and-file-model)
+  - [7. Preview, Render, and Cache Rules](#7-preview-render-and-cache-rules)
+  - [8. Search, Highlight, and Overlay Rules](#8-search-highlight-and-overlay-rules)
+  - [9. View, Tab, and Session Rules](#9-view-tab-and-session-rules)
+  - [10. Clipboard, Edit, and PDF Export Rules](#10-clipboard-edit-and-pdf-export-rules)
+  - [11. Persistence, Refresh, and Recovery Rules](#11-persistence-refresh-and-recovery-rules)
+  - [12. Diagnostics and Verification Rules](#12-diagnostics-and-verification-rules)
+  - [13. Canonical Decision Tables](#13-canonical-decision-tables)
+  - [14. Rule Summary](#14-rule-summary)
+- [Editing Rules](#editing-rules)
+- [Rendering Rules](#rendering-rules)
+- [Mermaid Render/Caching Architecture (Read Before Changes)](#mermaid-rendercaching-architecture-read-before-changes)
+- [Render Triage, Architecture, And Debugging](#render-triage-architecture-and-debugging)
+  - [0. One-Page Triage Card](#0-one-page-triage-card)
+  - [1. Scope and Intent](#1-scope-and-intent)
+  - [2. Render Mode Matrix](#2-render-mode-matrix)
+  - [3. End-to-End Ownership](#3-end-to-end-ownership)
+  - [4. GUI Preview Path](#4-gui-preview-path)
+  - [5. PDF Export Path](#5-pdf-export-path)
+  - [6. Cache Architecture](#6-cache-architecture)
+  - [7. Critical Invariants](#7-critical-invariants)
+  - [8. Failure and Fallback Rules](#8-failure-and-fallback-rules)
+  - [9. Known TODO](#9-known-todo)
+  - [10. Debugging Playbook (Human + Agent)](#10-debugging-playbook-human--agent)
+- [Known TODO: Diagram View State Restore](#known-todo-diagram-view-state-restore)
+- [Launcher Rules](#launcher-rules)
+- [Setup Script Rules](#setup-script-rules)
+- [Quality Gates Before Finishing](#quality-gates-before-finishing)
+- [Test Inventory](#test-inventory)
+- [Documentation Requirements](#documentation-requirements)
+- [Common Feature Patterns](#common-feature-patterns)
+- [Out of Scope Unless Requested](#out-of-scope-unless-requested)
+
 ## Mission
 
 Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
@@ -29,8 +75,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   for externalized preview document shells under `assets/templates/`.
 - `mdexplore_app/runtime.py`: runtime/config/GPU-print helper functions.
 - `mdexplore_app/search.py`: extracted pure search query helpers for tokenization,
-  predicate compilation, NEAR-window selection, and per-file hit counting.
-- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr helpers.
+  predicate compilation, `NEAR(...)` parsing, legacy `CLOSE(...)` alias
+  normalization, NEAR-window selection, and per-file hit counting.
+- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, TOC-aware
+  landscape-page classification, and PlantUML stderr helpers.
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers used by the tree and tab UI.
 - `mdexplore_app/tree.py`: extracted tree/model classes (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: extracted custom tab-bar class (`ViewTabBar`).
@@ -52,7 +100,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `UML.md`: higher-level architecture, class, and activity diagrams.
 - `mdexplore.desktop.sample`: user-adaptable `.desktop` launcher template.
 - `mdexplor-icon.png`: primary app icon asset kept at repo root for desktop launchers.
-- `DESCRIPTION.md`: short repository summary and suggested topic tags.
+- `tests/`: unit/headless regressions for preview restore/markers, search syntax,
+  search module behavior, template assets, UI assets, highlight confirmations,
+  and tab-bar layout.
 - `LICENSE`: MIT license text.
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
 - Runtime color sidecars: per-directory `.mdexplore-colors.json` files for
@@ -219,6 +269,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   other quote character should remain literal inside the term.
 - `NEAR(...)` should be supported in search queries and require all listed
   terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
+- Legacy `CLOSE(...)` should remain accepted as a backward-compatible alias and
+  normalize to canonical `NEAR(...)` parsing/evaluation internally.
 - `NEAR(...)` should require distinct qualifying occurrences per listed term;
   the same text start should not satisfy multiple required terms.
 - Single-word `NEAR(...)` terms should match on word boundaries for proximity
@@ -626,6 +678,7 @@ R.SEARCH.01 :: [search text empty] => O(clear active match styling immediately)
 R.SEARCH.02 :: [typing search text] => O(debounce before running search)
 R.SEARCH.03 :: [Enter pressed in search] => O(run search immediately)
 R.SEARCH.04 :: [query contains NEAR(...)] => O(require all terms within SEARCH_CLOSE_WORD_GAP content words)
+R.SEARCH.04a :: [query contains CLOSE(...)] => O(treat as backward-compatible alias of NEAR(...))
 R.SEARCH.05 :: [query contains AND(...) or OR(...)] => O(accept comma-delimited, space-delimited, or mixed arguments)
 R.SEARCH.06 :: [query active and file opened from matches] => O(highlight preview hits and scroll to first match)
 R.SEARCH.07 :: [tree row is a match] => O(show hit-count pill in gutter)
@@ -713,6 +766,7 @@ R.PDF.03 :: [PDF export begins] => O(capture diagram state and reset preview zoo
 R.PDF.04 :: [PDF snapshot ready] => O(write <source-basename>.pdf beside source file)
 R.PDF.05 :: [PDF post-process] => O(stamp centered "N of M" footer numbering)
 R.PDF.06 :: [headed Mermaid or PlantUML section] => O(bind heading to diagram fence for pagination)
+R.PDF.06a :: [page text looks like a table of contents] => O(never promote that page to landscape from heading/token matches)
 R.PDF.07 :: [PDF export ends] => O(restore preview Mermaid mode and interactive zoom)
 ```
 
@@ -932,11 +986,15 @@ Support code has been split into `mdexplore_app/`, but render orchestration
 still lives primarily in `mdexplore.py`. In practice:
 
 - `mdexplore.py` still owns preview HTML generation, cache injection, and all
-  in-page JavaScript orchestration.
+  preview orchestration, cache injection, and in-page JavaScript orchestration,
+  while the document shell itself now lives in `assets/templates/preview/document.html`
+  and is rendered through `mdexplore_app/templates.py`.
 - `mdexplore_app/tree.py` and `mdexplore_app/tabs.py` now own the extracted
   tree-pane and tab-bar UI support classes, but not render control flow.
 - `mdexplore_app/pdf.py` owns PDF footer stamping and related PDF post-pass
   helpers.
+- `mdexplore_app/search.py` owns the extracted search tokenizer/parser and
+  canonical `NEAR(...)` query semantics (including legacy `CLOSE(...)` aliasing).
 - `mdexplore_app/workers.py` owns the background worker classes used by the
   window.
 
@@ -1513,6 +1571,62 @@ If preview search, named views, or preview marker behavior changes, also run:
 xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Test Inventory
+
+The `tests/` directory currently contains these suites:
+
+- `tests/test_preview_regressions.py`: headless `QWebEngineView` regressions for
+  saved view-tab round trips, named-view marker restore parity with tab
+  selection, persistent-highlight marker navigation, right-gutter search marker
+  navigation/placement, same-document preview search highlighting, and preview
+  context-menu/live-highlight probes. Uses `test/testdoc.md` plus persisted
+  sidecars copied into a temp fixture root, and also creates synthetic documents
+  for targeted NEAR/search/marker cases.
+- `tests/test_search_query_module.py`: pure `mdexplore_app.search` unit tests for
+  tokenization, quote/case handling, trailing-space preservation, NEAR-window
+  selection, hit counting, invalid-query fallback, and legacy `CLOSE(...)`
+  alias normalization to canonical `NEAR(...)`.
+- `tests/test_search_query_syntax.py`: `MdExploreWindow` wrapper tests that
+  verify the window-facing search helper methods (`_tokenize_match_query`,
+  `_current_search_terms`, `_current_near_term_groups`,
+  `_compile_match_predicate`, `_compile_match_hit_counter`,
+  `_best_near_focus_window`) stay aligned with the extracted module behavior.
+- `tests/test_js_assets.py`: startup registry/template tests for all externalized
+  JavaScript assets under `assets/js/preview/` and `assets/js/pdf/`, including
+  preload coverage and placeholder-substitution validation for preview search,
+  live selection, context-menu probing, marker updates, persistent highlights,
+  and PDF precheck/restore scripts.
+- `tests/test_template_assets.py`: startup registry/template tests for external
+  HTML assets under `assets/templates/preview/`, including unresolved-placeholder
+  validation and integration coverage that `MarkdownRenderer.render_document()`
+  uses the external `preview/document.html` shell correctly.
+- `tests/test_tab_bar_layout.py`: focused `ViewTabBar` widget regressions for
+  custom-label text budgeting and fallback handling when Qt reports stale
+  close-button geometry, covering the class of bugs where an inactive tab label
+  appears clipped until a later relayout/selection.
+- `tests/test_ui_assets.py`: repository-layout checks that tracked UI
+  `.svg`/`.png`/`.ttf` assets live under `assets/ui/` while `mdexplor-icon.png`
+  remains at the repo root.
+- `tests/test_highlight_clear_confirmations.py`: confirmation-dialog coverage
+  for non-recursive `Clear in Directory` and recursive `Clear All` tree actions,
+  including “No”/“Yes” flows and status-message assertions.
+- `tests/test_pdf_layout_hints.py`: pure PDF post-pass unit tests for TOC
+  detection and landscape/diagram page-flag classification, covering the case
+  where a TOC page mentions a landscape diagram heading but must remain portrait.
+
+Recommended execution patterns:
+
+- Fast parser-only check:
+  `.venv/bin/python -m unittest tests.test_search_query_module tests.test_search_query_syntax -v`
+- Asset/template loader check:
+  `.venv/bin/python -m unittest tests.test_js_assets tests.test_template_assets tests.test_ui_assets tests.test_pdf_layout_hints -v`
+- Tab-bar layout check:
+  `xvfb-run -a .venv/bin/python -m unittest tests.test_tab_bar_layout -v`
+- Preview/marker/search integration check:
+  `xvfb-run -a .venv/bin/python -m unittest tests.test_preview_regressions -v`
+- Full regression sweep:
+  `xvfb-run -a .venv/bin/python -m unittest discover -s tests -v`
+
 ## Documentation Requirements
 
 When changing behavior:
@@ -1520,8 +1634,8 @@ When changing behavior:
 - Update `README.md` usage and examples.
 - Update `DEVELOPERS-AGENTS.md` when behavioral hierarchy, precedence, invariants,
   render/caching/PDF/diagram control flow, or agent-facing workflow changes.
-- Keep `RULES.md` and `RENDER-PATHS.md` compatibility stubs aligned if the
-  canonical section names in `DEVELOPERS-AGENTS.md` move.
+- Update `UML.md` when extracted boundaries, architecture, or major control-flow
+  ownership changes.
 
 ## Common Feature Patterns
 

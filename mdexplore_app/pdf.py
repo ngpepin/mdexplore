@@ -7,6 +7,98 @@ from io import BytesIO
 
 from .constants import PDF_LANDSCAPE_PAGE_TOKEN
 
+_TOC_PAGE_HEADINGS = frozenset({"table of contents", "contents", "toc"})
+
+
+def _normalize_pdf_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _page_looks_like_table_of_contents(raw_text: str) -> bool:
+    """Return True when extracted page text looks like a TOC page.
+
+    TOC pages routinely mention many section headings, including headings from
+    wide diagram sections. The PDF post-pass must not treat those heading
+    references as evidence that the TOC page itself should rotate landscape.
+    """
+
+    lines = [
+        _normalize_pdf_text(raw_line)
+        for raw_line in str(raw_text or "").splitlines()
+        if _normalize_pdf_text(raw_line)
+    ]
+    return any(line in _TOC_PAGE_HEADINGS for line in lines[:8])
+
+
+def _classify_pdf_page_flags(
+    raw_page_texts: list[str], layout_hints: dict[str, object] | None = None
+) -> tuple[list[bool], list[bool], list[bool]]:
+    """Resolve landscape/diagram page flags from extracted PDF text."""
+
+    layout_hints = layout_hints if isinstance(layout_hints, dict) else {}
+    landscape_headings = {
+        _normalize_pdf_text(item)
+        for item in (layout_hints.get("landscapeHeadings") or [])
+        if str(item or "").strip()
+    }
+    diagram_headings = {
+        _normalize_pdf_text(item)
+        for item in (layout_hints.get("diagramHeadings") or [])
+        if str(item or "").strip()
+    }
+
+    normalized_page_texts = [_normalize_pdf_text(text) for text in raw_page_texts]
+    toc_page_flags = [
+        _page_looks_like_table_of_contents(raw_text) for raw_text in raw_page_texts
+    ]
+    landscape_token_literal = PDF_LANDSCAPE_PAGE_TOKEN
+    landscape_token = _normalize_pdf_text(landscape_token_literal)
+    landscape_token_compact = re.sub(r"\s+", "", landscape_token)
+
+    def contains_landscape_token(raw_text: str) -> bool:
+        normalized = _normalize_pdf_text(raw_text)
+        if landscape_token in normalized:
+            return True
+        collapsed = re.sub(r"\s+", "", normalized)
+        return landscape_token_compact in collapsed
+
+    token_page_flags = [
+        False if toc_page_flags[index] else contains_landscape_token(raw_text)
+        for index, raw_text in enumerate(raw_page_texts)
+    ]
+    landscape_heading_page_flags = [
+        False
+        if toc_page_flags[index]
+        else any(heading and heading in page_text for heading in landscape_headings)
+        for index, page_text in enumerate(normalized_page_texts)
+    ]
+    diagram_page_flags = [
+        False
+        if toc_page_flags[index]
+        else any(heading and heading in page_text for heading in diagram_headings)
+        for index, page_text in enumerate(normalized_page_texts)
+    ]
+
+    landscape_flags = list(token_page_flags)
+    for page_index, heading_hit in enumerate(landscape_heading_page_flags):
+        if not heading_hit:
+            continue
+        landscape_flags[page_index] = True
+        previous_index = page_index - 1
+        if (
+            previous_index >= 0
+            and token_page_flags[previous_index]
+            and not landscape_heading_page_flags[previous_index]
+            and not diagram_page_flags[previous_index]
+        ):
+            # Chromium can leak the invisible landscape token onto the
+            # preceding prose page while the real heading+diagram stays on the
+            # next page. Prefer the page that actually contains the landscape
+            # heading/diagram block.
+            landscape_flags[previous_index] = False
+
+    return landscape_flags, diagram_page_flags, toc_page_flags
+
 
 def extract_plantuml_error_details(stderr_text: str) -> str:
     """Parse PlantUML stderr into a readable, more detailed message."""
@@ -43,20 +135,6 @@ def stamp_pdf_page_numbers(
     reader = PdfReader(BytesIO(pdf_bytes))
     layout_hints = layout_hints if isinstance(layout_hints, dict) else {}
 
-    def normalize_text(value: str) -> str:
-        return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
-
-    landscape_headings = {
-        normalize_text(item)
-        for item in (layout_hints.get("landscapeHeadings") or [])
-        if str(item or "").strip()
-    }
-    diagram_headings = {
-        normalize_text(item)
-        for item in (layout_hints.get("diagramHeadings") or [])
-        if str(item or "").strip()
-    }
-
     def page_text(page) -> str:
         try:
             return page.extract_text() or ""
@@ -64,9 +142,8 @@ def stamp_pdf_page_numbers(
             return ""
 
     raw_page_texts = [page_text(page) for page in reader.pages]
-    normalized_page_texts = [normalize_text(text) for text in raw_page_texts]
     landscape_token_literal = PDF_LANDSCAPE_PAGE_TOKEN
-    landscape_token = normalize_text(landscape_token_literal)
+    landscape_token = _normalize_pdf_text(landscape_token_literal)
     landscape_token_compact = re.sub(r"\s+", "", landscape_token)
     landscape_token_pattern = re.compile(
         "".join(re.escape(char) + r"\s*" for char in landscape_token_literal),
@@ -74,39 +151,14 @@ def stamp_pdf_page_numbers(
     )
 
     def contains_landscape_token(raw_text: str) -> bool:
-        normalized = normalize_text(raw_text)
+        normalized = _normalize_pdf_text(raw_text)
         if landscape_token in normalized:
             return True
         collapsed = re.sub(r"\s+", "", normalized)
         return landscape_token_compact in collapsed
-    token_page_flags = [
-        contains_landscape_token(raw_text) for raw_text in raw_page_texts
-    ]
-    landscape_heading_page_flags = [
-        any(heading and heading in page_text for heading in landscape_headings)
-        for page_text in normalized_page_texts
-    ]
-    diagram_page_flags = [
-        any(heading and heading in page_text for heading in diagram_headings)
-        for page_text in normalized_page_texts
-    ]
-    landscape_flags = list(token_page_flags)
-    for page_index, heading_hit in enumerate(landscape_heading_page_flags):
-        if not heading_hit:
-            continue
-        landscape_flags[page_index] = True
-        previous_index = page_index - 1
-        if (
-            previous_index >= 0
-            and token_page_flags[previous_index]
-            and not landscape_heading_page_flags[previous_index]
-            and not diagram_page_flags[previous_index]
-        ):
-            # Chromium can leak the invisible landscape token onto the
-            # preceding prose page while the real heading+diagram stays on the
-            # next page. Prefer the page that actually contains the landscape
-            # heading/diagram block.
-            landscape_flags[previous_index] = False
+    landscape_flags, diagram_page_flags, _ = _classify_pdf_page_flags(
+        raw_page_texts, layout_hints
+    )
 
     def raster_page_bounds() -> list[tuple[float, float, float, float] | None]:
         if not reader.pages:
@@ -332,7 +384,7 @@ def stamp_pdf_page_numbers(
             line = raw_line.strip()
             if not line:
                 continue
-            normalized = normalize_text(line)
+            normalized = _normalize_pdf_text(line)
             if not normalized:
                 continue
             if contains_landscape_token(line):

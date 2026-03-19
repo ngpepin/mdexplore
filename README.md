@@ -10,6 +10,8 @@ module, but low-risk support code is now split into `mdexplore_app/`:
 - `mdexplore.py`: main window, markdown renderer, preview/PDF orchestration, and app entrypoint.
 - `mdexplore_app/constants.py`: shared runtime/render constants.
 - `mdexplore_app/runtime.py`: runtime environment helpers (config path, default root, GPU/software fallback, print layout knobs).
+- `mdexplore_app/search.py`: extracted search tokenization, boolean/NEAR parsing, and per-file hit counting.
+- `mdexplore_app/templates.py`: extracted HTML template-asset registry/renderer for preview document shells.
 - `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr formatting.
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers.
 - `mdexplore_app/tree.py`: markdown tree model and delegate (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
@@ -197,8 +199,11 @@ Run the GUI regression suite under `xvfb` so `QWebEngineView` has a display:
 xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The current suites in [tests/test_preview_regressions.py](/home/npepin/Projects/mdexplore/tests/test_preview_regressions.py)
-and [tests/test_search_query_syntax.py](/home/npepin/Projects/mdexplore/tests/test_search_query_syntax.py)
+The current suites in [tests/test_preview_regressions.py](/home/npepin/Projects/mdexplore/tests/test_preview_regressions.py),
+[tests/test_search_query_syntax.py](/home/npepin/Projects/mdexplore/tests/test_search_query_syntax.py),
+[tests/test_pdf_layout_hints.py](/home/npepin/Projects/mdexplore/tests/test_pdf_layout_hints.py),
+[tests/test_template_assets.py](/home/npepin/Projects/mdexplore/tests/test_template_assets.py),
+and [tests/test_tab_bar_layout.py](/home/npepin/Projects/mdexplore/tests/test_tab_bar_layout.py)
 cover:
 
 - saved view-tab round trips on the `test/testdoc.md` fixture,
@@ -210,7 +215,11 @@ cover:
   `NOT`, and `NEAR(...)` variants,
 - search parser/matcher handling for unquoted terms, double-quoted phrases,
   single-quoted case-sensitive phrases, and literal apostrophes inside
-  double-quoted phrases.
+  double-quoted phrases,
+- PDF post-pass TOC detection and landscape/diagram page-flag classification,
+- HTML preview-template asset loading and `MarkdownRenderer.render_document()`
+  integration,
+- custom tab-bar label budgeting and stale close-button geometry fallback.
 
 ### File Highlights
 
@@ -293,6 +302,8 @@ cover:
   tighter horizontal margin budget so wide diagrams can make use of the rotated page.
 - Headed landscape sections are anchored to the page that actually contains the
   diagram heading/content, avoiding earlier prose pages being rotated instead.
+- Pages that look like a table of contents are never promoted to landscape just
+  because they mention a landscape section heading in the TOC text.
 - Footer number font size is matched to the document's dominant scaled body text size.
 - Pages are stamped with centered footer numbering as `1 of N`, `2 of N`, etc.
 
@@ -448,6 +459,8 @@ Example:
 - Function-style operators accept both no-space and spaced forms before `(`:
   `NEAR(...)`/`NEAR (...)`, `OR(...)`/`OR (...)`, `AND(...)`/`AND (...)`,
   and `NOT(...)`/`NOT (...)`.
+- Legacy `CLOSE(...)` remains accepted for backward compatibility, but is
+  normalized internally to canonical `NEAR(...)`.
 - `AND(...)`, `OR(...)`, and `NEAR(...)` accept comma-delimited, space-delimited,
   or mixed argument lists.
 - `AND(...)` and `OR(...)` are variadic and can take 2+ arguments.
@@ -602,21 +615,16 @@ MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh 
 - The non-interactive launcher log remains separate at
   `~/.cache/mdexplore/launcher.log` and trims to `1,000` lines.
 
-## Render Architecture Map
+## Render and Rules Maps
 
-- See `RENDER-PATHS.md` for the detailed render/caching architecture:
-  - GUI vs PDF render flow.
-  - Mermaid JS vs Rust backend branches.
-  - Cache ownership and data flow between Python and in-page JavaScript.
-  - Restore path after PDF export and why separate Mermaid cache modes exist.
-
-## Behavior Rules Map
-
-- See `RULES.md` for the formal behavior model:
-  - rule hierarchy and precedence,
-  - symbolic invariants and guard/action notation,
-  - decision tables for root selection, backend defaults, and persistence,
-  - state/decision diagrams for launch, preview lifecycle, and PDF export.
+- See [DEVELOPERS-AGENTS.md](/home/npepin/Projects/mdexplore/DEVELOPERS-AGENTS.md)
+  for the consolidated deep maps:
+  - formal behavior/rule hierarchy,
+  - render/caching and PDF/export control flow,
+  - decision tables and invariants,
+  - agent-facing maintenance workflow.
+- See [UML.md](/home/npepin/Projects/mdexplore/UML.md) for subsystem-level
+  architecture, class relationships, and activity diagrams.
 
 ## Project Structure
 
@@ -626,6 +634,7 @@ mdexplore.sh                  # launcher (venv create/install/run)
 setup-mdexplore.sh            # full bootstrap script (venv/assets/mmdr)
 mdexplore.desktop.sample      # sample desktop launcher entry for user customization
 mdexplore_app/                # extracted support modules for search, tree, tabs, icons, PDF, runtime, template/JS assets, and workers
+tests/                        # headless/unit regressions for preview, search, template assets, and tab layout
 assets/js/                    # externalized preview/PDF JavaScript templates loaded into a startup registry at startup
 assets/js/pdf/                # PDF export/preflight/restore JavaScript templates
 assets/js/preview/            # preview search/highlight/selection/context-menu JavaScript templates
@@ -635,10 +644,8 @@ assets/ui/                    # local UI icons/font assets used by tree, tabs, c
 mdexplor-icon.png             # primary app icon asset kept at repo root for desktop launchers
 requirements.txt              # Python runtime dependencies
 README.md                     # project docs
-RULES.md                      # formal behavior rules, precedence, and decision diagrams
-RENDER-PATHS.md               # detailed render/caching path diagrams + maintenance narrative
 DEVELOPERS-AGENTS.md          # developer and coding-agent maintenance guide
-DESCRIPTION.md                # repository description + suggested topic tags
+UML.md                        # subsystem-level architecture/class/activity diagrams
 LICENSE                       # MIT license
 ```
 
@@ -695,7 +702,7 @@ If running the launcher appears to do nothing:
 
 1. Keep changes focused and small.
 2. Run syntax checks before submitting.
-3. Update docs (`README.md`, `RULES.md`, `DEVELOPERS-AGENTS.md`, and `RENDER-PATHS.md` when relevant) when behavior changes.
+3. Update docs (`README.md`, `DEVELOPERS-AGENTS.md`, and `UML.md` when relevant) when behavior changes.
 
 ## License
 
