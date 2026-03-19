@@ -39,7 +39,9 @@ class ViewTabBar(QTabBar):
     HOME_ICON_GAP = 6
     RESET_ICON_GAP = 3
     LABEL_TO_RESET_ICON_GAP = 8
-    TEXT_RIGHT_PADDING = 4
+    TEXT_RIGHT_PADDING = 2
+    CLOSE_BUTTON_RIGHT_INSET = 12
+    CLOSE_BUTTON_TEXT_GAP = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,6 +138,45 @@ class ViewTabBar(QTabBar):
         icon_y = rect.center().y() - (icon_size // 2)
         return QRect(icon_x, icon_y, icon_size, icon_size)
 
+    def _close_button_metrics(self) -> tuple[int, int]:
+        """Return close-indicator size from style metrics with sane fallbacks."""
+        close_w = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_TabCloseIndicatorWidth, None, self
+        )
+        close_h = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_TabCloseIndicatorHeight, None, self
+        )
+        if close_w <= 0:
+            close_w = 20
+        if close_h <= 0:
+            close_h = close_w
+        return int(close_w), int(close_h)
+
+    def _effective_close_button_rect(self, tab_index: int, rect: QRect) -> QRect:
+        """Return close-button geometry, falling back if Qt reports stale bounds."""
+        close_w, close_h = self._close_button_metrics()
+        fallback = QRect(
+            rect.right() - close_w - self.CLOSE_BUTTON_RIGHT_INSET + 1,
+            rect.center().y() - (close_h // 2),
+            close_w,
+            close_h,
+        )
+        button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
+        if button is None or not button.isVisible():
+            return fallback
+
+        geom = button.geometry()
+        if (
+            geom.isValid()
+            and geom.width() > 0
+            and geom.height() > 0
+            and geom.left() >= rect.left()
+            and geom.right() <= rect.right() + self.CLOSE_BUTTON_RIGHT_INSET
+            and geom.left() >= fallback.left() - max(4, self.RESET_ICON_GAP)
+        ):
+            return geom
+        return fallback
+
     def _reset_icon_rect(self, tab_index: int) -> QRect:
         """Return reset icon hit box for a labeled tab, or empty rect."""
         if (
@@ -149,14 +190,47 @@ class ViewTabBar(QTabBar):
             return QRect()
         icon_size = self._home_icon_size_px()
         icon_right = rect.right() - self.WIDTH_SIDE_PADDING
-        close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
-        if close_button is not None and close_button.isVisible():
-            icon_right = close_button.geometry().left() - self.RESET_ICON_GAP - 1
+        close_rect = self._effective_close_button_rect(tab_index, rect)
+        if close_rect.isValid():
+            icon_right = close_rect.left() - self.RESET_ICON_GAP - 1
         icon_x = icon_right - icon_size + 1
         if icon_x <= rect.left():
             return QRect()
         icon_y = rect.center().y() - (icon_size // 2)
         return QRect(icon_x, icon_y, icon_size, icon_size)
+
+    def _label_text_rect(
+        self, tab_index: int, rect: QRect, reset_rect: QRect | None = None
+    ) -> QRect:
+        """Compute the text paint rect without trusting transient button geometry."""
+        house_offset = 0
+        if self._tab_has_custom_label(tab_index):
+            icon_rect = self._home_icon_rect(tab_index)
+            if icon_rect.isValid():
+                house_offset = icon_rect.width() + self.HOME_ICON_GAP
+
+        bar_x = rect.left() + self.WIDTH_SIDE_PADDING - 1 + house_offset
+        text_left = bar_x + self.POSITION_BAR_WIDTH + self.POSITION_BAR_TEXT_GAP
+        text_rect = rect.adjusted(
+            text_left - rect.left(), 0, -self.TEXT_RIGHT_PADDING, 0
+        )
+        candidate_reset_rect = reset_rect if reset_rect is not None else QRect()
+        if candidate_reset_rect.isValid():
+            text_rect.setRight(
+                min(
+                    text_rect.right(),
+                    candidate_reset_rect.left() - self.LABEL_TO_RESET_ICON_GAP,
+                )
+            )
+        close_rect = self._effective_close_button_rect(tab_index, rect)
+        if close_rect.isValid():
+            text_rect.setRight(
+                min(
+                    text_rect.right(),
+                    close_rect.left() - self.CLOSE_BUTTON_TEXT_GAP,
+                )
+            )
+        return text_rect
 
     def _is_reset_icon_hit(self, tab_index: int, pos) -> bool:
         """Detect whether a pointer position targets the reset-beginning icon."""
@@ -392,22 +466,7 @@ class ViewTabBar(QTabBar):
             painter.setBrush(segment_color)
             painter.drawRect(segment_x, inner_y, segment_w, inner_h)
 
-        text_left = bar_x + bar_w + self.POSITION_BAR_TEXT_GAP
-        text_rect = rect.adjusted(
-            text_left - rect.left(), 0, -self.TEXT_RIGHT_PADDING, 0
-        )
-        if reset_rect.isValid():
-            text_rect.setRight(
-                min(
-                    text_rect.right(),
-                    reset_rect.left() - self.LABEL_TO_RESET_ICON_GAP,
-                )
-            )
-        close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
-        if close_button is not None and close_button.isVisible():
-            text_rect.setRight(
-                min(text_rect.right(), close_button.geometry().left() - 4)
-            )
+        text_rect = self._label_text_rect(tab_index, rect, reset_rect)
 
         text_color = QColor("#0b1220" if selected else "#1b2436")
         if not self.isTabEnabled(tab_index):

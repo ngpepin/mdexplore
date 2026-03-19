@@ -13,19 +13,33 @@ class JsAssetTests(unittest.TestCase):
         self.assertTrue(JS_ASSET_DIR.is_dir())
         self.assertIn("preview/apply_persistent_highlights.js", sources)
         self.assertIn("preview/clear_search_highlights.js", sources)
+        self.assertIn("preview/collect_diagram_view_state.js", sources)
         self.assertIn("preview/context_menu_selection_probe.js", sources)
+        self.assertIn("preview/harvest_mermaid_cache.js", sources)
         self.assertIn("preview/highlight_search_terms.js", sources)
         self.assertIn("preview/live_highlight_target.js", sources)
         self.assertIn("preview/live_selection_offsets.js", sources)
+        self.assertIn("preview/probe_active_top_line.js", sources)
+        self.assertIn("preview/probe_pdf_diagram_readiness.js", sources)
+        self.assertIn("preview/probe_restore_overlay_readiness.js", sources)
+        self.assertIn("preview/trigger_client_renderers.js", sources)
+        self.assertIn("preview/update_named_view_markers.js", sources)
         self.assertIn("pdf/precheck_layout.js", sources)
         self.assertIn("pdf/preprint_normalize.js", sources)
         self.assertIn("pdf/restore_preview_palette.js", sources)
         self.assertTrue(sources["preview/apply_persistent_highlights.js"].strip())
         self.assertTrue(sources["preview/clear_search_highlights.js"].strip())
+        self.assertTrue(sources["preview/collect_diagram_view_state.js"].strip())
         self.assertTrue(sources["preview/context_menu_selection_probe.js"].strip())
+        self.assertTrue(sources["preview/harvest_mermaid_cache.js"].strip())
         self.assertTrue(sources["preview/highlight_search_terms.js"].strip())
         self.assertTrue(sources["preview/live_highlight_target.js"].strip())
         self.assertTrue(sources["preview/live_selection_offsets.js"].strip())
+        self.assertTrue(sources["preview/probe_active_top_line.js"].strip())
+        self.assertTrue(sources["preview/probe_pdf_diagram_readiness.js"].strip())
+        self.assertTrue(sources["preview/probe_restore_overlay_readiness.js"].strip())
+        self.assertTrue(sources["preview/trigger_client_renderers.js"].strip())
+        self.assertTrue(sources["preview/update_named_view_markers.js"].strip())
         self.assertTrue(sources["pdf/precheck_layout.js"].strip())
         self.assertTrue(sources["pdf/preprint_normalize.js"].strip())
         self.assertTrue(sources["pdf/restore_preview_palette.js"].strip())
@@ -71,6 +85,19 @@ class JsAssetTests(unittest.TestCase):
         self.assertNotIn("__CLICK_X__", rendered)
         self.assertNotIn("__CLICK_Y__", rendered)
         self.assertNotIn("__SELECTED_HINT__", rendered)
+
+    def test_rendered_named_view_marker_update_template_has_no_unresolved_placeholders(
+        self,
+    ) -> None:
+        rendered = render_js_asset(
+            "preview/update_named_view_markers.js",
+            {"__PAYLOAD_JSON__": '[{"view_id":1,"top_line":12,"scroll_y":100.0,"color":"#abc"}]'},
+        )
+        self.assertIn(
+            'window.__mdexploreNamedViewMarkers = [{"view_id":1,"top_line":12,"scroll_y":100.0,"color":"#abc"}];',
+            rendered,
+        )
+        self.assertNotIn("__PAYLOAD_JSON__", rendered)
 
     def test_rendered_apply_persistent_highlights_template_has_no_unresolved_placeholders(
         self,

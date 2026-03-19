@@ -67,7 +67,9 @@ def tokenize_match_query(query: str) -> list[SearchToken]:
         if upper in {"AND", "OR", "NOT"}:
             tokens.append(("OP", upper, False))
         elif upper in {"NEAR", "CLOSE"}:
-            tokens.append(("CLOSE", "NEAR", False))
+            # `CLOSE(...)` remains accepted as a legacy alias, but the parser
+            # and AST normalize both spellings to the canonical `NEAR` form.
+            tokens.append(("NEAR", "NEAR", False))
         else:
             tokens.append(("TERM", token_value, False))
 
@@ -112,7 +114,7 @@ def extract_near_term_groups(query: str) -> list[NearTermGroup]:
 
     while i < token_count:
         token_type, _token_value, _token_case_sensitive = tokens[i]
-        if token_type != "CLOSE":
+        if token_type != "NEAR":
             i += 1
             continue
 
@@ -468,7 +470,7 @@ def compile_match_predicate(query: str):
         if token_index < 0 or token_index >= len(tokens):
             return False
         token_type, token_value, _token_case_sensitive = tokens[token_index]
-        if token_type in {"TERM", "LPAREN", "CLOSE"}:
+        if token_type in {"TERM", "LPAREN", "NEAR"}:
             return True
         if token_type == "OP" and token_value == "NOT":
             return True
@@ -580,7 +582,7 @@ def compile_match_predicate(query: str):
         return combined
 
     def parse_near_call():
-        consume("CLOSE", "NEAR")
+        consume("NEAR", "NEAR")
         consume("LPAREN")
         terms: list[SearchTerm] = []
         while True:
@@ -602,7 +604,7 @@ def compile_match_predicate(query: str):
         consume("RPAREN")
         if len(terms) < 2:
             raise QueryParseError("NEAR(...) requires at least two terms")
-        return ("CLOSE", terms)
+        return ("NEAR", terms)
 
     def parse_primary(_allow_implicit_and: bool = True):
         token = peek()
@@ -612,7 +614,7 @@ def compile_match_predicate(query: str):
         if token_type == "TERM":
             consume("TERM")
             return ("TERM", token_value, token_case_sensitive)
-        if token_type == "CLOSE":
+        if token_type == "NEAR":
             return parse_near_call()
         if (
             token_type == "OP"
@@ -664,7 +666,7 @@ def compile_match_predicate(query: str):
                 file_name_folded,
                 file_content_folded,
             )
-        if node_type == "CLOSE":
+        if node_type == "NEAR":
             _kind, near_terms = node
             return near_terms_match(near_terms, file_content)
         if node_type == "NOT":

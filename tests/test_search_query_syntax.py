@@ -29,6 +29,20 @@ class SearchQuerySyntaxTests(unittest.TestCase):
             ],
         )
 
+    def test_tokenizer_normalizes_legacy_close_keyword_to_near(self) -> None:
+        tokens = self.window._tokenize_match_query("""CLOSE(alpha,beta)""")
+        self.assertEqual(
+            tokens,
+            [
+                ("NEAR", "NEAR", False),
+                ("LPAREN", "(", False),
+                ("TERM", "alpha", False),
+                ("COMMA", ",", False),
+                ("TERM", "beta", False),
+                ("RPAREN", ")", False),
+            ],
+        )
+
     def test_single_quotes_inside_double_quotes_are_literal(self) -> None:
         tokens = self.window._tokenize_match_query(
             r'''"Program Director's RAG"'''
@@ -88,6 +102,11 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         predicate = self.window._compile_match_predicate("""NEAR('The ', the)""")
         self.assertFalse(predicate("example.md", "The quick brown fox"))
         self.assertTrue(predicate("example.md", "The quick brown the fox"))
+
+    def test_legacy_close_alias_matches_like_near(self) -> None:
+        predicate = self.window._compile_match_predicate("""CLOSE(alpha,beta)""")
+        self.assertTrue(predicate("example.md", "alpha goes with beta"))
+        self.assertFalse(predicate("example.md", "alpha only"))
 
     def test_hit_counter_counts_single_quoted_terms_separately(self) -> None:
         counter = self.window._compile_match_hit_counter("'Alpha' alpha")

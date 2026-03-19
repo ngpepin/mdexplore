@@ -25,6 +25,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore_app/js.py`: startup JS-asset registry and template renderer for
   externalized preview/PDF page scripts under `assets/js/preview/` and
   `assets/js/pdf/`.
+- `mdexplore_app/templates.py`: startup HTML-template asset registry and renderer
+  for externalized preview document shells under `assets/templates/`.
 - `mdexplore_app/runtime.py`: runtime/config/GPU-print helper functions.
 - `mdexplore_app/search.py`: extracted pure search query helpers for tokenization,
   predicate compilation, NEAR-window selection, and per-file hit counting.
@@ -41,6 +43,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `assets/js/`: externalized JavaScript templates used by preview/search/PDF flows.
   - `assets/js/preview/`: preview search/highlight/selection/context-menu DOM scripts.
   - `assets/js/pdf/`: PDF preflight, DOM normalization, and restore scripts.
+- `assets/templates/`: externalized HTML template assets used by preview/document rendering.
+  - `assets/templates/preview/`: preview document shell/template assets.
 - `vendor/`: vendored local runtime assets (Mermaid JS, MathJax, PlantUML jar,
   and related renderer sources/binaries when bootstrapped).
 - `test/`: sample Markdown/PDF fixtures used for manual smoke testing.

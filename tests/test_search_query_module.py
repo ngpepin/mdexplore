@@ -18,6 +18,28 @@ class SearchQueryModuleTests(unittest.TestCase):
             ],
         )
 
+    def test_tokenizer_normalizes_near_and_close_to_near(self) -> None:
+        tokens = search_query.tokenize_match_query(
+            """NEAR(alpha,beta) CLOSE(gamma,delta)"""
+        )
+        self.assertEqual(
+            tokens,
+            [
+                ("NEAR", "NEAR", False),
+                ("LPAREN", "(", False),
+                ("TERM", "alpha", False),
+                ("COMMA", ",", False),
+                ("TERM", "beta", False),
+                ("RPAREN", ")", False),
+                ("NEAR", "NEAR", False),
+                ("LPAREN", "(", False),
+                ("TERM", "gamma", False),
+                ("COMMA", ",", False),
+                ("TERM", "delta", False),
+                ("RPAREN", ")", False),
+            ],
+        )
+
     def test_extract_search_terms_dedupes_and_preserves_trailing_space(self) -> None:
         self.assertEqual(
             search_query.extract_search_terms("""'The ' "alpha beta" alpha ALPHA"""),
@@ -57,6 +79,11 @@ class SearchQueryModuleTests(unittest.TestCase):
             counter("example.md", "Nicolas Pepin\nOther text\nNicolas Pepin\n"),
             2,
         )
+
+    def test_legacy_close_alias_remains_accepted(self) -> None:
+        predicate = search_query.compile_match_predicate("""CLOSE(alpha,beta)""")
+        self.assertTrue(predicate("example.md", "alpha goes with beta"))
+        self.assertFalse(predicate("example.md", "alpha only"))
 
 
 if __name__ == "__main__":
