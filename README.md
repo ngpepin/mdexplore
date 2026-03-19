@@ -7,7 +7,7 @@ Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directo
 The application still uses `mdexplore.py` as the main entrypoint and primary UI
 module, but low-risk support code is now split into `mdexplore_app/`:
 
-- `mdexplore.py`: main window, markdown renderer, preview JS/HTML template, and app entrypoint.
+- `mdexplore.py`: main window, markdown renderer, preview/PDF orchestration, and app entrypoint.
 - `mdexplore_app/constants.py`: shared runtime/render constants.
 - `mdexplore_app/runtime.py`: runtime environment helpers (config path, default root, GPU/software fallback, print layout knobs).
 - `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr formatting.
@@ -626,6 +626,9 @@ mdexplore.sh                  # launcher (venv create/install/run)
 setup-mdexplore.sh            # full bootstrap script (venv/assets/mmdr)
 mdexplore.desktop.sample      # sample desktop launcher entry for user customization
 mdexplore_app/                # extracted support modules for search, tree, tabs, icons, PDF, runtime, and workers
+assets/js/                    # externalized preview/PDF JavaScript templates loaded into a startup registry at startup
+assets/js/pdf/                # PDF export/preflight/restore JavaScript templates
+assets/js/preview/            # preview-search highlight/clear JavaScript templates
 assets/ui/                    # local UI icons/font assets used by tree, tabs, copy controls, and search pills
 mdexplor-icon.png             # primary app icon asset kept at repo root for desktop launchers
 requirements.txt              # Python runtime dependencies

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from io import BytesIO
 
+from .constants import PDF_LANDSCAPE_PAGE_TOKEN
+
 
 def extract_plantuml_error_details(stderr_text: str) -> str:
     """Parse PlantUML stderr into a readable, more detailed message."""
@@ -63,7 +65,7 @@ def stamp_pdf_page_numbers(
 
     raw_page_texts = [page_text(page) for page in reader.pages]
     normalized_page_texts = [normalize_text(text) for text in raw_page_texts]
-    landscape_token_literal = "__MDEXPLORE_LANDSCAPE_PAGE__"
+    landscape_token_literal = PDF_LANDSCAPE_PAGE_TOKEN
     landscape_token = normalize_text(landscape_token_literal)
     landscape_token_compact = re.sub(r"\s+", "", landscape_token)
     landscape_token_pattern = re.compile(
