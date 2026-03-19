@@ -113,11 +113,15 @@ class JsAssetTests(unittest.TestCase):
                 "__IMPORTANT_MARKER_COLOR__": json.dumps("rgba(9,8,7,0.9)"),
                 "__NORMAL_KIND__": "normal",
                 "__IMPORTANT_KIND__": "important",
+                "__OFFSET_SPACE_PREVIEW__": "preview_text_v2",
+                "__OFFSET_SPACE_SOURCE__": "markdown_source_v1",
             },
         )
         self.assertIn('const incoming = [{"id":"case1","start":1,"end":5,"kind":"normal"}];', rendered)
         self.assertIn('const highlightColor = "rgba(1,2,3,0.4)";', rendered)
         self.assertIn('const importantHighlightTextColor = "#010203";', rendered)
+        self.assertNotIn("__OFFSET_SPACE_PREVIEW__", rendered)
+        self.assertNotIn("__OFFSET_SPACE_SOURCE__", rendered)
         self.assertNotIn("__PAYLOAD__", rendered)
         self.assertNotIn("__IMPORTANT_KIND__", rendered)
 

@@ -7,6 +7,7 @@ import argparse
 import base64
 import html
 import hashlib
+from html.parser import HTMLParser
 from io import BytesIO
 import json
 import math
@@ -148,6 +149,65 @@ from mdexplore_app.workers import (
     PreviewRenderWorker,
     TreeMarkerScanWorker,
 )
+
+
+PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW = "preview_text_v2"
+PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE = "markdown_source_v1"
+
+
+class _PreviewLogicalTextExtractor(HTMLParser):
+    """Extract the preview's countable text stream from cached HTML."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "textarea"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._inside_main = False
+        self._skip_depth = 0
+        self._chunks: list[str] = []
+
+    @staticmethod
+    def _countable_text(value: str) -> str:
+        source = value if isinstance(value, str) else ""
+        if not source:
+            return ""
+        parts: list[str] = []
+        cursor = 0
+        for match in re.finditer(r"\s+", source):
+            if match.start() > cursor:
+                parts.append(source[cursor : match.start()])
+            raw = match.group(0)
+            if not re.search(r"[\r\n\t]", raw):
+                parts.append(raw)
+            cursor = match.end()
+        if cursor < len(source):
+            parts.append(source[cursor:])
+        return "".join(parts)
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        normalized = str(tag or "").strip().lower()
+        if normalized == "main":
+            self._inside_main = True
+        if self._inside_main and normalized in self._SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = str(tag or "").strip().lower()
+        if self._inside_main and normalized in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        if normalized == "main":
+            self._inside_main = False
+            self._skip_depth = 0
+
+    def handle_data(self, data: str) -> None:
+        if not self._inside_main or self._skip_depth > 0:
+            return
+        countable = self._countable_text(data)
+        if countable:
+            self._chunks.append(countable)
+
+    def logical_text(self) -> str:
+        return "".join(self._chunks)
 
 
 class MarkdownRenderer:
@@ -2327,9 +2387,29 @@ class MdExploreWindow(QMainWindow):
                 kind = PREVIEW_HIGHLIGHT_KIND_NORMAL
             if start < 0 or end <= start:
                 continue
-            sanitized.append(
-                {"id": raw_id, "start": start, "end": end, "kind": kind}
+            entry: dict[str, int | str] = {
+                "id": raw_id,
+                "start": start,
+                "end": end,
+                "kind": kind,
+            }
+            raw_anchor_text = item.get("anchor_text")
+            if isinstance(raw_anchor_text, str):
+                anchor_text = re.sub(r"\s+", " ", raw_anchor_text).strip()
+                if len(anchor_text) >= 3:
+                    entry["anchor_text"] = anchor_text[:480]
+            raw_offset_space = item.get("offset_space")
+            offset_space = (
+                str(raw_offset_space).strip().lower()
+                if isinstance(raw_offset_space, str)
+                else ""
             )
+            if offset_space in {
+                PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+                PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE,
+            }:
+                entry["offset_space"] = offset_space
+            sanitized.append(entry)
 
         if not sanitized:
             return []
@@ -2361,6 +2441,336 @@ class MdExploreWindow(QMainWindow):
                 continue
             merged.append(entry)
         return merged
+
+    @staticmethod
+    def _markdown_fragment_to_preview_anchor_text(fragment: str) -> str:
+        """Collapse one markdown slice into a search-ready visible-text anchor."""
+        if not isinstance(fragment, str) or not fragment:
+            return ""
+        text = html.unescape(fragment)
+        text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"(?m)^\s{0,3}>\s*\[![^\]]+\]\s*", "", text)
+        text = re.sub(r"(?m)^\s{0,3}>\s*", "", text)
+        text = re.sub(r"(?m)^\s{0,3}(?:[-*+]\s+|\d+\.\s+)", "", text)
+        text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = text.replace("`", "")
+        text = text.replace("*", "")
+        text = text.replace("_", "")
+        text = text.replace("~", "")
+        text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!])", r"\1", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:480]
+
+    def _legacy_preview_highlight_anchor_text(
+        self, path_key: str | None, start: int, end: int
+    ) -> str:
+        """Best-effort visible-text anchor for one legacy source-offset range."""
+        if not path_key:
+            return ""
+        try:
+            source_text = Path(path_key).read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        safe_start = max(0, min(len(source_text), int(start)))
+        safe_end = max(safe_start, min(len(source_text), int(end)))
+        if safe_end <= safe_start:
+            return ""
+        context_start = max(0, safe_start - 80)
+        context_end = min(len(source_text), safe_end + 80)
+        return self._markdown_fragment_to_preview_anchor_text(
+            source_text[context_start:context_end]
+        )
+
+    @staticmethod
+    def _normalized_search_index(value: str) -> tuple[str, list[int]]:
+        """Collapse one text stream for resilient substring search plus offset map."""
+        source = value if isinstance(value, str) else ""
+        normalized_chars: list[str] = []
+        index_map: list[int] = []
+        in_whitespace = False
+        for index, ch in enumerate(source):
+            if ch.isspace():
+                if in_whitespace:
+                    continue
+                normalized_chars.append(" ")
+                index_map.append(index)
+                in_whitespace = True
+                continue
+            normalized_chars.append(ch)
+            index_map.append(index)
+            in_whitespace = False
+        while normalized_chars and normalized_chars[0] == " ":
+            normalized_chars.pop(0)
+            index_map.pop(0)
+        while normalized_chars and normalized_chars[-1] == " ":
+            normalized_chars.pop()
+            index_map.pop()
+        return "".join(normalized_chars), index_map
+
+    @staticmethod
+    def _compact_search_index(value: str) -> tuple[str, list[int]]:
+        """Remove all whitespace from one text stream plus offset map."""
+        source = value if isinstance(value, str) else ""
+        compact_chars: list[str] = []
+        index_map: list[int] = []
+        for index, ch in enumerate(source):
+            if ch.isspace():
+                continue
+            compact_chars.append(ch)
+            index_map.append(index)
+        return "".join(compact_chars), index_map
+
+    @staticmethod
+    def _legacy_source_slice_candidates(
+        source_text: str, start: int, end: int
+    ) -> list[str]:
+        """Build visible-text candidates from one legacy raw source range."""
+        source = source_text if isinstance(source_text, str) else ""
+        if not source:
+            return []
+        safe_start = max(0, min(len(source), int(start)))
+        safe_end = max(safe_start, min(len(source), int(end)))
+        if safe_end <= safe_start:
+            return []
+
+        candidates: list[str] = []
+
+        def _push(candidate: str, *, min_chars: int = 3) -> None:
+            normalized_candidate = re.sub(r"\s+", " ", str(candidate or "")).strip()
+            if len(normalized_candidate) < min_chars:
+                return
+            if normalized_candidate not in candidates:
+                candidates.append(normalized_candidate)
+
+        max_extra = min(len(source) - safe_end, 128)
+        extras = list(range(0, min(max_extra, 8) + 1))
+        for extra in (10, 12, 16, 24, 32, 48, 64, 96, 128):
+            if extra <= max_extra and extra not in extras:
+                extras.append(extra)
+
+        for extra in extras:
+            raw_end = safe_end + extra
+            candidate = MdExploreWindow._markdown_fragment_to_preview_anchor_text(
+                source[safe_start:raw_end]
+            )
+            _push(candidate)
+            # When the raw source boundary cuts through a word, include a
+            # version trimmed back to the prior token boundary. This recovers
+            # exact visible phrases when markdown markers consume source bytes
+            # inside the selection (for example trailing `**`).
+            if (
+                raw_end < len(source)
+                and raw_end > safe_start
+                and source[raw_end - 1].isalnum()
+                and source[raw_end].isalnum()
+            ):
+                trimmed = re.sub(r"\s+\S+$", "", candidate).strip()
+                _push(trimmed)
+        return candidates
+
+    @staticmethod
+    def _preview_anchor_candidates(anchor_text: str) -> list[str]:
+        """Produce search candidates from one cleaned legacy anchor snippet."""
+        normalized = re.sub(r"\s+", " ", str(anchor_text or "")).strip()
+        if not normalized:
+            return []
+
+        candidates: list[str] = []
+
+        def _push(candidate: str) -> None:
+            normalized_candidate = re.sub(r"\s+", " ", str(candidate or "")).strip()
+            if len(normalized_candidate) < 12:
+                return
+            if normalized_candidate not in candidates:
+                candidates.append(normalized_candidate)
+
+        _push(normalized)
+        stripped = re.sub(r"^[^\w]+|[^\w]+$", "", normalized, flags=re.UNICODE).strip()
+        _push(stripped)
+
+        boundaries = [0]
+        for index, ch in enumerate(normalized):
+            if ch == " " and index + 1 < len(normalized):
+                boundaries.append(index + 1)
+        for start in boundaries[:16]:
+            for width in (72, 120, 220):
+                _push(normalized[start : start + width])
+        if len(normalized) > 220:
+            _push(normalized[-220:])
+        return candidates
+
+    def _resolve_legacy_source_highlight_entries(
+        self, path_key: str | None, entries: list[dict[str, int | str]]
+    ) -> tuple[list[dict[str, int | str]], bool]:
+        """Convert legacy source-offset highlight ranges into preview offsets."""
+        if not path_key or not entries:
+            return entries, False
+        try:
+            source_text = Path(path_key).read_text(encoding="utf-8")
+        except Exception:
+            source_text = ""
+        cached = self.cache.get(path_key)
+        html_doc = cached[2] if isinstance(cached, tuple) and len(cached) >= 3 else None
+        if not isinstance(html_doc, str) or not html_doc:
+            return entries, False
+
+        extractor = _PreviewLogicalTextExtractor()
+        try:
+            extractor.feed(html_doc)
+            logical_text = extractor.logical_text()
+        except Exception:
+            return entries, False
+        if not logical_text:
+            return entries, False
+
+        compact_text, index_map = self._compact_search_index(logical_text)
+        if not compact_text or not index_map:
+            return entries, False
+
+        migrated = False
+        resolved_entries: list[dict[str, int | str]] = []
+        for raw_entry in entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = dict(raw_entry)
+            offset_space = str(entry.get("offset_space", "")).strip().lower()
+            if offset_space == PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW:
+                resolved_entries.append(entry)
+                continue
+
+            entry_start = max(0, int(entry.get("start", -1)))
+            entry_length = max(1, int(entry.get("end", entry_start + 1)) - entry_start)
+            direct_candidates = self._legacy_source_slice_candidates(
+                source_text,
+                entry_start,
+                int(entry.get("end", -1)),
+            )
+            context_candidates: list[str] = []
+            if source_text:
+                context_start = max(0, min(len(source_text), entry_start) - 80)
+                context_end = min(
+                    len(source_text), max(entry_start, int(entry.get("end", -1))) + 80
+                )
+                context_anchor = self._markdown_fragment_to_preview_anchor_text(
+                    source_text[context_start:context_end]
+                )
+                context_candidates = self._preview_anchor_candidates(context_anchor)
+            if not direct_candidates and not context_candidates:
+                resolved_entries.append(entry)
+                continue
+
+            best_score: tuple[int, int, int, int] | None = None
+            resolved_start = entry_start
+            resolved_end = max(
+                resolved_start + 1, int(entry.get("end", resolved_start + 1))
+            )
+            for group_priority, candidates in enumerate(
+                (direct_candidates, context_candidates)
+            ):
+                if not candidates:
+                    continue
+                group_best_score: tuple[int, int, int, int] | None = None
+                group_best_start = resolved_start
+                group_best_end = resolved_end
+                for candidate in candidates:
+                    compact_candidate = re.sub(r"\s+", "", candidate)
+                    if len(compact_candidate) < (3 if group_priority == 0 else 8):
+                        continue
+                    candidate_length = len(candidate)
+                    search_at = 0
+                    while True:
+                        match_at = compact_text.find(compact_candidate, search_at)
+                        if match_at < 0:
+                            break
+                        raw_start = index_map[match_at]
+                        raw_end = index_map[match_at + len(compact_candidate) - 1] + 1
+                        score = (
+                            abs(candidate_length - entry_length),
+                            -candidate_length,
+                            abs(raw_start - entry_start),
+                            raw_start,
+                        )
+                        if group_best_score is None or score < group_best_score:
+                            group_best_score = score
+                            group_best_start = raw_start
+                            group_best_end = raw_end
+                        search_at = match_at + 1
+                if group_best_score is not None:
+                    best_score = group_best_score
+                    resolved_start = group_best_start
+                    resolved_end = group_best_end
+                    break
+
+            if best_score is None:
+                resolved_entries.append(entry)
+                continue
+
+            entry["start"] = max(0, int(resolved_start))
+            entry["end"] = max(int(entry["start"]) + 1, int(resolved_end))
+            entry["offset_space"] = PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW
+            resolved_entries.append(entry)
+            migrated = True
+
+        normalized_entries = self._normalize_text_highlight_entries(resolved_entries)
+        return normalized_entries, migrated
+
+    def _preview_highlight_entries_for_apply(
+        self, path_key: str | None, entries: list[dict[str, int | str]]
+    ) -> list[dict[str, int | str]]:
+        """Decorate highlight entries with compatibility hints before JS apply."""
+        prepared: list[dict[str, int | str]] = []
+        source_text = ""
+        if path_key:
+            try:
+                source_text = Path(path_key).read_text(encoding="utf-8")
+            except Exception:
+                source_text = ""
+        for raw_entry in entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = dict(raw_entry)
+            legacy_offset_untyped = bool(entry.pop("legacy_offset_untyped", 0))
+            offset_space = str(entry.get("offset_space", "")).strip().lower()
+            if offset_space == PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW:
+                prepared.append(entry)
+                continue
+            if (
+                offset_space != PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE
+                and not legacy_offset_untyped
+            ):
+                prepared.append(entry)
+                continue
+            entry_start = int(entry.get("start", -1))
+            entry_end = int(entry.get("end", -1))
+            anchor_text = ""
+            if source_text:
+                context_start = max(0, min(len(source_text), entry_start) - 80)
+                context_end = min(len(source_text), max(entry_start, entry_end) + 80)
+                anchor_text = self._markdown_fragment_to_preview_anchor_text(
+                    source_text[context_start:context_end]
+                )
+                direct_candidates = self._legacy_source_slice_candidates(
+                    source_text, entry_start, entry_end
+                )
+                if direct_candidates:
+                    entry["legacy_direct_candidates"] = direct_candidates
+                context_candidates = self._preview_anchor_candidates(anchor_text)
+                if context_candidates:
+                    entry["legacy_context_candidates"] = context_candidates
+            if not anchor_text:
+                anchor_text = self._legacy_preview_highlight_anchor_text(
+                    path_key,
+                    entry_start,
+                    entry_end,
+                )
+            if anchor_text:
+                entry["legacy_anchor_text"] = anchor_text
+            if offset_space == PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE:
+                entry["offset_space"] = PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE
+            prepared.append(entry)
+        return prepared
 
     @staticmethod
     def _normalize_preview_highlight_kind(kind: str | None) -> str:
@@ -2406,7 +2816,52 @@ class MdExploreWindow(QMainWindow):
                     continue
                 entries = self._normalize_text_highlight_entries(raw_entries)
                 if entries:
-                    highlights_by_file[file_name] = entries
+                    implicit_offset_keys: set[tuple[str, int, int, str]] = set()
+                    if isinstance(raw_entries, list):
+                        for raw_entry in raw_entries:
+                            if not isinstance(raw_entry, dict):
+                                continue
+                            raw_id = raw_entry.get("id")
+                            if not isinstance(raw_id, str) or not raw_id.strip():
+                                continue
+                            try:
+                                raw_start = int(raw_entry.get("start", -1))
+                                raw_end = int(raw_entry.get("end", -1))
+                            except Exception:
+                                continue
+                            if raw_start < 0 or raw_end <= raw_start:
+                                continue
+                            raw_offset_space = raw_entry.get("offset_space")
+                            if isinstance(raw_offset_space, str) and raw_offset_space.strip():
+                                continue
+                            implicit_offset_keys.add(
+                                (
+                                    raw_id.strip(),
+                                    raw_start,
+                                    raw_end,
+                                    self._normalize_preview_highlight_kind(
+                                        raw_entry.get("kind")
+                                    ),
+                                )
+                            )
+                    tagged_entries: list[dict] = []
+                    for entry in entries:
+                        tagged_entry = dict(entry)
+                        tagged_key = (
+                            str(tagged_entry.get("id", "")).strip(),
+                            int(tagged_entry.get("start", -1)),
+                            int(tagged_entry.get("end", -1)),
+                            self._normalize_preview_highlight_kind(
+                                tagged_entry.get("kind")
+                            ),
+                        )
+                        if (
+                            "offset_space" not in tagged_entry
+                            and tagged_key in implicit_offset_keys
+                        ):
+                            tagged_entry["legacy_offset_untyped"] = 1
+                        tagged_entries.append(tagged_entry)
+                    highlights_by_file[file_name] = tagged_entries
 
         self._persisted_text_highlights_by_dir[directory_key] = highlights_by_file
         return highlights_by_file
@@ -2451,7 +2906,7 @@ class MdExploreWindow(QMainWindow):
             return []
         directory, file_name = resolved
         entries = self._directory_text_highlights(directory).get(file_name, [])
-        return self._normalize_text_highlight_entries(entries)
+        return self._clone_json_compatible_list(entries)
 
     def _persist_text_highlights_for_path_key(
         self, path_key: str | None, entries: list[dict]
@@ -4291,6 +4746,22 @@ class MdExploreWindow(QMainWindow):
             self._apply_all_ready_plantuml_to_current_preview()
         if has_text_highlights:
             self._apply_persistent_preview_highlights(current_key)
+            if has_client_renderers:
+                # Mermaid/MathJax can mutate the preview text stream after the
+                # initial load callback. Re-apply highlights after delayed
+                # renderer passes so persisted offsets stay anchored.
+                QTimer.singleShot(
+                    500,
+                    lambda key=current_key: self._apply_persistent_preview_highlights(
+                        key
+                    ),
+                )
+                QTimer.singleShot(
+                    1650,
+                    lambda key=current_key: self._apply_persistent_preview_highlights(
+                        key
+                    ),
+                )
         if has_named_view_markers:
             self._refresh_named_view_markers_in_preview(current_key, force=True)
         if has_mermaid:
@@ -5439,13 +5910,21 @@ class MdExploreWindow(QMainWindow):
         self.preview.page().runJavaScript(js, _on_result)
 
     def _replace_persistent_preview_highlight_range(
-        self, path_key: str, start: int, end: int, kind: str
+        self,
+        path_key: str,
+        start: int,
+        end: int,
+        kind: str,
+        anchor_text: str = "",
     ) -> None:
         """Replace overlap with one highlight kind, persist, and reapply."""
         if end <= start:
             self.statusBar().showMessage("Select text to highlight", 3000)
             return
         normalized_kind = self._normalize_preview_highlight_kind(kind)
+        normalized_anchor_text = re.sub(r"\s+", " ", str(anchor_text or "")).strip()
+        if len(normalized_anchor_text) < 3:
+            normalized_anchor_text = ""
         self._debug_log(
             "highlight-replace "
             f"path={path_key} start={start} end={end} "
@@ -5460,42 +5939,62 @@ class MdExploreWindow(QMainWindow):
             entry_end = int(entry.get("end", -1))
             entry_kind = self._normalize_preview_highlight_kind(entry.get("kind"))
             if entry_end <= start or entry_start >= end:
-                updated.append(
-                    {
-                        "id": str(entry.get("id", "")).strip()
-                        or self._new_text_highlight_id(),
-                        "start": entry_start,
-                        "end": entry_end,
-                        "kind": entry_kind,
-                    }
-                )
+                preserved_entry = {
+                    "id": str(entry.get("id", "")).strip()
+                    or self._new_text_highlight_id(),
+                    "start": entry_start,
+                    "end": entry_end,
+                    "kind": entry_kind,
+                    "offset_space": str(
+                        entry.get("offset_space", PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW)
+                    ).strip().lower()
+                    or PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+                }
+                preserved_anchor_text = re.sub(
+                    r"\s+", " ", str(entry.get("anchor_text") or "")
+                ).strip()
+                if len(preserved_anchor_text) >= 3:
+                    preserved_entry["anchor_text"] = preserved_anchor_text[:480]
+                updated.append(preserved_entry)
                 continue
             if entry_start < start:
-                updated.append(
-                    {
-                        "id": self._new_text_highlight_id(),
-                        "start": entry_start,
-                        "end": start,
-                        "kind": entry_kind,
-                    }
-                )
+                left_entry = {
+                    "id": self._new_text_highlight_id(),
+                    "start": entry_start,
+                    "end": start,
+                    "kind": entry_kind,
+                    "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+                }
+                preserved_anchor_text = re.sub(
+                    r"\s+", " ", str(entry.get("anchor_text") or "")
+                ).strip()
+                if len(preserved_anchor_text) >= 3:
+                    left_entry["anchor_text"] = preserved_anchor_text[:480]
+                updated.append(left_entry)
             if entry_end > end:
-                updated.append(
-                    {
-                        "id": self._new_text_highlight_id(),
-                        "start": end,
-                        "end": entry_end,
-                        "kind": entry_kind,
-                    }
-                )
-        updated.append(
-            {
-                "id": self._new_text_highlight_id(),
-                "start": start,
-                "end": end,
-                "kind": normalized_kind,
-            }
-        )
+                right_entry = {
+                    "id": self._new_text_highlight_id(),
+                    "start": end,
+                    "end": entry_end,
+                    "kind": entry_kind,
+                    "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+                }
+                preserved_anchor_text = re.sub(
+                    r"\s+", " ", str(entry.get("anchor_text") or "")
+                ).strip()
+                if len(preserved_anchor_text) >= 3:
+                    right_entry["anchor_text"] = preserved_anchor_text[:480]
+                updated.append(right_entry)
+        new_entry: dict[str, int | str] = {
+            "id": self._new_text_highlight_id(),
+            "start": start,
+            "end": end,
+            "kind": normalized_kind,
+            "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+        }
+        if normalized_anchor_text:
+            new_entry["anchor_text"] = normalized_anchor_text[:480]
+        updated.append(new_entry)
         entries = self._normalize_text_highlight_entries(updated)
         self._current_preview_text_highlights = entries
         self._persist_text_highlights_for_path_key(path_key, entries)
@@ -5535,16 +6034,48 @@ class MdExploreWindow(QMainWindow):
             return
         if expected_key is not None and expected_key != current_key:
             return
-        entries = self._normalize_text_highlight_entries(
+        raw_entries = self._clone_json_compatible_list(
             self._current_preview_text_highlights
         )
+        entries = self._normalize_text_highlight_entries(raw_entries)
+        legacy_untyped_keys = {
+            (
+                str(raw_entry.get("id", "")).strip(),
+                int(raw_entry.get("start", -1)),
+                int(raw_entry.get("end", -1)),
+                self._normalize_preview_highlight_kind(raw_entry.get("kind")),
+            )
+            for raw_entry in raw_entries
+            if isinstance(raw_entry, dict) and bool(raw_entry.get("legacy_offset_untyped"))
+        }
+        if legacy_untyped_keys:
+            tagged_entries: list[dict[str, int | str]] = []
+            for entry in entries:
+                tagged_entry = dict(entry)
+                tagged_key = (
+                    str(tagged_entry.get("id", "")).strip(),
+                    int(tagged_entry.get("start", -1)),
+                    int(tagged_entry.get("end", -1)),
+                    self._normalize_preview_highlight_kind(tagged_entry.get("kind")),
+                )
+                if (
+                    "offset_space" not in tagged_entry
+                    and tagged_key in legacy_untyped_keys
+                ):
+                    tagged_entry["legacy_offset_untyped"] = 1
+                tagged_entries.append(tagged_entry)
+            entries = tagged_entries
         self._current_preview_text_highlights = entries
+        payload_entries = self._preview_highlight_entries_for_apply(current_key, entries)
         self._debug_log(
             "highlight-apply-request "
             f"current_key={current_key} expected_key={expected_key} "
-            f"entries={len(entries)} completion={bool(completion)}"
+            f"entries={len(entries)} migrated=False "
+            f"completion={bool(completion)}"
         )
-        payload_json = json.dumps(entries, separators=(",", ":"), ensure_ascii=False)
+        payload_json = json.dumps(
+            payload_entries, separators=(",", ":"), ensure_ascii=False
+        )
         color_json = json.dumps(self.PREVIEW_HIGHLIGHT_COLOR)
         important_color_json = json.dumps(self.PREVIEW_HIGHLIGHT_IMPORTANT_COLOR)
         important_text_color_json = json.dumps(
@@ -5565,6 +6096,8 @@ class MdExploreWindow(QMainWindow):
                 "__IMPORTANT_MARKER_COLOR__": important_marker_color_json,
                 "__NORMAL_KIND__": PREVIEW_HIGHLIGHT_KIND_NORMAL,
                 "__IMPORTANT_KIND__": PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+                "__OFFSET_SPACE_PREVIEW__": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
+                "__OFFSET_SPACE_SOURCE__": PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE,
             },
         )
         js = f"""
@@ -5593,17 +6126,34 @@ class MdExploreWindow(QMainWindow):
                     return parsed
             return {}
 
+        def _finalize_apply_result(result) -> dict:
+            normalized = _normalize_apply_result(result)
+            resolved_entries = self._normalize_text_highlight_entries(
+                normalized.get("resolvedEntries")
+            )
+            if resolved_entries:
+                normalized["resolvedEntries"] = self._clone_json_compatible_list(
+                    resolved_entries
+                )
+                if resolved_entries != entries:
+                    if self._current_preview_path_key() == current_key:
+                        self._current_preview_text_highlights = resolved_entries
+                    self._persist_text_highlights_for_path_key(
+                        current_key, resolved_entries
+                    )
+            return normalized
+
         if completion is None:
             self.preview.page().runJavaScript(
                 js,
                 lambda result: self._debug_log(
                     "highlight-apply-no-completion "
-                    f"result={_normalize_apply_result(result)}"
+                    f"result={_finalize_apply_result(result)}"
                 ),
             )
             return
         self.preview.page().runJavaScript(
-            js, lambda result: completion(_normalize_apply_result(result))
+            js, lambda result: completion(_finalize_apply_result(result))
         )
 
     def _add_persistent_preview_highlight(
@@ -5620,6 +6170,11 @@ class MdExploreWindow(QMainWindow):
             return
         normalized_kind = self._normalize_preview_highlight_kind(kind)
         offsets = self._selection_offsets_from_info(selection_info)
+        selected_text = ""
+        if isinstance(selection_info, dict):
+            raw_selected = selection_info.get("selectedText")
+            if isinstance(raw_selected, str):
+                selected_text = raw_selected
         self._debug_log(
             "highlight-add start "
             f"path={path_key} cached_offsets={offsets} "
@@ -5629,15 +6184,13 @@ class MdExploreWindow(QMainWindow):
         if offsets is not None:
             start, end = offsets
             self._replace_persistent_preview_highlight_range(
-                path_key, start, end, normalized_kind
+                path_key,
+                start,
+                end,
+                normalized_kind,
+                anchor_text=(selected_text or selected_text_hint),
             )
             return
-
-        selected_text = ""
-        if isinstance(selection_info, dict):
-            raw_selected = selection_info.get("selectedText")
-            if isinstance(raw_selected, str):
-                selected_text = raw_selected
         if not selected_text.strip():
             selected_text = selected_text_hint
         self._debug_log(
@@ -5666,7 +6219,11 @@ class MdExploreWindow(QMainWindow):
                 f"start={start_live} end={end_live}"
             )
             self._replace_persistent_preview_highlight_range(
-                path_key, start_live, end_live, normalized_kind
+                path_key,
+                start_live,
+                end_live,
+                normalized_kind,
+                anchor_text=(selected_text or selected_text_hint),
             )
 
         self._request_live_preview_selection_offsets(selected_text, _apply_live_selection)

@@ -308,6 +308,15 @@ class PreviewRegressionHarness(unittest.TestCase):
         self.assertIsInstance(payload, list)
         return [dict(item) for item in payload]
 
+    def persistent_highlight_text_by_id(self) -> dict[str, str]:
+        grouped: dict[str, str] = {}
+        for item in self.persistent_highlight_spans():
+            entry_id = str(item.get("id", "")).strip()
+            if not entry_id:
+                continue
+            grouped[entry_id] = grouped.get(entry_id, "") + str(item.get("text", ""))
+        return grouped
+
     def await_callback_result(self, invoker, *, timeout_ms: int = 10000):
         loop = QEventLoop()
         holder: dict[str, object] = {}
@@ -705,6 +714,88 @@ class PreviewMarkerRegressionTests(PreviewRegressionHarness):
             [{"text": "gamma", "id": "revisit-case", "kind": "normal"}],
         )
 
+    def test_pipelines_highlight_important_survives_document_switch(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        source_root = repo_root / "test"
+        target_path = self.root / "Pipelines.md"
+        other_path = self.root / "paper.md"
+        target_path.write_text(
+            (source_root / "Pipelines.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        other_path.write_text(
+            (source_root / "paper.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        highlight_text = "10) A few packaging ideas for Upwork projects"
+        drift_text = "ackage these as fixed-scope offers"
+
+        self.window._persisted_text_highlights_by_dir.clear()
+        self.window._load_preview(target_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+
+        current_key = self.window._current_preview_path_key()
+        self.assertIsNotNone(current_key)
+        self.window._current_preview_text_highlights = []
+        self.window._persist_text_highlights_for_path_key(current_key, [])
+        self.apply_persistent_highlights([])
+
+        selection_seed = self.run_js(
+            f"""
+(() => {{
+  const root = document.querySelector("main") || document.body;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {{
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const index = value.indexOf({json.dumps(highlight_text)});
+    if (index < 0) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + {len(highlight_text)});
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return {json.dumps(highlight_text)};
+  }}
+  return "missing-highlight-text";
+}})();
+"""
+        )
+        self.assertEqual(selection_seed, highlight_text)
+
+        selection_info = self.request_live_selection_offsets(highlight_text)
+        self.assertTrue(bool(selection_info.get("hasSelection")))
+        self.window._add_persistent_preview_highlight(
+            selection_info,
+            highlight_text,
+            kind=mdexplore.PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+        )
+        self.wait_until(
+            lambda: any(
+                item.get("kind") == "important"
+                for item in self.persistent_highlight_spans()
+            ),
+            timeout_ms=6000,
+        )
+        self.assertTrue(
+            any(
+                str(entry.get("anchor_text", "")).strip() == highlight_text
+                for entry in self.window._current_preview_text_highlights
+                if isinstance(entry, dict)
+            ),
+            self.window._current_preview_text_highlights,
+        )
+
+        highlighted_before = self.persistent_highlight_text_by_id()
+        self.assertTrue(highlighted_before)
+        self.assertIn(highlight_text, list(highlighted_before.values()))
+        self.assertNotIn(drift_text, " ".join(highlighted_before.values()))
+
         self.window._load_preview(other_path)
         self.wait_until(
             lambda: not self.window._preview_load_in_progress, timeout_ms=20000
@@ -718,11 +809,87 @@ class PreviewMarkerRegressionTests(PreviewRegressionHarness):
         self.wait_ms(SETTLE_WAIT_MS)
         self.wait_until(
             lambda: bool(self.persistent_highlight_spans()),
+            timeout_ms=6000,
+        )
+        self.assertTrue(
+            any(
+                str(entry.get("anchor_text", "")).strip() == highlight_text
+                for entry in self.window._current_preview_text_highlights
+                if isinstance(entry, dict)
+            )
+        )
+
+        highlighted_after = self.persistent_highlight_text_by_id()
+        self.assertTrue(highlighted_after)
+        self.assertIn(highlight_text, list(highlighted_after.values()))
+        self.assertNotIn(drift_text, " ".join(highlighted_after.values()))
+
+    def test_legacy_source_offset_highlights_resolve_on_load_and_revisit(self) -> None:
+        doc_text = """# Legacy Highlight Fixture
+
+Intro paragraph.
+
+> [!NOTE]
+> Legacy source offsets were captured before preview-text normalization.
+
+- **Built stakeholder-facing artifacts** (demo scripts, release notes, runbooks) to reduce onboarding and support overhead.  
+**Skills:** Security automation • Risk-as-code
+"""
+        target_path = self.root / "legacy-source-highlight.md"
+        target_path.write_text(doc_text, encoding="utf-8")
+        other_path = self.root / "legacy-source-highlight-other.md"
+        other_path.write_text("# Other\n\nNothing to see here.\n", encoding="utf-8")
+
+        anchor_text = (
+            "Built stakeholder-facing artifacts (demo scripts, release notes, runbooks)"
+        )
+        source_start = doc_text.index("Built stakeholder-facing artifacts")
+        source_end = source_start + len(anchor_text)
+        sidecar_path = self.root / ".mdexplore-highlighting.json"
+        sidecar_payload = {"files": {target_path.name: [{
+            "id": "legacy-source-case",
+            "start": source_start,
+            "end": source_end,
+            "kind": "normal",
+        }]}}
+        sidecar_path.write_text(
+            json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.window._persisted_text_highlights_by_dir.clear()
+
+        self.window._load_preview(target_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+        self.wait_until(
+            lambda: "legacy-source-case" in self.persistent_highlight_text_by_id(),
             timeout_ms=4000,
         )
         self.assertEqual(
-            self.persistent_highlight_spans(),
-            [{"text": "gamma", "id": "revisit-case", "kind": "normal"}],
+            self.persistent_highlight_text_by_id().get("legacy-source-case"),
+            anchor_text,
+        )
+
+        self.window._load_preview(other_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+
+        self.window._load_preview(target_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+        self.wait_until(
+            lambda: "legacy-source-case" in self.persistent_highlight_text_by_id(),
+            timeout_ms=4000,
+        )
+        self.assertEqual(
+            self.persistent_highlight_text_by_id().get("legacy-source-case"),
+            anchor_text,
         )
 
     def test_persistent_highlight_apply_and_live_probes_match_dom_ranges(self) -> None:

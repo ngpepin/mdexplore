@@ -5,6 +5,8 @@
   const importantHighlightTextColor = __IMPORTANT_TEXT_COLOR__;
   const highlightMarkerColor = __MARKER_COLOR__;
   const importantHighlightMarkerColor = __IMPORTANT_MARKER_COLOR__;
+  const previewOffsetSpace = "__OFFSET_SPACE_PREVIEW__";
+  const sourceOffsetSpace = "__OFFSET_SPACE_SOURCE__";
   window.__mdexplorePersistentHighlightMarkerColor = highlightMarkerColor;
   window.__mdexplorePersistentHighlightImportantMarkerColor =
     importantHighlightMarkerColor;
@@ -69,6 +71,68 @@
       if (piece.countable) total += piece.text.length;
     }
     return total;
+  }
+
+  function normalizeSearchText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function buildCompactSearchIndex(value) {
+    const source = typeof value === "string" ? value : "";
+    let compact = "";
+    const map = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (/\s/.test(ch)) continue;
+      compact += ch;
+      map.push(index);
+    }
+    return { text: compact, map };
+  }
+
+  function buildAnchorCandidates(value) {
+    const normalized = normalizeSearchText(value);
+    if (!normalized) return [];
+    const variants = [];
+    const pushCandidate = (candidate) => {
+      const normalizedCandidate = normalizeSearchText(candidate);
+      if (normalizedCandidate.length < 12) return;
+      if (!variants.includes(normalizedCandidate)) {
+        variants.push(normalizedCandidate);
+      }
+    };
+    pushCandidate(normalized);
+    const stripped = normalized.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").trim();
+    pushCandidate(stripped);
+    const boundaries = [0];
+    for (let index = 0; index < normalized.length; index += 1) {
+      if (normalized[index] === " " && index + 1 < normalized.length) {
+        boundaries.push(index + 1);
+      }
+    }
+    for (const start of boundaries.slice(0, 16)) {
+      pushCandidate(normalized.slice(start, start + 220));
+    }
+    if (normalized.length > 220) {
+      pushCandidate(normalized.slice(-220));
+    }
+    return variants;
+  }
+
+  function buildPreviewAnchorCandidates(value) {
+    const normalized = normalizeSearchText(value);
+    if (!normalized) return [];
+    const candidates = [];
+    const pushCandidate = (candidate) => {
+      const text = normalizeSearchText(candidate);
+      if (text.length < 3) return;
+      if (!candidates.includes(text)) {
+        candidates.push(text);
+      }
+    };
+    pushCandidate(normalized);
+    pushCandidate(normalized.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""));
+    return candidates;
   }
 
   function textOffsetFromPoint(clickX, clickY) {
@@ -225,6 +289,18 @@
   function normalizeEntries(raw) {
     if (!Array.isArray(raw)) return [];
     const prepared = [];
+    const normalizeCandidateArray = (value) => {
+      if (!Array.isArray(value)) return [];
+      const unique = [];
+      for (const item of value) {
+        const normalizedCandidate = normalizeSearchText(item);
+        if (normalizedCandidate.length < 3) continue;
+        if (!unique.includes(normalizedCandidate)) {
+          unique.push(normalizedCandidate);
+        }
+      }
+      return unique;
+    };
     for (const item of raw) {
       if (!item || typeof item !== "object") continue;
       const id = typeof item.id === "string" ? item.id.trim() : "";
@@ -234,9 +310,37 @@
         String(item.kind || "__NORMAL_KIND__").trim().toLowerCase() === "__IMPORTANT_KIND__"
           ? "__IMPORTANT_KIND__"
           : "__NORMAL_KIND__";
+      const offsetSpace = String(
+        item.offset_space || item.offsetSpace || ""
+      ).trim().toLowerCase();
+      const legacyAnchorText = normalizeSearchText(
+        item.legacy_anchor_text || item.legacyAnchorText || ""
+      );
+      const legacyDirectCandidates = normalizeCandidateArray(
+        item.legacy_direct_candidates || item.legacyDirectCandidates
+      );
+      const legacyContextCandidates = normalizeCandidateArray(
+        item.legacy_context_candidates || item.legacyContextCandidates
+      );
+      const previewAnchorText = normalizeSearchText(
+        item.anchor_text || item.anchorText || item.previewAnchorText || ""
+      );
       if (!id || !Number.isFinite(start) || !Number.isFinite(end)) continue;
       if (end <= start || start < 0) continue;
-      prepared.push({ id, start: Math.floor(start), end: Math.floor(end), kind });
+      prepared.push({
+        id,
+        start: Math.floor(start),
+        end: Math.floor(end),
+        kind,
+        offsetSpace:
+          offsetSpace === previewOffsetSpace || offsetSpace === sourceOffsetSpace
+            ? offsetSpace
+            : "",
+        previewAnchorText,
+        legacyAnchorText,
+        legacyDirectCandidates,
+        legacyContextCandidates,
+      });
     }
     if (!prepared.length) return [];
     prepared.sort((a, b) => (a.start - b.start) || (a.end - b.end));
@@ -255,15 +359,7 @@
     }
     return merged;
   }
-
   const entries = normalizeEntries(incoming);
-  window.__mdexplorePersistentHighlights = entries;
-  if (!entries.length) {
-    if (typeof window.__mdexploreRefreshPersistentHighlightMarkers === "function") {
-      window.__mdexploreRefreshPersistentHighlightMarkers();
-    }
-    return { applied: 0, entries: 0 };
-  }
 
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
   const walker = document.createTreeWalker(
@@ -287,6 +383,7 @@
   );
 
   const nodeRecords = [];
+  let logicalText = "";
   let totalLength = 0;
   while (walker.nextNode()) {
     const node = walker.currentNode;
@@ -300,16 +397,116 @@
       if (piece.countable) {
         record.end = totalLength + piece.text.length;
         totalLength = record.end;
+        logicalText += piece.text;
       }
       return record;
     });
     nodeRecords.push({ node, pieces });
   }
 
+  function resolveLegacyEntry(entry, compactIndex) {
+    if (!entry || typeof entry !== "object") return entry;
+    const candidateGroups = [];
+    if (entry.offsetSpace === previewOffsetSpace) {
+      const previewCandidates = buildPreviewAnchorCandidates(entry.previewAnchorText);
+      if (!previewCandidates.length) {
+        return entry;
+      }
+      candidateGroups.push(previewCandidates);
+    } else {
+      candidateGroups.push(
+        Array.isArray(entry.legacyDirectCandidates) ? entry.legacyDirectCandidates : []
+      );
+      candidateGroups.push(
+        Array.isArray(entry.legacyContextCandidates) && entry.legacyContextCandidates.length
+          ? entry.legacyContextCandidates
+          : buildAnchorCandidates(entry.legacyAnchorText)
+      );
+    }
+    const compactCurrentText = String(logicalText.slice(entry.start, entry.end) || "").replace(
+      /\s+/g,
+      ""
+    );
+    const currentOffsetsAlreadyMatch =
+      entry.offsetSpace !== sourceOffsetSpace &&
+      !!compactCurrentText &&
+      Array.isArray(candidateGroups[0]) &&
+      candidateGroups[0].some((candidate) => {
+        const compactCandidate = candidate.replace(/\s+/g, "");
+        return !!compactCandidate && compactCurrentText === compactCandidate;
+      });
+    if (currentOffsetsAlreadyMatch) {
+      return {
+        ...entry,
+        offsetSpace: previewOffsetSpace,
+      };
+    }
+    let best = null;
+    const entryLength = Math.max(1, Math.floor(entry.end - entry.start));
+    for (let groupIndex = 0; groupIndex < candidateGroups.length; groupIndex += 1) {
+      const candidates = candidateGroups[groupIndex];
+      let groupBest = null;
+      for (const candidate of candidates) {
+        const compactCandidate = candidate.replace(/\s+/g, "");
+        if (compactCandidate.length < (groupIndex === 0 ? 3 : 8)) continue;
+        let matchIndex = compactIndex.text.indexOf(compactCandidate);
+        while (matchIndex >= 0) {
+          const rawStart = compactIndex.map[matchIndex];
+          const rawEnd =
+            compactIndex.map[matchIndex + compactCandidate.length - 1] + 1;
+          const score = [
+            Math.abs(candidate.length - entryLength),
+            -candidate.length,
+            Math.abs(rawStart - entry.start),
+            rawStart,
+          ];
+          if (
+            !groupBest ||
+            score[0] < groupBest.score[0] ||
+            (score[0] === groupBest.score[0] && score[1] < groupBest.score[1]) ||
+            (score[0] === groupBest.score[0] &&
+              score[1] === groupBest.score[1] &&
+              score[2] < groupBest.score[2]) ||
+            (score[0] === groupBest.score[0] &&
+              score[1] === groupBest.score[1] &&
+              score[2] === groupBest.score[2] &&
+              score[3] < groupBest.score[3])
+          ) {
+            groupBest = { rawStart, rawEnd, score };
+          }
+          matchIndex = compactIndex.text.indexOf(compactCandidate, matchIndex + 1);
+        }
+      }
+      if (groupBest) {
+        best = groupBest;
+        break;
+      }
+    }
+    if (!best) return entry;
+    return {
+      ...entry,
+      start: Math.floor(best.rawStart),
+      end: Math.floor(best.rawEnd),
+      offsetSpace: previewOffsetSpace,
+    };
+  }
+
+  const compactIndex = buildCompactSearchIndex(logicalText);
+  const resolvedEntries = normalizeEntries(
+    entries.map((entry) => resolveLegacyEntry(entry, compactIndex))
+  );
+  window.__mdexplorePersistentHighlights = resolvedEntries;
+  if (!resolvedEntries.length) {
+    if (typeof window.__mdexploreRefreshPersistentHighlightMarkers === "function") {
+      window.__mdexploreRefreshPersistentHighlightMarkers();
+    }
+    return { applied: 0, entries: 0 };
+  }
+
   if (!nodeRecords.length) {
     return {
       applied: 0,
-      entries: entries.length,
+      entries: resolvedEntries.length,
       segments: 0,
       totalLength: 0,
     };
@@ -327,7 +524,7 @@
       }
       countableSegmentCount += 1;
       let localRanges = [];
-      for (const entry of entries) {
+      for (const entry of resolvedEntries) {
         if (entry.end <= piece.start) {
           continue;
         }
@@ -395,8 +592,19 @@
   }
   return {
     applied,
-    entries: entries.length,
+    entries: resolvedEntries.length,
     segments: countableSegmentCount,
     totalLength,
+    resolvedEntries: resolvedEntries.map((entry) => ({
+      id: entry.id,
+      start: entry.start,
+      end: entry.end,
+      kind: entry.kind,
+      anchor_text: entry.previewAnchorText || "",
+      offset_space:
+        entry.offsetSpace === sourceOffsetSpace
+          ? sourceOffsetSpace
+          : previewOffsetSpace,
+    })),
   };
 })();
