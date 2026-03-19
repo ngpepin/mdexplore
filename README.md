@@ -64,8 +64,9 @@ gradually decomposed.
   badge in the tree.
 - Markdown tree gutter badges are packed together in a fixed-width strip so the
   markdown file icon and filename stay aligned even when only some badges apply.
-- Right-click tree menu includes `Clear in Folder` (non-recursive) and
-  `Clear All` (recursive) to remove persisted file-highlight colors.
+- Right-click tree menu includes `Clear in Directory` (non-recursive) and
+  `Clear All` (recursive) to remove persisted file-highlight colors, and both
+  actions prompt for confirmation before clearing.
 - Top-right copy controls are labeled `Copy to: () Clipboard () Directory`,
   with `Clipboard` selected by default.
 - In `Clipboard` mode, color buttons copy matching highlighted files and the
@@ -119,7 +120,8 @@ From any directory:
 
 - creates or updates `.venv`
 - installs Python dependencies from `requirements.txt`
-- downloads local MathJax, Mermaid, and PlantUML assets if they are missing
+- verifies tracked UI assets under `assets/ui`
+- downloads vendored MathJax, Mermaid, and PlantUML runtime assets if they are missing
 - downloads/builds the Rust Mermaid renderer under `vendor/mermaid-rs-renderer`
 
 It is safe to rerun. After bootstrap, use `mdexplore.sh` for normal launches.
@@ -173,7 +175,7 @@ setup-mdexplore.sh [--skip-python] [--skip-assets] [--skip-rust] [--rebuild-rust
 ```
 
 - `--skip-python` leaves the existing `.venv` untouched.
-- `--skip-assets` skips local MathJax / Mermaid JS / PlantUML asset checks.
+- `--skip-assets` skips vendored MathJax / Mermaid JS / PlantUML runtime asset checks.
 - `--skip-rust` skips Rust Mermaid bootstrap/build.
 - `--rebuild-rust` forces a fresh `cargo build --release --locked` for `mmdr`.
 
@@ -227,10 +229,10 @@ cover:
   `.mdexplore-colors.json`, `.mdexplore-views.json`, and
   `.mdexplore-highlighting.json` (creating sidecars when missing, updating
   existing sidecars by filename when present).
-- Right-click a directory (or file row) and use `Clear in Folder` for
-  non-recursive clear in that folder.
+- Right-click a directory (or file row) and use `Clear in Directory` for
+  non-recursive clear in that directory, with confirmation.
 - Right-click a directory (or file row) and use `Clear All` for recursive clear
-  under that scope.
+  under that scope, with confirmation.
 - Color-copy match collection is recursive and uses scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
 
@@ -623,7 +625,8 @@ mdexplore.py                  # Qt application, file tree, renderer integration
 mdexplore.sh                  # launcher (venv create/install/run)
 setup-mdexplore.sh            # full bootstrap script (venv/assets/mmdr)
 mdexplore.desktop.sample      # sample desktop launcher entry for user customization
-mdexplor-icon.png             # primary app icon asset (preferred)
+assets/ui/                    # local UI icons/font assets used by tree, tabs, copy controls, and search pills
+mdexplor-icon.png             # primary app icon asset kept at repo root for desktop launchers
 requirements.txt              # Python runtime dependencies
 README.md                     # project docs
 RULES.md                      # formal behavior rules, precedence, and decision diagrams

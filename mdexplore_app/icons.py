@@ -10,7 +10,20 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
-from .constants import SVG_ICON_ALPHA_CUTOFF, SVG_ICON_RENDER_OVERSAMPLE
+from .constants import (
+    PROJECT_ROOT,
+    SVG_ICON_ALPHA_CUTOFF,
+    SVG_ICON_RENDER_OVERSAMPLE,
+    UI_ASSET_DIR,
+)
+
+
+def ui_asset_path(filename: str) -> Path:
+    """Resolve a UI asset from the canonical asset directory."""
+    asset_path = UI_ASSET_DIR / filename
+    if asset_path.is_file():
+        return asset_path
+    return PROJECT_ROOT / filename
 
 
 def build_markdown_icon() -> QIcon:
@@ -125,9 +138,8 @@ def build_markdown_icon() -> QIcon:
         painter.end()
         return canvas
 
-    base_dir = Path(__file__).resolve().parent.parent
     for icon_name in ("mdexplor-icon.png", "mdexplor-icon.webp", "mdexplore-icon.webp"):
-        icon_path = base_dir / icon_name
+        icon_path = PROJECT_ROOT / icon_name
         if icon_path.exists():
             asset_pixmap = QPixmap(str(icon_path))
             if not asset_pixmap.isNull():
@@ -206,7 +218,7 @@ def _render_svg_icon_image(renderer: QSvgRenderer, icon_size: int) -> QImage:
 
 def load_svg_icon(filename: str, color: QColor, size: int = 16) -> QIcon:
     """Load and recolor a local SVG icon to a fixed flat color."""
-    icon_path = Path(__file__).resolve().parent.parent / filename
+    icon_path = ui_asset_path(filename)
     if icon_path.is_file():
         renderer = QSvgRenderer(str(icon_path))
         if not renderer.isValid():
@@ -234,7 +246,7 @@ def load_svg_icon_two_tone(
     size: int = 16,
 ) -> QIcon:
     """Load local SVG and recolor dark/light tones while preserving alpha edges."""
-    icon_path = Path(__file__).resolve().parent.parent / filename
+    icon_path = ui_asset_path(filename)
     if not icon_path.is_file():
         return QIcon()
     renderer = QSvgRenderer(str(icon_path))
@@ -276,7 +288,7 @@ def load_png_icon_two_tone(
     size: int = 16,
 ) -> QIcon:
     """Load local PNG and map dark/light tones while preserving alpha edges."""
-    icon_path = Path(__file__).resolve().parent.parent / filename
+    icon_path = ui_asset_path(filename)
     if not icon_path.is_file():
         return QIcon()
 

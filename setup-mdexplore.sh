@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
 REQ_HASH_FILE="${VENV_DIR}/.requirements.sha256"
+UI_ASSET_DIR="${SCRIPT_DIR}/assets/ui"
 
 VENDOR_DIR="${SCRIPT_DIR}/vendor"
 MATHJAX_DIR="${VENDOR_DIR}/mathjax/es5"
@@ -12,6 +13,22 @@ MERMAID_DIR="${VENDOR_DIR}/mermaid/dist"
 PLANTUML_DIR="${VENDOR_DIR}/plantuml"
 RUST_RENDERER_DIR="${VENDOR_DIR}/mermaid-rs-renderer"
 RUST_RENDERER_BIN="${RUST_RENDERER_DIR}/target/release/mmdr"
+
+REQUIRED_UI_ASSETS=(
+  "LiberationSansNarrow-Regular.ttf"
+  "home.svg"
+  "home2.svg"
+  "home3.png"
+  "home3.svg"
+  "markdown.svg"
+  "marker.svg"
+  "pin.png"
+  "refresh.png"
+  "refresh.svg"
+  "search-hit.svg"
+  "views.svg"
+  "views2.svg"
+)
 
 MATHJAX_TEX_SVG_URL="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
 MATHJAX_TEX_CHTML_URL="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
@@ -32,12 +49,13 @@ Usage: setup-mdexplore.sh [options]
 Bootstraps the local mdexplore checkout by:
   - creating/updating .venv
   - installing Python requirements
-  - downloading local MathJax, Mermaid, and PlantUML assets if missing
+  - verifying tracked UI assets under assets/ui
+  - downloading vendored MathJax, Mermaid, and PlantUML runtime assets if missing
   - cloning/building the Rust Mermaid renderer (mmdr) under vendor/ if missing
 
 Options:
   --skip-python    Skip .venv creation and pip install
-  --skip-assets    Skip local asset download checks
+  --skip-assets    Skip vendored runtime asset download checks
   --skip-rust      Skip Mermaid Rust renderer bootstrap/build
   --rebuild-rust   Force cargo rebuild even if mmdr already exists
   -h, --help       Show this help text
@@ -164,6 +182,25 @@ ensure_local_assets() {
   fi
 }
 
+ensure_tracked_ui_assets() {
+  local asset_name=""
+  local missing=()
+
+  for asset_name in "${REQUIRED_UI_ASSETS[@]}"; do
+    if [[ ! -f "${UI_ASSET_DIR}/${asset_name}" ]]; then
+      missing+=("${UI_ASSET_DIR}/${asset_name}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    printf '[setup] ERROR: Missing tracked UI assets:\n' >&2
+    printf '  - %s\n' "${missing[@]}" >&2
+    die "Repository checkout is incomplete; restore the missing assets/ui files."
+  fi
+
+  log "Tracked UI assets present"
+}
+
 ensure_cargo() {
   local cargo_bin=""
 
@@ -270,10 +307,12 @@ else
   log "Skipping Python environment setup"
 fi
 
+ensure_tracked_ui_assets
+
 if [[ "${SKIP_ASSETS}" -eq 0 ]]; then
   ensure_local_assets
 else
-  log "Skipping local asset download checks"
+  log "Skipping vendored runtime asset download checks"
 fi
 
 if [[ "${SKIP_RUST}" -eq 0 ]]; then
@@ -289,4 +328,3 @@ log "Run the app with: ${SCRIPT_DIR}/mdexplore.sh"
 if [[ -x "${RUST_RENDERER_BIN}" ]]; then
   log "Rust Mermaid renderer: ${RUST_RENDERER_BIN}"
 fi
-

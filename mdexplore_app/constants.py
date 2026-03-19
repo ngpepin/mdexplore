@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 CONFIG_FILE_NAME = ".mdexplore.cfg"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+UI_ASSET_DIR = PROJECT_ROOT / "assets" / "ui"
 SEARCH_CLOSE_WORD_GAP = 50
 PDF_EXPORT_PRECHECK_MAX_ATTEMPTS = 60
 PDF_EXPORT_PRECHECK_INTERVAL_MS = 140
@@ -39,7 +43,7 @@ PREVIEW_SETHTML_MAX_BYTES = 650_000
 SVG_ICON_RENDER_OVERSAMPLE = 4
 SVG_ICON_ALPHA_CUTOFF = 1
 SEARCH_HIT_COUNT_FONT_PATHS = (
-    "LiberationSansNarrow-Regular.ttf",
+    str(UI_ASSET_DIR / "LiberationSansNarrow-Regular.ttf"),
     "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Regular.ttf",
 )
 PREVIEW_PERSISTENT_HIGHLIGHT_COLOR = "rgba(102, 86, 178, 0.36)"

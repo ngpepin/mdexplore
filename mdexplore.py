@@ -116,6 +116,7 @@ from mdexplore_app.icons import (
     load_png_icon_two_tone as _load_png_icon_two_tone,
     load_svg_icon as _load_svg_icon,
     load_svg_icon_two_tone as _load_svg_icon_two_tone,
+    ui_asset_path as _ui_asset_path,
 )
 from mdexplore_app.pdf import (
     extract_plantuml_error_details as _extract_plantuml_error_details,
@@ -5673,7 +5674,7 @@ class MdExploreWindow(QMainWindow):
         copy_current_btn.setStyleSheet(
             "border: 1px solid #4b5563; border-radius: 3px; padding: 0px;"
         )
-        pin_icon_path = Path(__file__).resolve().parent / "pin.png"
+        pin_icon_path = _ui_asset_path("pin.png")
         if pin_icon_path.is_file():
             pin_icon = QIcon(str(pin_icon_path))
             copy_current_btn.setIcon(pin_icon)
@@ -10606,7 +10607,7 @@ class MdExploreWindow(QMainWindow):
         menu = QMenu(self)
         color_actions: dict[QAction, str] = {}
         clear_action: QAction | None = None
-        clear_in_folder_action: QAction | None = None
+        clear_in_directory_action: QAction | None = None
 
         if path.is_file() and path.suffix.lower() == ".md":
             for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
@@ -10619,12 +10620,12 @@ class MdExploreWindow(QMainWindow):
             clear_action = menu.addAction("Clear Highlight")
 
         clear_scope = path if path.is_dir() else path.parent
-        clear_in_folder_action = menu.addAction("Clear in Folder")
+        clear_in_directory_action = menu.addAction("Clear in Directory")
         clear_all_action = menu.addAction("Clear All")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
             return
-        if clear_in_folder_action is not None and chosen == clear_in_folder_action:
+        if clear_in_directory_action is not None and chosen == clear_in_directory_action:
             self._confirm_and_clear_directory_highlighting(clear_scope)
             self.tree.viewport().update()
             return
@@ -12925,8 +12926,8 @@ class MdExploreWindow(QMainWindow):
             display_scope = target_scope
         reply = QMessageBox.question(
             self,
-            "Clear Folder Highlights",
-            f"Clear all file highlights in this folder only:\n{display_scope}\n\nThis cannot be undone.",
+            "Clear Directory Highlights",
+            f"Clear all file highlights in this directory only:\n{display_scope}\n\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

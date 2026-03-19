@@ -31,13 +31,15 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `setup-mdexplore.sh`: full bootstrap helper for local setup (venv, vendored assets, Rust Mermaid renderer).
 - `requirements.txt`: Python runtime dependencies.
+- `assets/ui/`: local UI icon/font assets (tree badges, tab actions, copy pin,
+  and search-hit pill font).
 - `vendor/`: vendored local runtime assets (Mermaid JS, MathJax, PlantUML jar,
   and related renderer sources/binaries when bootstrapped).
 - `test/`: sample Markdown/PDF fixtures used for manual smoke testing.
 - `README.md`: user-facing setup and usage documentation.
 - `UML.md`: higher-level architecture, class, and activity diagrams.
 - `mdexplore.desktop.sample`: user-adaptable `.desktop` launcher template.
-- `mdexplor-icon.png`: primary app icon asset (preferred).
+- `mdexplor-icon.png`: primary app icon asset kept at repo root for desktop launchers.
 - `DESCRIPTION.md`: short repository summary and suggested topic tags.
 - `LICENSE`: MIT license text.
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
@@ -222,8 +224,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - File-highlight palette includes Yellow, Green, Blue, Orange, Purple, Light Gray,
   Medium Gray, and Red.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
-- `Clear in Folder` in the context menu clears highlight metadata
-  non-recursively for the selected folder scope.
+- `Clear in Directory` in the context menu clears highlight metadata
+  non-recursively for the selected directory scope after confirmation.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
 - Copy/Clear scope resolves in this order: selected directory, then most
   recently selected/expanded directory, then current root.
@@ -1466,6 +1468,7 @@ across all navigation sequences.
 - It should:
   - create/update `.venv`
   - install Python dependencies from `requirements.txt`
+  - verify tracked UI assets exist under `assets/ui`
   - ensure vendored local assets exist for MathJax, Mermaid JS, and PlantUML
   - ensure the Rust Mermaid renderer source exists under `vendor/mermaid-rs-renderer`
   - build `mmdr` into the path already probed by the launcher/app
