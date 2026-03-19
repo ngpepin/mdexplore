@@ -16,8 +16,6 @@ RUST_RENDERER_BIN="${RUST_RENDERER_DIR}/target/release/mmdr"
 
 REQUIRED_UI_ASSETS=(
   "LiberationSansNarrow-Regular.ttf"
-  "home.svg"
-  "home2.svg"
   "home3.png"
   "home3.svg"
   "markdown.svg"
@@ -25,8 +23,6 @@ REQUIRED_UI_ASSETS=(
   "pin.png"
   "refresh.png"
   "refresh.svg"
-  "search-hit.svg"
-  "views.svg"
   "views2.svg"
 )
 

@@ -625,6 +625,7 @@ mdexplore.py                  # Qt application, file tree, renderer integration
 mdexplore.sh                  # launcher (venv create/install/run)
 setup-mdexplore.sh            # full bootstrap script (venv/assets/mmdr)
 mdexplore.desktop.sample      # sample desktop launcher entry for user customization
+mdexplore_app/                # extracted support modules for search, tree, tabs, icons, PDF, runtime, and workers
 assets/ui/                    # local UI icons/font assets used by tree, tabs, copy controls, and search pills
 mdexplor-icon.png             # primary app icon asset kept at repo root for desktop launchers
 requirements.txt              # Python runtime dependencies

@@ -23,6 +23,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   file watching, search, and the direct Python CLI entrypoint.
 - `mdexplore_app/constants.py`: shared constants used by the main app and support modules.
 - `mdexplore_app/runtime.py`: runtime/config/GPU-print helper functions.
+- `mdexplore_app/search.py`: extracted pure search query helpers for tokenization,
+  predicate compilation, NEAR-window selection, and per-file hit counting.
 - `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr helpers.
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers used by the tree and tab UI.
 - `mdexplore_app/tree.py`: extracted tree/model classes (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
