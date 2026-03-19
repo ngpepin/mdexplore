@@ -28,6 +28,49 @@
     return null;
   }
 
+  function splitTextPieces(value) {
+    const source = typeof value === "string" ? value : "";
+    const pieces = [];
+    const whitespaceRe = /\s+/g;
+    let cursor = 0;
+    let match = null;
+    while ((match = whitespaceRe.exec(source)) !== null) {
+      if (match.index > cursor) {
+        pieces.push({
+          rawStart: cursor,
+          rawEnd: match.index,
+          text: source.slice(cursor, match.index),
+          countable: true,
+        });
+      }
+      const raw = match[0];
+      pieces.push({
+        rawStart: match.index,
+        rawEnd: match.index + raw.length,
+        text: raw,
+        countable: !/[\r\n\t]/.test(raw),
+      });
+      cursor = match.index + raw.length;
+    }
+    if (cursor < source.length) {
+      pieces.push({
+        rawStart: cursor,
+        rawEnd: source.length,
+        text: source.slice(cursor),
+        countable: true,
+      });
+    }
+    return pieces.filter((piece) => piece.rawEnd > piece.rawStart);
+  }
+
+  function countableLength(value) {
+    let total = 0;
+    for (const piece of splitTextPieces(value)) {
+      if (piece.countable) total += piece.text.length;
+    }
+    return total;
+  }
+
   function textOffsetFromPoint(clickX, clickY) {
     if (!Number.isFinite(clickX) || !Number.isFinite(clickY) || !root) {
       return null;
@@ -66,7 +109,7 @@
       );
       let offset = 0;
       while (walker.nextNode()) {
-        offset += (walker.currentNode.nodeValue || "").length;
+        offset += countableLength(walker.currentNode.nodeValue || "");
       }
       return Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : null;
     } catch (_err) {
@@ -169,12 +212,7 @@
 
   function shouldSkipTextNode(node) {
     if (!node || typeof node.nodeValue !== "string") return true;
-    const value = node.nodeValue;
-    if (!value.length) return true;
-    // Ignore formatting-only whitespace that contains newlines/tabs so
-    // highlights do not materialize as visual linefeed artifacts.
-    if (!/[^\s]/.test(value) && /[\r\n\t]/.test(value)) return true;
-    return false;
+    return countableLength(node.nodeValue) <= 0;
   }
 
   for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]'))) {
@@ -248,18 +286,27 @@
     },
   );
 
-  const segments = [];
+  const nodeRecords = [];
   let totalLength = 0;
   while (walker.nextNode()) {
     const node = walker.currentNode;
     const text = node.nodeValue || "";
-    const start = totalLength;
-    const end = start + text.length;
-    segments.push({ node, text, start, end });
-    totalLength = end;
+    const pieces = splitTextPieces(text).map((piece) => {
+      const record = {
+        ...piece,
+        start: totalLength,
+        end: totalLength,
+      };
+      if (piece.countable) {
+        record.end = totalLength + piece.text.length;
+        totalLength = record.end;
+      }
+      return record;
+    });
+    nodeRecords.push({ node, pieces });
   }
 
-  if (!segments.length) {
+  if (!nodeRecords.length) {
     return {
       applied: 0,
       entries: entries.length,
@@ -269,68 +316,77 @@
   }
 
   let applied = 0;
-  let entryIndex = 0;
-  for (const segment of segments) {
-    while (entryIndex < entries.length && entries[entryIndex].end <= segment.start) {
-      entryIndex += 1;
-    }
-    let localRanges = [];
-    for (let idx = entryIndex; idx < entries.length; idx += 1) {
-      const entry = entries[idx];
-      if (entry.start >= segment.end) {
-        break;
-      }
-      const overlapStart = Math.max(entry.start, segment.start);
-      const overlapEnd = Math.min(entry.end, segment.end);
-      if (overlapEnd > overlapStart) {
-        localRanges.push({
-          start: overlapStart - segment.start,
-          end: overlapEnd - segment.start,
-          id: entry.id,
-          kind: entry.kind,
-        });
-      }
-    }
-    if (!localRanges.length) {
-      continue;
-    }
-
-    localRanges.sort((a, b) => a.start - b.start);
+  let countableSegmentCount = 0;
+  for (const record of nodeRecords) {
     const fragment = document.createDocumentFragment();
-    let cursor = 0;
-    for (const range of localRanges) {
-      if (range.start > cursor) {
-        fragment.appendChild(
-          document.createTextNode(segment.text.slice(cursor, range.start))
-        );
+    let nodeChanged = false;
+    for (const piece of record.pieces) {
+      if (!piece.countable) {
+        fragment.appendChild(document.createTextNode(piece.text));
+        continue;
       }
-      const mark = document.createElement("span");
-      mark.setAttribute("data-mdexplore-persistent-highlight", "1");
-      mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
-      mark.setAttribute(
-        "data-mdexplore-persistent-highlight-kind",
-        range.kind === "__IMPORTANT_KIND__" ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__"
-      );
-      const isImportant = range.kind === "__IMPORTANT_KIND__";
-      mark.style.backgroundColor = isImportant
-        ? importantHighlightColor
-        : highlightColor;
-      mark.style.color = isImportant ? importantHighlightTextColor : "";
-      mark.style.borderRadius = "2px";
-      mark.style.padding = "0 1px";
-      mark.style.boxDecorationBreak = "clone";
-      mark.style.webkitBoxDecorationBreak = "clone";
-      mark.textContent = segment.text.slice(range.start, range.end);
-      fragment.appendChild(mark);
-      cursor = range.end;
-      applied += 1;
+      countableSegmentCount += 1;
+      let localRanges = [];
+      for (const entry of entries) {
+        if (entry.end <= piece.start) {
+          continue;
+        }
+        if (entry.start >= piece.end) {
+          break;
+        }
+        const overlapStart = Math.max(entry.start, piece.start);
+        const overlapEnd = Math.min(entry.end, piece.end);
+        if (overlapEnd > overlapStart) {
+          localRanges.push({
+            start: overlapStart - piece.start,
+            end: overlapEnd - piece.start,
+            id: entry.id,
+            kind: entry.kind,
+          });
+        }
+      }
+      if (!localRanges.length) {
+        fragment.appendChild(document.createTextNode(piece.text));
+        continue;
+      }
+
+      nodeChanged = true;
+      localRanges.sort((a, b) => a.start - b.start);
+      let cursor = 0;
+      for (const range of localRanges) {
+        if (range.start > cursor) {
+          fragment.appendChild(
+            document.createTextNode(piece.text.slice(cursor, range.start))
+          );
+        }
+        const mark = document.createElement("span");
+        mark.setAttribute("data-mdexplore-persistent-highlight", "1");
+        mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
+        mark.setAttribute(
+          "data-mdexplore-persistent-highlight-kind",
+          range.kind === "__IMPORTANT_KIND__" ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__"
+        );
+        const isImportant = range.kind === "__IMPORTANT_KIND__";
+        mark.style.backgroundColor = isImportant
+          ? importantHighlightColor
+          : highlightColor;
+        mark.style.color = isImportant ? importantHighlightTextColor : "";
+        mark.style.borderRadius = "2px";
+        mark.style.padding = "0 1px";
+        mark.style.boxDecorationBreak = "clone";
+        mark.style.webkitBoxDecorationBreak = "clone";
+        mark.textContent = piece.text.slice(range.start, range.end);
+        fragment.appendChild(mark);
+        cursor = range.end;
+        applied += 1;
+      }
+      if (cursor < piece.text.length) {
+        fragment.appendChild(document.createTextNode(piece.text.slice(cursor)));
+      }
     }
-    if (cursor < segment.text.length) {
-      fragment.appendChild(document.createTextNode(segment.text.slice(cursor)));
-    }
-    const parent = segment.node.parentNode;
-    if (parent) {
-      parent.replaceChild(fragment, segment.node);
+    const parent = record.node.parentNode;
+    if (nodeChanged && parent) {
+      parent.replaceChild(fragment, record.node);
     }
   }
 
@@ -340,7 +396,7 @@
   return {
     applied,
     entries: entries.length,
-    segments: segments.length,
+    segments: countableSegmentCount,
     totalLength,
   };
 })();

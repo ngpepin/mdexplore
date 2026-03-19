@@ -1320,6 +1320,11 @@ class MdExploreWindow(QMainWindow):
 
         self.path_label = QLabel("")
         self.path_label.setTextInteractionFlags(self.path_label.textInteractionFlags())
+        self.path_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.path_label.setMinimumWidth(0)
+        self.path_label.setToolTip("")
 
         copy_label = QLabel("Copy to:")
         copy_buttons_widget = QWidget()
@@ -2001,8 +2006,56 @@ class MdExploreWindow(QMainWindow):
             self._view_line_probe_block_until, block_until
         )
 
+    def _view_restore_snapshot(
+        self, path_key: str, view_id: int
+    ) -> tuple[float | None, int]:
+        """Freeze one view's restore target at the moment it is selected."""
+        scroll_y: float | None = None
+        scroll_key = f"{path_key}::view:{view_id}"
+        cached_scroll = self._preview_scroll_positions.get(scroll_key)
+        if cached_scroll is not None:
+            try:
+                scroll_value = float(cached_scroll)
+            except Exception:
+                scroll_value = 0.0
+            if math.isfinite(scroll_value):
+                scroll_y = max(0.0, scroll_value)
+
+        top_line = 1
+        state = self._view_states.get(view_id)
+        if isinstance(state, dict):
+            try:
+                top_line = max(1, int(state.get("top_line", 1)))
+            except Exception:
+                top_line = 1
+            if scroll_y is None:
+                try:
+                    state_scroll = float(state.get("scroll_y", 0.0))
+                except Exception:
+                    state_scroll = 0.0
+                if math.isfinite(state_scroll):
+                    scroll_y = max(0.0, state_scroll)
+
+        if scroll_y is None:
+            cached_scroll = self._preview_scroll_positions.get(path_key)
+            if cached_scroll is not None:
+                try:
+                    scroll_value = float(cached_scroll)
+                except Exception:
+                    scroll_value = 0.0
+                if math.isfinite(scroll_value):
+                    scroll_y = max(0.0, scroll_value)
+
+        return scroll_y, top_line
+
     def _schedule_view_restore(
-        self, expected_key: str, expected_view_id: int, *, needs_settle_restore: bool
+        self,
+        expected_key: str,
+        expected_view_id: int,
+        *,
+        needs_settle_restore: bool,
+        target_scroll_y: float | None = None,
+        target_top_line: int | None = None,
     ) -> None:
         """Queue the guarded restore sequence shared by tabs and gutter markers."""
         self._view_tab_restore_request_id += 1
@@ -2010,15 +2063,25 @@ class MdExploreWindow(QMainWindow):
         self._begin_preview_restore_block(1.0 if needs_settle_restore else 0.55)
         QTimer.singleShot(
             0,
-            lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id: self._restore_current_preview_scroll_if_active(
-                key, view_id, request_id, stabilize=False
+            lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id, scroll_y=target_scroll_y, top_line=target_top_line: self._restore_current_preview_scroll_if_active(
+                key,
+                view_id,
+                request_id,
+                stabilize=False,
+                target_scroll_y=scroll_y,
+                target_top_line=top_line,
             ),
         )
         if needs_settle_restore:
             QTimer.singleShot(
                 360,
-                lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id: self._restore_current_preview_scroll_if_active(
-                    key, view_id, request_id, stabilize=True
+                lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id, scroll_y=target_scroll_y, top_line=target_top_line: self._restore_current_preview_scroll_if_active(
+                    key,
+                    view_id,
+                    request_id,
+                    stabilize=True,
+                    target_scroll_y=scroll_y,
+                    target_top_line=top_line,
                 ),
             )
         QTimer.singleShot(
@@ -3375,10 +3438,15 @@ class MdExploreWindow(QMainWindow):
         has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
             expected_key
         )
+        target_scroll_y, target_top_line = self._view_restore_snapshot(
+            expected_key, new_view_id
+        )
         self._schedule_view_restore(
             expected_key,
             new_view_id,
             needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
+            target_scroll_y=target_scroll_y,
+            target_top_line=target_top_line,
         )
         self._update_add_view_button_state()
 
@@ -3389,6 +3457,8 @@ class MdExploreWindow(QMainWindow):
         restore_request_id: int,
         *,
         stabilize: bool,
+        target_scroll_y: float | None = None,
+        target_top_line: int | None = None,
     ) -> None:
         """Restore preview scroll only if tab switch request is still current."""
         if restore_request_id != self._view_tab_restore_request_id:
@@ -3397,7 +3467,12 @@ class MdExploreWindow(QMainWindow):
             return
         if self._active_view_id != expected_view_id:
             return
-        self._restore_current_preview_scroll(expected_key, stabilize=stabilize)
+        self._restore_current_preview_scroll(
+            expected_key,
+            stabilize=stabilize,
+            target_scroll_y=target_scroll_y,
+            target_top_line=target_top_line,
+        )
 
     def _enable_preview_scroll_capture_if_active(
         self, expected_key: str, expected_view_id: int, restore_request_id: int
@@ -3438,10 +3513,15 @@ class MdExploreWindow(QMainWindow):
         has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
             expected_key
         )
+        target_scroll_y, target_top_line = self._view_restore_snapshot(
+            expected_key, view_id
+        )
         self._schedule_view_restore(
             expected_key,
             view_id,
             needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
+            target_scroll_y=target_scroll_y,
+            target_top_line=target_top_line,
         )
 
     def _on_preview_url_changed(self, url: QUrl) -> None:
@@ -3689,10 +3769,15 @@ class MdExploreWindow(QMainWindow):
             has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
                 expected_key
             )
+            target_scroll_y, target_top_line = self._view_restore_snapshot(
+                expected_key, view_id
+            )
             self._schedule_view_restore(
                 expected_key,
                 view_id,
                 needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
+                target_scroll_y=target_scroll_y,
+                target_top_line=target_top_line,
             )
         self.statusBar().showMessage(
             f"Returned tab to labeled beginning at line {anchor_top_line}", 3000
@@ -4148,6 +4233,7 @@ class MdExploreWindow(QMainWindow):
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
         self.path_label.setText("Select a markdown file")
+        self.path_label.setToolTip("Select a markdown file")
         self._set_preview_html(
             self._placeholder_html("Select a markdown file to preview"),
             QUrl.fromLocalFile(f"{self.root}/"),
@@ -4376,6 +4462,7 @@ class MdExploreWindow(QMainWindow):
                 self._reset_document_views()
                 self._clear_current_preview_signature()
                 self.path_label.setText("Select a markdown file")
+                self.path_label.setToolTip("Select a markdown file")
                 self._set_preview_html(
                     self._placeholder_html("Select a markdown file to preview"),
                     QUrl.fromLocalFile(f"{self.root}/"),
@@ -6980,7 +7067,12 @@ class MdExploreWindow(QMainWindow):
         self._request_active_view_top_line_update(force=True)
 
     def _restore_current_preview_scroll(
-        self, expected_key: str | None = None, *, stabilize: bool = True
+        self,
+        expected_key: str | None = None,
+        *,
+        stabilize: bool = True,
+        target_scroll_y: float | None = None,
+        target_top_line: int | None = None,
     ) -> None:
         """Restore previously captured scroll position for the selected file."""
         path_key = self._current_preview_path_key()
@@ -6989,30 +7081,27 @@ class MdExploreWindow(QMainWindow):
         if expected_key is not None and path_key != expected_key:
             return
         scroll_key = self._current_preview_scroll_key()
-        scroll_y = (
-            self._preview_scroll_positions.get(scroll_key)
-            if scroll_key is not None
-            else None
-        )
+        scroll_y = target_scroll_y
         top_line_fallback = 1
-        if scroll_y is None:
-            state = self._current_view_state()
-            if state is not None:
-                try:
-                    scroll_y = float(state.get("scroll_y", 0.0))
-                except Exception:
-                    scroll_y = 0.0
-                try:
-                    top_line_fallback = max(1, int(state.get("top_line", 1)))
-                except Exception:
-                    top_line_fallback = 1
-        else:
-            state = self._current_view_state()
-            if state is not None:
-                try:
-                    top_line_fallback = max(1, int(state.get("top_line", 1)))
-                except Exception:
-                    top_line_fallback = 1
+        if target_top_line is not None:
+            try:
+                top_line_fallback = max(1, int(target_top_line))
+            except Exception:
+                top_line_fallback = 1
+
+        state = self._current_view_state()
+        if scroll_y is None and scroll_key is not None:
+            scroll_y = self._preview_scroll_positions.get(scroll_key)
+        if scroll_y is None and state is not None:
+            try:
+                scroll_y = float(state.get("scroll_y", 0.0))
+            except Exception:
+                scroll_y = 0.0
+        if target_top_line is None and state is not None:
+            try:
+                top_line_fallback = max(1, int(state.get("top_line", 1)))
+            except Exception:
+                top_line_fallback = 1
         if scroll_y is None:
             # Backward compatibility with pre-view-tab scroll cache entries.
             scroll_y = self._preview_scroll_positions.get(path_key)
@@ -7419,9 +7508,11 @@ class MdExploreWindow(QMainWindow):
         self._update_add_view_button_state()
         try:
             rel = path.relative_to(self.root)
-            self.path_label.setText(str(rel))
+            label_text = str(rel)
         except ValueError:
-            self.path_label.setText(str(path))
+            label_text = str(path)
+        self.path_label.setText(label_text)
+        self.path_label.setToolTip(label_text)
 
         try:
             base_url = QUrl.fromLocalFile(f"{path.parent.resolve()}/")

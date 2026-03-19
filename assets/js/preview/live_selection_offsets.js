@@ -1,14 +1,51 @@
 (() => {
   const root = document.querySelector("main") || document.body;
   const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
+  function splitTextPieces(value) {
+    const source = typeof value === "string" ? value : "";
+    const pieces = [];
+    const whitespaceRe = /\s+/g;
+    let cursor = 0;
+    let match = null;
+    while ((match = whitespaceRe.exec(source)) !== null) {
+      if (match.index > cursor) {
+        pieces.push({
+          text: source.slice(cursor, match.index),
+          countable: true,
+        });
+      }
+      const raw = match[0];
+      pieces.push({
+        text: raw,
+        countable: !/[\r\n\t]/.test(raw),
+      });
+      cursor = match.index + raw.length;
+    }
+    if (cursor < source.length) {
+      pieces.push({
+        text: source.slice(cursor),
+        countable: true,
+      });
+    }
+    return pieces.filter((piece) => piece.text.length > 0);
+  }
+  function countableText(value) {
+    let out = "";
+    for (const piece of splitTextPieces(value)) {
+      if (piece.countable) out += piece.text;
+    }
+    return out;
+  }
+  function countableLength(value) {
+    let total = 0;
+    for (const piece of splitTextPieces(value)) {
+      if (piece.countable) total += piece.text.length;
+    }
+    return total;
+  }
   function shouldSkipTextNode(node) {
     if (!node || typeof node.nodeValue !== "string") return true;
-    const value = node.nodeValue;
-    if (!value.length) return true;
-    // Ignore formatting-only whitespace that contains newlines/tabs so
-    // recovered offsets match user-visible text flow.
-    if (!/[^\s]/.test(value) && /[\r\n\t]/.test(value)) return true;
-    return false;
+    return countableLength(node.nodeValue) <= 0;
   }
   if (!root) {
     return {
@@ -35,7 +72,7 @@
     );
     let text = "";
     while (walker.nextNode()) {
-      text += walker.currentNode.nodeValue || "";
+      text += countableText(walker.currentNode.nodeValue || "");
     }
     return text;
   }
@@ -63,7 +100,7 @@
         );
         let total = 0;
         while (walker.nextNode()) {
-          total += (walker.currentNode.nodeValue || "").length;
+          total += countableLength(walker.currentNode.nodeValue || "");
         }
         return total;
       }

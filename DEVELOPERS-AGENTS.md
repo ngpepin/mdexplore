@@ -1577,11 +1577,12 @@ The `tests/` directory currently contains these suites:
 
 - `tests/test_preview_regressions.py`: headless `QWebEngineView` regressions for
   saved view-tab round trips, named-view marker restore parity with tab
-  selection, persistent-highlight marker navigation, right-gutter search marker
-  navigation/placement, same-document preview search highlighting, and preview
-  context-menu/live-highlight probes. Uses `test/testdoc.md` plus persisted
-  sidecars copied into a temp fixture root, and also creates synthetic documents
-  for targeted NEAR/search/marker cases.
+  selection, selection-time restore snapshot races during tab switches,
+  persistent-highlight marker navigation, right-gutter search marker
+  navigation/placement, same-document preview search highlighting, revisit
+  highlight-drift checks, and preview context-menu/live-highlight probes. Uses
+  `test/testdoc.md` plus persisted sidecars copied into a temp fixture root,
+  and also creates synthetic documents for targeted NEAR/search/marker cases.
 - `tests/test_search_query_module.py`: pure `mdexplore_app.search` unit tests for
   tokenization, quote/case handling, trailing-space preservation, NEAR-window
   selection, hit counting, invalid-query fallback, and legacy `CLOSE(...)`
@@ -1604,6 +1605,9 @@ The `tests/` directory currently contains these suites:
   custom-label text budgeting and fallback handling when Qt reports stale
   close-button geometry, covering the class of bugs where an inactive tab label
   appears clipped until a later relayout/selection.
+- `tests/test_window_layout.py`: main-window Qt layout regression for the top
+  path label, covering the case where a long document path would otherwise
+  raise the window minimum width and make the app feel unshrinkable.
 - `tests/test_ui_assets.py`: repository-layout checks that tracked UI
   `.svg`/`.png`/`.ttf` assets live under `assets/ui/` while `mdexplor-icon.png`
   remains at the repo root.
@@ -1622,6 +1626,8 @@ Recommended execution patterns:
   `.venv/bin/python -m unittest tests.test_js_assets tests.test_template_assets tests.test_ui_assets tests.test_pdf_layout_hints -v`
 - Tab-bar layout check:
   `xvfb-run -a .venv/bin/python -m unittest tests.test_tab_bar_layout -v`
+- Window layout check:
+  `xvfb-run -a .venv/bin/python -m unittest tests.test_window_layout -v`
 - Preview/marker/search integration check:
   `xvfb-run -a .venv/bin/python -m unittest tests.test_preview_regressions -v`
 - Full regression sweep:

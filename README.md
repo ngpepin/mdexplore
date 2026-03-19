@@ -203,7 +203,8 @@ The current suites in [tests/test_preview_regressions.py](/home/npepin/Projects/
 [tests/test_search_query_syntax.py](/home/npepin/Projects/mdexplore/tests/test_search_query_syntax.py),
 [tests/test_pdf_layout_hints.py](/home/npepin/Projects/mdexplore/tests/test_pdf_layout_hints.py),
 [tests/test_template_assets.py](/home/npepin/Projects/mdexplore/tests/test_template_assets.py),
-and [tests/test_tab_bar_layout.py](/home/npepin/Projects/mdexplore/tests/test_tab_bar_layout.py)
+[tests/test_tab_bar_layout.py](/home/npepin/Projects/mdexplore/tests/test_tab_bar_layout.py),
+and [tests/test_window_layout.py](/home/npepin/Projects/mdexplore/tests/test_window_layout.py)
 cover:
 
 - saved view-tab round trips on the `test/testdoc.md` fixture,
@@ -220,6 +221,8 @@ cover:
 - HTML preview-template asset loading and `MarkdownRenderer.render_document()`
   integration,
 - custom tab-bar label budgeting and stale close-button geometry fallback.
+- top-bar path-label layout protection so long document paths do not force the
+  main window to stay overly wide.
 
 ### File Highlights
 

@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
@@ -592,6 +593,138 @@ class SameDocumentSearchSyntaxRegressionTests(PreviewRegressionHarness):
 
 
 class PreviewMarkerRegressionTests(PreviewRegressionHarness):
+    def test_persistent_highlight_offsets_ignore_embedded_formatting_newlines(self) -> None:
+        self.load_markdown_text(
+            "persistent-highlight-hard-break.md",
+            "# Hard Break Fixture\n\nalpha  \nbeta gamma\n",
+        )
+
+        for needle in ("beta", "gamma"):
+            with self.subTest(needle=needle):
+                self.apply_persistent_highlights([])
+                needle_len = len(needle)
+                selection_seed = self.run_js(
+                    f"""
+(() => {{
+  const root = document.querySelector("main") || document.body;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {{
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const index = value.indexOf({json.dumps(needle)});
+    if (index < 0) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + {needle_len});
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return {json.dumps(needle)};
+  }}
+  return "missing";
+}})();
+"""
+                )
+                self.assertEqual(selection_seed, needle)
+
+                selected_offsets = self.request_live_selection_offsets(needle)
+                self.assertTrue(bool(selected_offsets.get("hasSelection")))
+                self.assertEqual(selected_offsets.get("selectedText"), needle)
+                start = int(selected_offsets["selectionOffsetStart"])
+                end = int(selected_offsets["selectionOffsetEnd"])
+                self.assertEqual(
+                    end - start,
+                    len(needle),
+                    "Embedded formatting newlines should not inflate logical highlight width",
+                )
+
+                apply_result = self.apply_persistent_highlights(
+                    [{"id": f"case-{needle}", "start": start, "end": end, "kind": "normal"}]
+                )
+                self.assertGreaterEqual(int(apply_result.get("applied", 0)), 1)
+                self.assertEqual(
+                    self.persistent_highlight_spans(),
+                    [{"text": needle, "id": f"case-{needle}", "kind": "normal"}],
+                )
+
+    def test_persistent_highlights_revisit_document_without_drift(self) -> None:
+        target_path = self.load_markdown_text(
+            "persistent-highlight-revisit-hard-break.md",
+            "# Revisit Fixture\n\nalpha  \nbeta gamma\n",
+        )
+        other_path = self.load_markdown_text(
+            "persistent-highlight-revisit-other.md",
+            "# Other Fixture\n\nunrelated text\n",
+        )
+        self.window._load_preview(target_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+
+        selection_seed = self.run_js(
+            """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const index = value.indexOf("gamma");
+    if (index < 0) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + 5);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return "gamma";
+  }
+  return "missing-gamma";
+})();
+"""
+        )
+        self.assertEqual(selection_seed, "gamma")
+        selected_offsets = self.request_live_selection_offsets("gamma")
+        start = int(selected_offsets["selectionOffsetStart"])
+        end = int(selected_offsets["selectionOffsetEnd"])
+        self.assertEqual(end - start, 5)
+
+        apply_result = self.apply_persistent_highlights(
+            [{"id": "revisit-case", "start": start, "end": end, "kind": "normal"}]
+        )
+        self.assertGreaterEqual(int(apply_result.get("applied", 0)), 1)
+        path_key = self.window._current_preview_path_key()
+        self.assertIsNotNone(path_key)
+        self.window._persist_text_highlights_for_path_key(
+            path_key,
+            self.window._current_preview_text_highlights,
+        )
+        self.assertEqual(
+            self.persistent_highlight_spans(),
+            [{"text": "gamma", "id": "revisit-case", "kind": "normal"}],
+        )
+
+        self.window._load_preview(other_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+
+        self.window._load_preview(target_path)
+        self.wait_until(
+            lambda: not self.window._preview_load_in_progress, timeout_ms=20000
+        )
+        self.wait_ms(SETTLE_WAIT_MS)
+        self.wait_until(
+            lambda: bool(self.persistent_highlight_spans()),
+            timeout_ms=4000,
+        )
+        self.assertEqual(
+            self.persistent_highlight_spans(),
+            [{"text": "gamma", "id": "revisit-case", "kind": "normal"}],
+        )
+
     def test_persistent_highlight_apply_and_live_probes_match_dom_ranges(self) -> None:
         tall_text = "\n\n".join(
             [f"filler line {index}" for index in range(1, 80)]
@@ -852,6 +985,66 @@ class PreviewMarkerRegressionTests(PreviewRegressionHarness):
         )
         self.wait_ms(1200)
         self.assert_view_matches_state(second_marker_view_id, second_state)
+
+    def test_switching_from_newly_labeled_view_restores_existing_view_position(self) -> None:
+        self.assertGreaterEqual(self.window.view_tabs.count(), 2)
+        target_index = 0 if self.window.view_tabs.currentIndex() != 0 else 1
+        target_view_id = self.window._tab_view_id(target_index)
+        self.assertIsNotNone(target_view_id)
+        target_state = dict(self.window._view_states[int(target_view_id)])
+
+        self.run_js("window.scrollTo(0, 2600);")
+        self.wait_ms(500)
+        self.window._capture_current_preview_scroll(force=True)
+        self.wait_ms(250)
+
+        before_count = self.window.view_tabs.count()
+        self.window._add_document_view()
+        self.wait_until(
+            lambda: self.window.view_tabs.count() == before_count + 1,
+            timeout_ms=2000,
+        )
+        self.wait_ms(800)
+
+        self.run_js("window.scrollTo(0, 4300);")
+        self.wait_ms(700)
+        self.window._capture_current_preview_scroll(force=True)
+        self.wait_ms(250)
+
+        with patch("mdexplore.QInputDialog.getText", return_value=("Repro Label", True)):
+            self.window._edit_view_tab_label(self.window.view_tabs.currentIndex())
+        self.wait_ms(450)
+
+        self.window.view_tabs.setCurrentIndex(target_index)
+        self.wait_ms(1700)
+        self.assert_view_matches_state(int(target_view_id), target_state)
+
+    def test_tab_switch_uses_selection_time_restore_snapshot(self) -> None:
+        self.assertGreaterEqual(self.window.view_tabs.count(), 2)
+        target_index = 0 if self.window.view_tabs.currentIndex() != 0 else 1
+        target_view_id = self.window._tab_view_id(target_index)
+        self.assertIsNotNone(target_view_id)
+        path_key = self.window._current_preview_path_key()
+        self.assertIsNotNone(path_key)
+        target_state = dict(self.window._view_states[int(target_view_id)])
+
+        self.run_js("window.scrollTo(0, 4300);")
+        self.wait_ms(500)
+        self.window._capture_current_preview_scroll(force=True)
+        self.wait_ms(250)
+
+        scroll_key = f"{path_key}::view:{int(target_view_id)}"
+        wrong_scroll = max(0.0, float(target_state["scroll_y"]) + 3200.0)
+        wrong_top_line = max(1, int(target_state["top_line"]) + 80)
+
+        self.window.view_tabs.setCurrentIndex(target_index)
+        self.window._preview_scroll_positions[scroll_key] = wrong_scroll
+        self.window._preview_scroll_positions[str(path_key)] = wrong_scroll
+        self.window._view_states[int(target_view_id)]["scroll_y"] = wrong_scroll
+        self.window._view_states[int(target_view_id)]["top_line"] = wrong_top_line
+
+        self.wait_ms(1700)
+        self.assert_view_matches_state(int(target_view_id), target_state)
 
     def test_persistent_highlight_markers_navigate_to_visible_highlights(self) -> None:
         before = self.probe()
