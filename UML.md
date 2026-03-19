@@ -60,6 +60,7 @@ file "~/.mdexplore.cfg" as UserCfg
 file "<dir>/.mdexplore-colors.json" as ColorCfg
 file "<dir>/.mdexplore-views.json" as ViewCfg
 file "<dir>/.mdexplore-highlighting.json" as HighlightCfg
+folder "User-selected copy target directory" as CopyTargetDir
 database "System Clipboard\nURLs + GNOME copied-files MIME" as Clipboard
 component "VS Code CLI\ncode" as Vscode
 file "vendor/plantuml/plantuml.jar" as PlantJar
@@ -96,6 +97,10 @@ Model <--> ColorCfg : read/write highlight metadata
 Window <--> UserCfg : persist effective root on close
 Window <--> ViewCfg : persist saved view sessions
 Window <--> HighlightCfg : persist preview text highlights
+Window --> CopyTargetDir : copy selected files (directory mode)
+Window --> ColorCfg : merge copied-file color metadata (directory mode)
+Window --> ViewCfg : merge copied-file view metadata (directory mode)
+Window --> HighlightCfg : merge copied-file highlight metadata (directory mode)
 MarkerWorker --> ViewCfg : scan persisted view state
 MarkerWorker --> HighlightCfg : scan persisted preview highlights
 Window --> Clipboard : copy files/text/source markdown
@@ -188,7 +193,9 @@ class ColorizedMarkdownModel {
   +data(index, role)
   +set_color_for_file(path, color_name)
   +collect_files_with_color(root, color_name): list[Path]
+  +clear_directory_highlights(directory): int
   +clear_all_highlights(root): int
+  +color_for_file(path): str|None
   +set_search_match_counts(match_counts)
   +clear_search_match_paths()
   +set_multi_view_paths(paths)
@@ -266,6 +273,8 @@ class ViewTabBar {
   +PASTEL_SEQUENCE: list[str]
   +POSITION_BAR_SEGMENTS: int
   +MAX_LABEL_CHARS: int
+  +homeRequested(tab_index)
+  +beginningResetRequested(tab_index)
   -_drag_candidate_index: int
   -_dragging_index: int
   +paintEvent(event)
@@ -299,7 +308,13 @@ class MdExploreWindow {
   +_run_match_search()
   +_export_current_preview_pdf()
   +_copy_preview_selection_as_source_markdown(...)
-  +_copy_highlighted_files_to_clipboard(color)
+  +_copy_destination_is_directory(): bool
+  +_copy_files_to_directory_with_metadata(files)
+  +_merge_copied_file_metadata(source_dest_pairs, target_directory)
+  +_copy_current_preview_file_to_clipboard()
+  +_copy_highlighted_files_to_clipboard(color, color_name)
+  +_confirm_and_clear_directory_highlighting(scope)
+  +_confirm_and_clear_all_highlighting(scope)
   +_add_document_view()
   +closeEvent(event)
 }
@@ -449,7 +464,7 @@ alt user presses Enter
 end
 
 Debounce -> Win : timeout -> _run_match_search()
-Win -> Win : compile predicate\n(Boolean + implicit AND + quotes + CLOSE)
+Win -> Win : compile predicate\n(Boolean + implicit AND + single/double quotes + NEAR)
 Win -> Scope : list direct *.md files (non-recursive)
 loop each file
   Win -> Scope : read file name + content
@@ -469,6 +484,16 @@ alt user clicks a color button next to Search
 end
 @enduml
 ```
+
+Search semantics note:
+
+- unquoted terms are case-insensitive,
+- double-quoted phrases are case-insensitive and preserve spaces,
+- single-quoted phrases are case-sensitive and preserve spaces,
+- only the opening quote character closes a quoted term, so apostrophes inside
+  double-quoted phrases stay literal,
+- `NEAR(...)` requires distinct qualifying occurrences per term, and
+  single-word NEAR terms use word boundaries for proximity matching.
 
 ## 6. Preview Context Menu: Copy Source Markdown
 
@@ -567,6 +592,12 @@ state MultiView {
   TabSet : view tabs visible\nfixed width + pastel sequence\nmanual drag reordering
   TabSet : each tab stores\nview_id, sequence, color_slot,\nscroll_y, top_line, progress
 }
+note right of MultiView
+  Custom-labeled tabs expose:
+  - a home action for Return to beginning
+  - a refresh action that resets the saved beginning
+    to the current view position
+end note
 
 SingleView --> SingleView : switch files
 MultiView --> MultiView : switch files
@@ -602,6 +633,15 @@ MultiView --> [*] : window close (persist effective root)
   named-view home markers) are similarly abstracted here and described in more
   detail in `RENDER-PATHS.md`, because they are post-render navigation aids
   rather than renderer/cache forks.
+- Named-view gutter markers now route back through the same saved-view restore
+  path as tab selection, so marker navigation and tab selection land on the
+  same saved location.
+- Top-right copy controls now include destination mode (`Clipboard` vs `Directory`);
+  directory mode copies files into a chosen folder and merges copied-file metadata
+  into destination `.mdexplore-*` sidecars.
+- Headless regressions for saved-view restore, preview markers, and search
+  quoting now live in `tests/test_preview_regressions.py` and
+  `tests/test_search_query_syntax.py`.
 - Worker/threadpool usage is intentionally separated by concern:
   - render pool (preview HTML jobs),
   - PlantUML pool (diagram jobs),

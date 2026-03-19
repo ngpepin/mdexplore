@@ -52,6 +52,8 @@ gradually decomposed.
 - Manual tree/preview pane resizing is preserved across `^` root navigation for the current app run.
 - Right-click a Markdown file to assign a highlight color in the tree.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
+- Available file-highlight colors are: Yellow, Green, Blue, Orange, Purple,
+  Light Gray, Medium Gray, and Red.
 - View-tab state persists per directory in `.mdexplore-views.json` files for
   documents that have more than one saved view or a custom tab label.
 - Persistent preview text highlights are stored per directory in
@@ -62,9 +64,17 @@ gradually decomposed.
   badge in the tree.
 - Markdown tree gutter badges are packed together in a fixed-width strip so the
   markdown file icon and filename stay aligned even when only some badges apply.
-- Right-click menu includes `Clear All` to recursively remove all highlights from scope.
-- Top-right color buttons copy matching highlighted files to clipboard.
-- A pin button before the copy-color buttons copies the currently previewed markdown file.
+- Right-click tree menu includes `Clear in Folder` (non-recursive) and
+  `Clear All` (recursive) to remove persisted file-highlight colors.
+- Top-right copy controls are labeled `Copy to: () Clipboard () Directory`,
+  with `Clipboard` selected by default.
+- In `Clipboard` mode, color buttons copy matching highlighted files and the
+  pin button copies the currently previewed markdown file.
+- In `Directory` mode, pin/color actions open a target-folder picker, then copy
+  the file(s) into that folder.
+- Directory copy also writes merged metadata entries for copied files into the
+  target folder sidecars: `.mdexplore-colors.json`,
+  `.mdexplore-views.json`, and `.mdexplore-highlighting.json`.
 - Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
 - Search-hit files in the tree show a yellow hit-count pill in the left gutter.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
@@ -177,18 +187,51 @@ https://github.com/1jehuang/mermaid-rs-renderer.git
 If `cargo` is missing, the setup script installs a minimal Rust toolchain
 through `rustup` so it can build `mmdr` locally.
 
+### Headless Regression Tests
+
+Run the GUI regression suite under `xvfb` so `QWebEngineView` has a display:
+
+```bash
+xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
+```
+
+The current suites in [tests/test_preview_regressions.py](/home/npepin/Projects/mdexplore/tests/test_preview_regressions.py)
+and [tests/test_search_query_syntax.py](/home/npepin/Projects/mdexplore/tests/test_search_query_syntax.py)
+cover:
+
+- saved view-tab round trips on the `test/testdoc.md` fixture,
+- left-gutter named-view markers restoring the same saved positions as tabs,
+- left-gutter persistent highlight markers navigating to visible highlights,
+- right-gutter search markers navigating to visible search hits,
+- same-document live preview search coverage for unquoted terms, double/single
+  quotes, trailing-space phrases, implicit AND, function-style AND/OR,
+  `NOT`, and `NEAR(...)` variants,
+- search parser/matcher handling for unquoted terms, double-quoted phrases,
+  single-quoted case-sensitive phrases, and literal apostrophes inside
+  double-quoted phrases.
+
 ### File Highlights
 
 - In the file tree, right-click any `.md` file.
 - Choose a highlight color (`Highlight Yellow`, then `... <Color>`), or clear it.
 - Colors are persisted in `.mdexplore-colors.json` in each affected directory.
+- Available colors include `Light Gray` and `Medium Gray` in addition to the
+  original color set.
 - If a directory is not writable, color persistence fails quietly by design.
-- Use the top-right "Copy to clipboard:" color buttons to copy files
-  with a given highlight color.
-- Use the pin button (first button after `Copy to clipboard:`) to copy
-  the currently previewed markdown file.
-- Right-click a directory to access recursive `Clear All` for that subtree.
-- Copy/Clear operations are recursive and use scope in this order:
+- Use top-right `Copy to: () Clipboard () Directory` controls to choose copy destination mode.
+- In `Clipboard` mode, color buttons copy files with a given highlight color
+  and the pin button copies the currently previewed markdown file path payload.
+- In `Directory` mode, pin/color actions open a folder chooser that defaults to:
+  previously selected destination folder, else current effective root.
+- Directory copy writes file content and merges copied-file metadata into target
+  `.mdexplore-colors.json`, `.mdexplore-views.json`, and
+  `.mdexplore-highlighting.json` (creating sidecars when missing, updating
+  existing sidecars by filename when present).
+- Right-click a directory (or file row) and use `Clear in Folder` for
+  non-recursive clear in that folder.
+- Right-click a directory (or file row) and use `Clear All` for recursive clear
+  under that scope.
+- Color-copy match collection is recursive and uses scope in this order:
   selected directory, else most recently selected/expanded directory, else root.
 
 ### Preview Text Highlights
@@ -339,6 +382,9 @@ intended way to tune print behavior.
   position and top visible source line as the tab's saved beginning.
 - Right-click a custom-labeled tab to use `Return to beginning`, which jumps that
   tab back to the stored label-time location.
+- Custom-labeled tabs also show a refresh icon beside the close button; clicking
+  it resets that tab's saved beginning to the current scroll position/top line,
+  the same way relabeling the tab does.
 - Relabeling a custom-labeled tab with different text resets the saved beginning
   to the scroll position at the time of relabeling.
 - When a new view is added and the palette wraps, mdexplore skips any color already used by open tabs.
@@ -359,6 +405,8 @@ intended way to tune print behavior.
   bookmark, then returns the document to the hidden default single-view state.
 - Tabs are closeable with `X`; at least one tab is always kept open.
 - Maximum views per document: `8`.
+- Named-view left-gutter markers use the same restore path as selecting the
+  corresponding tab, so marker navigation lands at the same saved location.
 
 ### Markdown Callouts
 
@@ -387,18 +435,28 @@ Example:
   in the preview and scrolls to the first highlighted match.
 - Preview scrollbar markers show where highlighted hits occur within the
   document; clicking a marker jumps to the nearest hit in that marker cluster.
-- For `CLOSE(...)` queries, preview highlighting is constrained to the matched
-  CLOSE window (not every occurrence of those terms in the document).
+- For `NEAR(...)` queries, preview highlighting is constrained to qualifying
+  NEAR windows rather than every standalone occurrence of those terms
+  elsewhere in the document.
 - Non-quoted terms are case-insensitive.
-- Quoted terms are case-sensitive.
+- Double-quoted terms are case-insensitive and preserve spaces.
+- Single-quoted terms are case-sensitive and preserve spaces.
+- Only the quote character that opens a phrase closes it; the other quote
+  character remains literal inside the phrase.
 - Function-style operators accept both no-space and spaced forms before `(`:
-  `CLOSE(...)`/`CLOSE (...)`, `OR(...)`/`OR (...)`, `AND(...)`/`AND (...)`,
+  `NEAR(...)`/`NEAR (...)`, `OR(...)`/`OR (...)`, `AND(...)`/`AND (...)`,
   and `NOT(...)`/`NOT (...)`.
-- `AND(...)`, `OR(...)`, and `CLOSE(...)` accept comma-delimited, space-delimited,
+- `AND(...)`, `OR(...)`, and `NEAR(...)` accept comma-delimited, space-delimited,
   or mixed argument lists.
 - `AND(...)` and `OR(...)` are variadic and can take 2+ arguments.
-- `CLOSE(...)` requires 2+ terms and matches only when all terms appear within
+- `NEAR(...)` requires 2+ terms and matches only when all terms appear within
   50 words of each other in file content.
+- `NEAR(...)` requires distinct qualifying occurrences for each listed term;
+  one text start cannot satisfy two different required terms.
+- For single-word `NEAR(...)` terms, proximity matching uses word boundaries,
+  so `the` does not qualify via the `The` in `They`.
+- For `NEAR(...)` queries, the tree hit-count pill counts qualifying NEAR
+  windows in the file, not the number of individual highlighted term spans.
 
 Search examples:
 
@@ -412,19 +470,37 @@ Matches `joe`, `JOE`, `JoE`, etc. (filename or content).
 "Anne Smith"
 ```
 
+Case-insensitive exact phrase match.
+
+```text
+'Anne Smith'
+```
+
 Case-sensitive exact phrase match.
+
+```text
+"Program Director's RAG"
+```
+
+Case-insensitive exact phrase match, with the apostrophe treated as literal text.
 
 ```text
 OR (Joe, "Fred")
 ```
 
-Matches files containing either `Joe` (any case) or exact-case `"Fred"`.
+Matches files containing either `Joe` (any case) or phrase `"Fred"` in any case.
 
 ```text
-CLOSE(Fred "Anne Smith" Joe)
+NEAR(Fred "Anne Smith" Joe)
 ```
 
 Matches only if all listed terms occur within 50 words of each other.
+
+```text
+NEAR('The ', the)
+```
+
+Requires a distinct later/earlier standalone `the`; the `The` in `They` does not qualify.
 
 ```text
 Joe "Anne Smith" NOT draft

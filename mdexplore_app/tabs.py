@@ -15,6 +15,7 @@ class ViewTabBar(QTabBar):
     """Custom tab bar that paints dark-theme-friendly pastel tab backgrounds."""
 
     homeRequested = Signal(int)
+    beginningResetRequested = Signal(int)
 
     PASTEL_SEQUENCE = [
         "#8fb8ff",
@@ -29,11 +30,16 @@ class ViewTabBar(QTabBar):
     WIDTH_TEMPLATE_TEXT = "999999"
     MAX_LABEL_CHARS = 48
     WIDTH_SIDE_PADDING = 10
+    TAB_TEXT_BREATHING_ROOM = 14
+    CUSTOM_LABEL_BREATHING_ROOM = 12
     POSITION_BAR_WIDTH = 26
     POSITION_BAR_HEIGHT = 8
     POSITION_BAR_TEXT_GAP = 7
     POSITION_BAR_SEGMENTS = 8
     HOME_ICON_GAP = 6
+    RESET_ICON_GAP = 3
+    LABEL_TO_RESET_ICON_GAP = 8
+    TEXT_RIGHT_PADDING = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +59,23 @@ class ViewTabBar(QTabBar):
         if self._home_icon.isNull():
             self._home_icon = self.style().standardIcon(
                 QStyle.StandardPixmap.SP_DirHomeIcon
+            )
+        self._reset_icon = load_png_icon_two_tone(
+            "refresh.png",
+            QColor("#425066"),
+            QColor("#f8fafc"),
+            size=64,
+        )
+        if self._reset_icon.isNull():
+            self._reset_icon = load_svg_icon_two_tone(
+                "refresh.svg",
+                QColor("#425066"),
+                QColor("#f8fafc"),
+                size=64,
+            )
+        if self._reset_icon.isNull():
+            self._reset_icon = self.style().standardIcon(
+                QStyle.StandardPixmap.SP_BrowserReload
             )
         # Drag state is tracked here instead of relying on Qt's default drag
         # ghost so the whole tab, not just the close button, appears to move.
@@ -113,6 +136,33 @@ class ViewTabBar(QTabBar):
         icon_y = rect.center().y() - (icon_size // 2)
         return QRect(icon_x, icon_y, icon_size, icon_size)
 
+    def _reset_icon_rect(self, tab_index: int) -> QRect:
+        """Return reset icon hit box for a labeled tab, or empty rect."""
+        if (
+            tab_index < 0
+            or tab_index >= self.count()
+            or not self._tab_has_custom_label(tab_index)
+        ):
+            return QRect()
+        rect = self.tabRect(tab_index).adjusted(2, 2, -2, -1)
+        if rect.width() <= 2 or rect.height() <= 2:
+            return QRect()
+        icon_size = self._home_icon_size_px()
+        icon_right = rect.right() - self.WIDTH_SIDE_PADDING
+        close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
+        if close_button is not None and close_button.isVisible():
+            icon_right = close_button.geometry().left() - self.RESET_ICON_GAP - 1
+        icon_x = icon_right - icon_size + 1
+        if icon_x <= rect.left():
+            return QRect()
+        icon_y = rect.center().y() - (icon_size // 2)
+        return QRect(icon_x, icon_y, icon_size, icon_size)
+
+    def _is_reset_icon_hit(self, tab_index: int, pos) -> bool:
+        """Detect whether a pointer position targets the reset-beginning icon."""
+        rect = self._reset_icon_rect(tab_index)
+        return bool(rect.isValid() and rect.contains(pos))
+
     def _set_all_close_buttons_visible(self, visible: bool) -> None:
         """Show/hide close buttons while custom drag ghost is active."""
         for index in range(self.count()):
@@ -169,6 +219,10 @@ class ViewTabBar(QTabBar):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self._event_pos(event)
             tab_index = self.tabAt(pos)
+            if tab_index >= 0 and self._is_reset_icon_hit(tab_index, pos):
+                self.beginningResetRequested.emit(tab_index)
+                event.accept()
+                return
             if tab_index >= 0 and self._home_icon_rect(tab_index).contains(pos):
                 self.homeRequested.emit(tab_index)
                 event.accept()
@@ -278,6 +332,7 @@ class ViewTabBar(QTabBar):
         has_custom_label = self._tab_has_custom_label(tab_index)
 
         house_offset = 0
+        reset_rect = QRect()
         if has_custom_label:
             # A house icon marks tabs that have an explicit labeled "beginning".
             icon_rect = self._home_icon_rect(tab_index)
@@ -286,6 +341,11 @@ class ViewTabBar(QTabBar):
                 if not icon_pixmap.isNull():
                     painter.drawPixmap(icon_rect, icon_pixmap)
                 house_offset = icon_rect.width() + self.HOME_ICON_GAP
+            reset_rect = self._reset_icon_rect(tab_index)
+            if reset_rect.isValid():
+                reset_pixmap = self._reset_icon.pixmap(reset_rect.size())
+                if not reset_pixmap.isNull():
+                    painter.drawPixmap(reset_rect, reset_pixmap)
 
         # Draw a compact segmented bargraph at the left to indicate each
         # tab's approximate position within the current document.
@@ -333,7 +393,16 @@ class ViewTabBar(QTabBar):
             painter.drawRect(segment_x, inner_y, segment_w, inner_h)
 
         text_left = bar_x + bar_w + self.POSITION_BAR_TEXT_GAP
-        text_rect = rect.adjusted(text_left - rect.left(), 0, -9, 0)
+        text_rect = rect.adjusted(
+            text_left - rect.left(), 0, -self.TEXT_RIGHT_PADDING, 0
+        )
+        if reset_rect.isValid():
+            text_rect.setRight(
+                min(
+                    text_rect.right(),
+                    reset_rect.left() - self.LABEL_TO_RESET_ICON_GAP,
+                )
+            )
         close_button = self.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
         if close_button is not None and close_button.isVisible():
             text_rect.setRight(
@@ -395,6 +464,7 @@ class ViewTabBar(QTabBar):
             )
         dynamic_width = (
             text_width
+            + self.TAB_TEXT_BREATHING_ROOM
             + (self.WIDTH_SIDE_PADDING * 2)
             + self.POSITION_BAR_WIDTH
             + self.POSITION_BAR_TEXT_GAP
@@ -415,7 +485,11 @@ class ViewTabBar(QTabBar):
         base = super().tabSizeHint(index)
         width = self._tab_width_for_text(self.tabText(index))
         if self._tab_has_custom_label(index):
-            width += self._home_icon_size_px() + self.HOME_ICON_GAP
+            icon_space = self._home_icon_size_px()
+            width += icon_space + self.HOME_ICON_GAP
+            width += icon_space + self.RESET_ICON_GAP
+            width += self.LABEL_TO_RESET_ICON_GAP
+            width += self.CUSTOM_LABEL_BREATHING_ROOM
         return QSize(width, base.height())
 
     def minimumTabSizeHint(self, index: int) -> QSize:  # noqa: N802
@@ -423,7 +497,11 @@ class ViewTabBar(QTabBar):
         base = super().minimumTabSizeHint(index)
         width = self._tab_width_for_text(self.tabText(index))
         if self._tab_has_custom_label(index):
-            width += self._home_icon_size_px() + self.HOME_ICON_GAP
+            icon_space = self._home_icon_size_px()
+            width += icon_space + self.HOME_ICON_GAP
+            width += icon_space + self.RESET_ICON_GAP
+            width += self.LABEL_TO_RESET_ICON_GAP
+            width += self.CUSTOM_LABEL_BREATHING_ROOM
         return QSize(width, base.height())
 
     def paintEvent(self, event) -> None:  # noqa: N802

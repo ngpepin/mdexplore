@@ -11,8 +11,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
 - `^`, `Refresh`, `PDF`, `Add View`, and `Edit` actions.
-- Top-right copy-by-color controls for clipboard file operations.
-- A pin button before copy-by-color controls to copy the currently previewed file.
+- Top-right copy controls with destination mode (`Clipboard` or `Directory`)
+  plus color/pin copy actions.
+- In `Directory` mode, copy actions must copy file content and merge
+  copied-file metadata into destination sidecars.
 
 ## Repository Map
 
@@ -149,6 +151,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   scroll position and top visible source line as the saved label-time beginning.
 - Right-clicking a custom-labeled tab should also offer `Return to beginning`,
   which restores that saved label-time location for the tab.
+- Custom-labeled tabs should also show a refresh icon beside the close button;
+  clicking it should reset the saved label-time beginning to the tab's current
+  scroll position/top line.
 - Relabeling a custom-labeled tab with different text should reset the saved
   beginning to the tab's current scroll position/top line at relabel time.
 - When assigning a new tab color and wrapping the palette, skip any color already
@@ -194,25 +199,45 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Search input uses label `Search and highlight:` and includes an explicit in-field `X`
   clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.
-- Non-quoted search terms should be case-insensitive; quoted terms should be
-  case-sensitive.
-- `CLOSE(...)` should be supported in search queries and require all listed
+- Non-quoted and double-quoted search terms should be case-insensitive.
+- Single-quoted search terms should be case-sensitive.
+- Only the opening quote delimiter should terminate a quoted search term; the
+  other quote character should remain literal inside the term.
+- `NEAR(...)` should be supported in search queries and require all listed
   terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
+- `NEAR(...)` should require distinct qualifying occurrences per listed term;
+  the same text start should not satisfy multiple required terms.
+- Single-word `NEAR(...)` terms should match on word boundaries for proximity
+  evaluation rather than as substrings inside larger words.
+- Search hit-count pills for `NEAR(...)` queries should count qualifying NEAR
+  windows, not the number of highlighted term spans inside the chosen window.
 - Function-style operators should accept both no-space and spaced forms before
   `(` (for example `OR(...)` and `OR (...)`).
-- `AND(...)`, `OR(...)`, and `CLOSE(...)` should accept comma-delimited,
+- `AND(...)`, `OR(...)`, and `NEAR(...)` should accept comma-delimited,
   space-delimited, or mixed argument lists.
 - `AND(...)` and `OR(...)` should be variadic (2+ arguments).
 - If search is active and directory scope changes, search should rerun against
   the new directory scope.
 - File highlight colors are assigned from tree context menu and persisted per directory.
+- File-highlight palette includes Yellow, Green, Blue, Orange, Purple, Light Gray,
+  Medium Gray, and Red.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
+- `Clear in Folder` in the context menu clears highlight metadata
+  non-recursively for the selected folder scope.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
 - Copy/Clear scope resolves in this order: selected directory, then most
   recently selected/expanded directory, then current root.
-- Clipboard copy must preserve Nemo/Nautilus compatibility (`text/uri-list` plus `x-special/gnome-copied-files`).
-- The pin copy action should copy exactly the currently previewed markdown file
+- Copy controls should be labeled `Copy to: () Clipboard () Directory`, with
+  `Clipboard` selected by default.
+- Clipboard-mode copy must preserve Nemo/Nautilus compatibility
+  (`text/uri-list` plus `x-special/gnome-copied-files`).
+- Clipboard-mode pin action should copy exactly the currently previewed markdown file
   using the same clipboard MIME compatibility guarantees.
+- Directory-mode copy should open a destination-folder chooser defaulted to
+  the last selected destination or current effective root.
+- Directory-mode copy should merge copied-file metadata into destination
+  `.mdexplore-colors.json`, `.mdexplore-views.json`, and
+  `.mdexplore-highlighting.json` sidecars (create when missing, update/append by filename when present).
 - Preview context menu should offer persistent `Highlight`,
   `Highlight Important`, and `Remove Highlight` actions for rendered text
   selections and existing highlighted blocks.
@@ -257,6 +282,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   color-matched left-side preview gutter markers positioned by their saved home
   line number. These markers must render above persistent-highlight markers
   when their positions overlap.
+- Clicking a named-view gutter marker should restore the same saved location as
+  selecting that named view's tab.
 
 ## Formal Behavior Rules Model
 
@@ -469,13 +496,15 @@ R.TREE.05 :: [color highlight exists] => O(paint filename background without bre
 
 ```text
 copy_scope := first(selected_directory, last_selected_or_expanded_directory, current_root)
+copy_destination_default := first(last_directory_copy_target, current_effective_root)
 search_scope := highlighted_scope_directory()
 ```
 
 ```text
-R.SCOPE.01 :: [copy or clear by color] => O(resolve scope by selected dir > last dir > root)
+R.SCOPE.01 :: [copy-by-color scan or highlight-clear action] => O(resolve scope by selected dir > last dir > root)
 R.SCOPE.02 :: [search active and directory scope changes] => O(re-run search in new scope)
 R.SCOPE.03 :: [tree root changes] => O(preserve session splitter width for the app run)
+R.SCOPE.04 :: [directory copy mode folder chooser opened] => O(default chooser path to last destination folder, else current effective root)
 ```
 
 #### 6.3 Scope resolution table
@@ -573,17 +602,24 @@ Watching --> NoFile : file removed or root invalidated
 #### 8.1 Search semantics
 
 ```text
-case(term) := insensitive if unquoted(term) else sensitive
+case(term) := sensitive if single_quoted(term) else insensitive
+quoted_term_closer(term) := opening_quote(term)
+near(term) occurrence := distinct_from(other_near_terms) and (word_bounded(term) if single_word(term) else raw_substring(term))
 ```
 
 ```text
 R.SEARCH.01 :: [search text empty] => O(clear active match styling immediately)
 R.SEARCH.02 :: [typing search text] => O(debounce before running search)
 R.SEARCH.03 :: [Enter pressed in search] => O(run search immediately)
-R.SEARCH.04 :: [query contains CLOSE(...)] => O(require all terms within SEARCH_CLOSE_WORD_GAP content words)
+R.SEARCH.04 :: [query contains NEAR(...)] => O(require all terms within SEARCH_CLOSE_WORD_GAP content words)
 R.SEARCH.05 :: [query contains AND(...) or OR(...)] => O(accept comma-delimited, space-delimited, or mixed arguments)
 R.SEARCH.06 :: [query active and file opened from matches] => O(highlight preview hits and scroll to first match)
 R.SEARCH.07 :: [tree row is a match] => O(show hit-count pill in gutter)
+R.SEARCH.08 :: [term begins with quote q] => O(treat only q as the closing delimiter)
+R.SEARCH.09 :: [single quote appears inside double-quoted term or double quote appears inside single-quoted term] => O(treat inner quote as literal content)
+R.SEARCH.10 :: [query contains NEAR(t1..tn)] => O(require distinct qualifying occurrences for t1..tn)
+R.SEARCH.11 :: [single-word term appears inside NEAR(...)] => O(evaluate proximity using word-bounded matches)
+R.SEARCH.12 :: [query contains NEAR(...)] => O(count file hit pills by qualifying NEAR windows, not by individual term spans)
 ```
 
 #### 8.2 Persistent highlights and markers
@@ -603,6 +639,7 @@ R.OVERLAY.01 :: [search active] => O(show right-side yellow hit markers in previ
 R.OVERLAY.02 :: [persistent highlights active] => O(show left-side highlight markers)
 R.OVERLAY.03 :: [named-view home markers active] => O(show above persistent-highlight markers at overlapping positions)
 R.OVERLAY.04 :: [marker clicked] => O(jump to nearest represented target)
+R.OVERLAY.05 :: [named-view marker clicked] => O(reuse the named-view/tab restore path so marker landing matches tab landing)
 ```
 
 ### 9. View, Tab, and Session Rules
@@ -620,6 +657,7 @@ R.VIEW.07 :: [custom-labeled tab context menu] => O(expose Return to beginning)
 R.VIEW.08 :: [single remaining tab is unlabeled default] => O(hide tab strip)
 R.VIEW.09 :: [single remaining tab is custom-labeled] => O(keep tab visible)
 R.VIEW.10 :: [closing sole remaining custom-labeled tab] => O(clear custom label and home, then fall back to hidden default state)
+R.VIEW.11 :: [custom-labeled tab refresh icon clicked] => O(reset saved beginning to current scroll and top line)
 ```
 
 #### 9.2 Persistence law
@@ -640,13 +678,16 @@ R.SESSION.04 :: [named home anchor exists] => O(persist anchor for Return to beg
 #### 10.1 Clipboard and editor actions
 
 ```text
-R.CLIP.01 :: [copy files by color] => O(write text/uri-list and x-special/gnome-copied-files MIME forms)
-R.CLIP.02 :: [pin action used] => O(copy exactly the currently previewed markdown file)
-R.CLIP.03 :: [preview text selection and Copy Rendered Text] => O(copy plain rendered text)
-R.CLIP.04 :: [preview text selection and Copy Source Markdown] => O(map selection to source lines if possible)
-R.CLIP.05 :: [direct source mapping fails] => P(fallback to text match, then fuzzy lines, then full file)
-R.CLIP.06 :: [Edit clicked] => O(invoke code on current file)
-R.CLIP.07 :: [code missing] => O(fail gracefully with user-visible error)
+R.CLIP.01 :: [copy mode = Clipboard and copy files by color] => O(write text/uri-list and x-special/gnome-copied-files MIME forms)
+R.CLIP.02 :: [copy mode = Clipboard and pin action used] => O(copy exactly the currently previewed markdown file)
+R.CLIP.03 :: [copy mode = Directory and copy action invoked] => O(open destination-folder chooser with default = last destination or current effective root)
+R.CLIP.04 :: [copy mode = Directory and destination accepted] => O(copy selected markdown file(s) into destination folder)
+R.CLIP.05 :: [copy mode = Directory and files copied] => O(merge copied-file metadata into destination .mdexplore-colors/.mdexplore-views/.mdexplore-highlighting sidecars)
+R.CLIP.06 :: [preview text selection and Copy Rendered Text] => O(copy plain rendered text)
+R.CLIP.07 :: [preview text selection and Copy Source Markdown] => O(map selection to source lines if possible)
+R.CLIP.08 :: [direct source mapping fails] => P(fallback to text match, then fuzzy lines, then full file)
+R.CLIP.09 :: [Edit clicked] => O(invoke code on current file)
+R.CLIP.10 :: [code missing] => O(fail gracefully with user-visible error)
 ```
 
 #### 10.2 PDF export law
@@ -1450,6 +1491,12 @@ If behavior changes, also run manual smoke tests:
 2. Launch with explicit path.
 3. Open `.md` file and verify render.
 4. Verify `Edit` behavior with and without `code` in `PATH`.
+
+If preview search, named views, or preview marker behavior changes, also run:
+
+```bash
+xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Documentation Requirements
 

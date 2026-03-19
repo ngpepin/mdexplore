@@ -217,6 +217,10 @@ class ColorizedMarkdownModel(QFileSystemModel):
         color_map = self._load_directory_colors(path.parent)
         return color_map.get(path.name)
 
+    def color_for_file(self, path: Path) -> str | None:
+        """Return the persisted highlight color for one markdown file path."""
+        return self._color_for_file(path)
+
     def set_search_match_paths(self, paths: set[Path]) -> None:
         self.set_search_match_counts({path: 1 for path in paths})
 

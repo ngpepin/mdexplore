@@ -56,10 +56,11 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygon,
 )
-from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -68,6 +69,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -1881,6 +1883,7 @@ class MarkdownRenderer:
           document.documentElement ? document.documentElement.scrollHeight : 0,
           document.body ? document.body.scrollHeight : 0
         );
+        const scrollableHeight = Math.max(1, scrollHeight - window.innerHeight);
         if (!marks.length || scrollHeight <= window.innerHeight) {{
           hitOverlay.classList.remove("mdexplore-visible");
           syncOverlayHorizontalPosition();
@@ -1896,9 +1899,9 @@ class MarkdownRenderer:
           }}
           const absoluteTop = window.scrollY + rect.top;
           const absoluteBottom = absoluteTop + rect.height;
-          const topPx = Math.max(0, Math.min(trackHeight - 4, (absoluteTop / scrollHeight) * trackHeight));
-          const bottomPx = Math.max(topPx + 3, Math.min(trackHeight, (absoluteBottom / scrollHeight) * trackHeight));
-          const centerPx = Math.max(topPx, Math.min(bottomPx, ((absoluteTop + absoluteBottom) * 0.5 / scrollHeight) * trackHeight));
+          const topPx = Math.max(0, Math.min(trackHeight - 4, (absoluteTop / scrollableHeight) * trackHeight));
+          const bottomPx = Math.max(topPx + 3, Math.min(trackHeight, (absoluteBottom / scrollableHeight) * trackHeight));
+          const centerPx = Math.max(topPx, Math.min(bottomPx, ((absoluteTop + absoluteBottom) * 0.5 / scrollableHeight) * trackHeight));
           markerPositions.push({{
             top: topPx,
             bottom: bottomPx,
@@ -2152,9 +2155,9 @@ class MarkdownRenderer:
       }};
 
       const refreshNamedViewMarkers = () => {{
-        // Named views are anchored to saved source-line "home" positions.
-        // This stays cheap: no DOM scan is needed to place markers because we
-        // map persisted line numbers directly into the overlay track.
+        // Named views mirror their saved tab positions. Marker clicks route
+        // back through the Qt side so they stay behaviorally identical to a
+        // real tab selection.
         if (!viewOverlay.isConnected) {{
           return;
         }}
@@ -2171,9 +2174,11 @@ class MarkdownRenderer:
         const trackHeight = window.innerHeight;
         const entries = rawEntries
           .map((entry, index) => {{
+            const viewId = Math.max(1, Number(entry && entry.view_id) || 0);
             const topLine = Math.max(1, Number(entry && entry.top_line) || 1);
             const color = String(entry && entry.color ? entry.color : "#8fb8ff").trim() || "#8fb8ff";
             return {{
+              viewId,
               topLine,
               color,
               sequence: index,
@@ -2198,18 +2203,8 @@ class MarkdownRenderer:
             if (typeof event.stopImmediatePropagation === "function") {{
               event.stopImmediatePropagation();
             }}
-            const target = findTargetForSourceLine(entry.topLine);
-            if (target) {{
-              jumpToTarget(target);
-              return;
-            }}
-            const scrollable = viewportScrollableHeight();
-            if (scrollable > 0) {{
-              const fallbackRatio = totalLines <= 1 ? 0 : (entry.topLine - 1) / (totalLines - 1);
-              window.scrollTo({{
-                top: Math.max(0, Math.min(scrollable, fallbackRatio * scrollable)),
-                behavior: "auto",
-              }});
+            if (entry.viewId > 0) {{
+              window.__mdexploreRequestedViewId = Math.floor(entry.viewId);
             }}
           }};
           marker.addEventListener("mousedown", activateMarker);
@@ -5314,6 +5309,28 @@ class MarkdownRenderer:
 """
 
 
+class PreviewPage(QWebEnginePage):
+    """Handle preview-side custom navigation actions emitted by injected JS."""
+
+    namedViewRequested = Signal(int)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # type: ignore[override]
+        if isinstance(url, QUrl) and url.scheme() == "mdexplore":
+            if url.host() == "view":
+                try:
+                    view_id = int(str(url.path() or "").lstrip("/"))
+                except Exception:
+                    return False
+                if view_id > 0:
+                    QTimer.singleShot(
+                        0,
+                        lambda requested_view_id=view_id: self.namedViewRequested.emit(
+                            requested_view_id
+                        ),
+                    )
+                return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
 
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
@@ -5356,7 +5373,7 @@ class MdExploreWindow(QMainWindow):
         self.last_directory_selection: Path | None = self.root
         self.cache: dict[str, tuple[int, int, str]] = {}
         self.current_match_files: list[Path] = []
-        self._pending_preview_search_terms: list[str] = []
+        self._pending_preview_search_terms: list[tuple[str, bool]] = []
         self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
         self._render_pool = QThreadPool(self)
         self._render_pool.setMaxThreadCount(1)
@@ -5404,6 +5421,7 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_signature: tuple[int, int] | None = None
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
+        self._view_line_probe_block_until = 0.0
         self._view_states: dict[int, dict[str, float | int]] = {}
         self._active_view_id: int | None = None
         self._next_view_id = 1
@@ -5451,7 +5469,10 @@ class MdExploreWindow(QMainWindow):
         self._preview_html_temp_files: deque[Path] = deque()
         self._view_line_probe_pending = False
         self._last_view_line_probe_at = 0.0
+        self._view_tab_restore_request_id = 0
+        self._preview_action_poll_inflight = False
         self._match_input_text = ""
+        self._copy_destination_directory: Path | None = None
         # Search is debounced so filesystem/content scans do not run on every
         # keystroke while the user is still typing an expression.
         self.match_timer = QTimer(self)
@@ -5470,6 +5491,10 @@ class MdExploreWindow(QMainWindow):
         self._diagram_state_capture_timer.timeout.connect(
             self._on_diagram_state_capture_tick
         )
+        self._preview_action_poll_timer = QTimer(self)
+        self._preview_action_poll_timer.setInterval(120)
+        self._preview_action_poll_timer.timeout.connect(self._poll_preview_actions)
+        self._preview_action_poll_timer.start()
         self._diagram_state_capture_timer.start()
         self._default_status_text = "Ready"
         self._gpu_context_available = bool(gpu_context_available)
@@ -5512,7 +5537,7 @@ class MdExploreWindow(QMainWindow):
         self.setWindowTitle("mdexplore")
         self.setWindowIcon(app_icon)
         # Give the top control bar a bit more horizontal/vertical room by default.
-        self.resize(1540, 980)
+        self.resize(1848, 980)
 
         # Use a custom QFileSystemModel so highlight colors render directly
         # in the tree and persist beside files in each directory.
@@ -5543,6 +5568,8 @@ class MdExploreWindow(QMainWindow):
         self.tree.expanded.connect(self._on_tree_directory_expanded)
 
         self.preview = QWebEngineView()
+        self._preview_page = PreviewPage(self.preview)
+        self.preview.setPage(self._preview_page)
         # Preview pages are loaded as local HTML. Allow remote JS/CSS so CDN
         # assets (MathJax/Mermaid) can load and render as expected.
         preview_settings = self.preview.settings()
@@ -5560,6 +5587,10 @@ class MdExploreWindow(QMainWindow):
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview.loadFinished.connect(self._on_preview_load_finished)
+        self.preview.urlChanged.connect(self._on_preview_url_changed)
+        self._preview_page.namedViewRequested.connect(
+            self._on_preview_named_view_requested
+        )
 
         self.view_tabs = ViewTabBar()
         self.view_tabs.setDocumentMode(True)
@@ -5576,6 +5607,9 @@ class MdExploreWindow(QMainWindow):
             self._show_view_tab_context_menu
         )
         self.view_tabs.homeRequested.connect(self._on_view_tab_home_requested)
+        self.view_tabs.beginningResetRequested.connect(
+            self._on_view_tab_beginning_reset_requested
+        )
         self.view_tabs.setVisible(False)
         self._reset_document_views()
 
@@ -5602,16 +5636,40 @@ class MdExploreWindow(QMainWindow):
         self.path_label = QLabel("")
         self.path_label.setTextInteractionFlags(self.path_label.textInteractionFlags())
 
-        copy_label = QLabel("Copy to clipboard:")
+        copy_label = QLabel("Copy to:")
         copy_buttons_widget = QWidget()
         copy_buttons_layout = QHBoxLayout(copy_buttons_widget)
         copy_buttons_layout.setContentsMargins(0, 0, 0, 0)
         copy_buttons_layout.setSpacing(4)
         copy_buttons_layout.addWidget(copy_label)
+        self.copy_clipboard_radio = QRadioButton("Clipboard")
+        self.copy_directory_radio = QRadioButton("Directory")
+        self.copy_clipboard_radio.setChecked(True)
+        copy_mode_radio_style = """
+            QRadioButton::indicator {
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+            }
+            QRadioButton::indicator:unchecked {
+                background-color: #0f1218;
+                border: 1px solid #6b7280;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #60a5fa;
+                border: 1px solid #93c5fd;
+            }
+        """
+        self.copy_clipboard_radio.setStyleSheet(copy_mode_radio_style)
+        self.copy_directory_radio.setStyleSheet(copy_mode_radio_style)
+        copy_buttons_layout.addWidget(self.copy_clipboard_radio)
+        copy_buttons_layout.addWidget(self.copy_directory_radio)
 
         copy_current_btn = QPushButton("")
         copy_current_btn.setFixedSize(18, 18)
-        copy_current_btn.setToolTip("Copy currently previewed markdown file")
+        copy_current_btn.setToolTip(
+            "Copy currently previewed markdown file to selected destination"
+        )
         copy_current_btn.setStyleSheet(
             "border: 1px solid #4b5563; border-radius: 3px; padding: 0px;"
         )
@@ -5628,7 +5686,9 @@ class MdExploreWindow(QMainWindow):
         for color_name, color_value in self.HIGHLIGHT_COLORS:
             color_btn = QPushButton("")
             color_btn.setFixedSize(18, 18)
-            color_btn.setToolTip(f"Copy files highlighted with {color_name.lower()}")
+            color_btn.setToolTip(
+                f"Copy files highlighted with {color_name.lower()} to selected destination"
+            )
             color_btn.setStyleSheet(
                 f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
             )
@@ -5645,7 +5705,7 @@ class MdExploreWindow(QMainWindow):
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
         self.match_input.setPlaceholderText(
-            'words, "quoted phrases", AND/OR/NOT, CLOSE(...)'
+            'words, "phrases", \'case-sensitive\', AND/OR/NOT, NEAR(...)'
         )
         self.match_input.setMinimumWidth(220)
         self.match_clear_action = self.match_input.addAction(
@@ -6098,11 +6158,11 @@ class MdExploreWindow(QMainWindow):
             scroll_y = 0.0
         return scroll_y, top_line
 
-    def _current_named_view_marker_entries(self) -> list[dict[str, int | str]]:
-        """Return saved named-view home markers for the active document."""
+    def _current_named_view_marker_entries(self) -> list[dict[str, int | str | float]]:
+        """Return named-view gutter markers for the active document."""
         palette = ViewTabBar.PASTEL_SEQUENCE
         palette_size = max(1, len(palette))
-        markers: list[dict[str, int | str]] = []
+        markers: list[dict[str, int | str | float]] = []
         seen_view_ids: set[int] = set()
         for tab_index in range(self.view_tabs.count()):
             anchor = self._tab_label_anchor(tab_index)
@@ -6112,7 +6172,18 @@ class MdExploreWindow(QMainWindow):
             if view_id is None or view_id in seen_view_ids:
                 continue
             seen_view_ids.add(view_id)
-            _scroll_y, top_line = anchor
+            anchor_scroll_y, anchor_top_line = anchor
+            state = self._view_states.get(view_id) or {}
+            try:
+                scroll_y = float(state.get("scroll_y", anchor_scroll_y))
+            except Exception:
+                scroll_y = anchor_scroll_y
+            try:
+                top_line = max(1, int(state.get("top_line", anchor_top_line)))
+            except Exception:
+                top_line = anchor_top_line
+            if not math.isfinite(scroll_y):
+                scroll_y = anchor_scroll_y if math.isfinite(anchor_scroll_y) else 0.0
             data = self.view_tabs.tabData(tab_index)
             color_slot = tab_index % palette_size
             if isinstance(data, dict):
@@ -6126,6 +6197,7 @@ class MdExploreWindow(QMainWindow):
                 {
                     "view_id": int(view_id),
                     "top_line": max(1, int(top_line)),
+                    "scroll_y": max(0.0, float(scroll_y)),
                     "color": str(palette[color_slot]),
                 }
             )
@@ -6238,6 +6310,53 @@ class MdExploreWindow(QMainWindow):
         if self._active_view_id is None:
             return None
         return self._view_states.get(self._active_view_id)
+
+    def _tab_index_for_view_id(self, view_id: int) -> int | None:
+        """Resolve one view id back to its current tab index."""
+        for index in range(self.view_tabs.count()):
+            if self._tab_view_id(index) == view_id:
+                return index
+        return None
+
+    def _begin_preview_restore_block(self, duration_seconds: float) -> None:
+        """Pause capture/probe writes while a scripted restore is settling."""
+        try:
+            duration = max(0.0, float(duration_seconds))
+        except Exception:
+            duration = 0.0
+        block_until = time.monotonic() + duration
+        self._preview_capture_enabled = False
+        self._scroll_restore_block_until = block_until
+        self._view_line_probe_block_until = max(
+            self._view_line_probe_block_until, block_until
+        )
+
+    def _schedule_view_restore(
+        self, expected_key: str, expected_view_id: int, *, needs_settle_restore: bool
+    ) -> None:
+        """Queue the guarded restore sequence shared by tabs and gutter markers."""
+        self._view_tab_restore_request_id += 1
+        restore_request_id = self._view_tab_restore_request_id
+        self._begin_preview_restore_block(1.0 if needs_settle_restore else 0.55)
+        QTimer.singleShot(
+            0,
+            lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id: self._restore_current_preview_scroll_if_active(
+                key, view_id, request_id, stabilize=False
+            ),
+        )
+        if needs_settle_restore:
+            QTimer.singleShot(
+                360,
+                lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id: self._restore_current_preview_scroll_if_active(
+                    key, view_id, request_id, stabilize=True
+                ),
+            )
+        QTimer.singleShot(
+            980 if needs_settle_restore else 520,
+            lambda key=expected_key, view_id=expected_view_id, request_id=restore_request_id: self._enable_preview_scroll_capture_if_active(
+                key, view_id, request_id
+            ),
+        )
 
     def _save_document_view_session(
         self,
@@ -7601,26 +7720,136 @@ class MdExploreWindow(QMainWindow):
             self._update_add_view_button_state()
             return
 
-        self._preview_capture_enabled = False
-        self._scroll_restore_block_until = time.monotonic() + 0.9
         expected_key = self._current_preview_path_key()
         if expected_key is None:
             return
 
-        QTimer.singleShot(
-            0, lambda key=expected_key: self._restore_current_preview_scroll(key)
+        has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+            expected_key
         )
-        QTimer.singleShot(
-            180, lambda key=expected_key: self._restore_current_preview_scroll(key)
+        self._schedule_view_restore(
+            expected_key,
+            new_view_id,
+            needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
         )
-        QTimer.singleShot(
-            520, lambda key=expected_key: self._restore_current_preview_scroll(key)
-        )
-        QTimer.singleShot(
-            900, lambda key=expected_key: self._enable_preview_scroll_capture_for(key)
-        )
-        self._request_active_view_top_line_update(force=True)
         self._update_add_view_button_state()
+
+    def _restore_current_preview_scroll_if_active(
+        self,
+        expected_key: str,
+        expected_view_id: int,
+        restore_request_id: int,
+        *,
+        stabilize: bool,
+    ) -> None:
+        """Restore preview scroll only if tab switch request is still current."""
+        if restore_request_id != self._view_tab_restore_request_id:
+            return
+        if self._current_preview_path_key() != expected_key:
+            return
+        if self._active_view_id != expected_view_id:
+            return
+        self._restore_current_preview_scroll(expected_key, stabilize=stabilize)
+
+    def _enable_preview_scroll_capture_if_active(
+        self, expected_key: str, expected_view_id: int, restore_request_id: int
+    ) -> None:
+        """Re-enable scroll capture only for the active tab switch request."""
+        if restore_request_id != self._view_tab_restore_request_id:
+            return
+        if self._current_preview_path_key() != expected_key:
+            return
+        if self._active_view_id != expected_view_id:
+            return
+        self._enable_preview_scroll_capture_for(expected_key)
+
+    def _on_preview_named_view_requested(self, view_id: int) -> None:
+        """Activate a left-gutter view marker via the same restore path as tabs."""
+        tab_index = self._tab_index_for_view_id(view_id)
+        if tab_index is None:
+            return
+        if self.view_tabs.currentIndex() != tab_index:
+            self.view_tabs.setCurrentIndex(tab_index)
+            return
+
+        expected_key = self._current_preview_path_key()
+        if expected_key is None:
+            return
+
+        state = self._view_states.get(view_id)
+        if isinstance(state, dict):
+            scroll_key = self._current_preview_scroll_key()
+            if scroll_key is not None:
+                try:
+                    scroll_y = float(state.get("scroll_y", 0.0))
+                except Exception:
+                    scroll_y = 0.0
+                if math.isfinite(scroll_y):
+                    self._preview_scroll_positions[scroll_key] = max(0.0, scroll_y)
+
+        has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+            expected_key
+        )
+        self._schedule_view_restore(
+            expected_key,
+            view_id,
+            needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
+        )
+
+    def _on_preview_url_changed(self, url: QUrl) -> None:
+        """Handle hash-based preview actions emitted from injected marker JS."""
+        fragment = str(url.fragment() or "").strip()
+        match = re.match(r"^mdexplore-view-(\d+)(?:-\d+)?$", fragment)
+        if not match:
+            return
+        try:
+            view_id = int(match.group(1))
+        except Exception:
+            return
+        self.preview.page().runJavaScript(
+            """
+(() => {
+  try {
+    const cleanUrl = window.location.pathname + window.location.search;
+    window.history.replaceState(null, "", cleanUrl);
+  } catch (_err) {
+    window.location.hash = "";
+  }
+})();
+"""
+        )
+        self._on_preview_named_view_requested(view_id)
+
+    def _poll_preview_actions(self) -> None:
+        """Poll one-shot preview actions requested by injected marker scripts."""
+        if self.current_file is None or self._preview_load_in_progress:
+            return
+        if self._preview_action_poll_inflight:
+            return
+        self._preview_action_poll_inflight = True
+        self.preview.page().runJavaScript(
+            """
+(() => {
+  const raw = Number(window.__mdexploreRequestedViewId || 0);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 0;
+  }
+  window.__mdexploreRequestedViewId = 0;
+  return Math.floor(raw);
+})();
+""",
+            self._on_preview_action_poll_result,
+        )
+
+    def _on_preview_action_poll_result(self, result) -> None:
+        """Handle one preview action request returned by the JS poll loop."""
+        self._preview_action_poll_inflight = False
+        try:
+            view_id = int(result)
+        except Exception:
+            view_id = 0
+        if view_id > 0:
+            self._on_preview_named_view_requested(view_id)
 
     def _show_view_tab_context_menu(self, pos) -> None:
         """Offer custom-label editing for document view tabs."""
@@ -7649,6 +7878,76 @@ class MdExploreWindow(QMainWindow):
         if self.view_tabs.currentIndex() != tab_index:
             self.view_tabs.setCurrentIndex(tab_index)
         self._return_view_tab_to_beginning(tab_index)
+
+    def _on_view_tab_beginning_reset_requested(self, tab_index: int) -> None:
+        """Reset a labeled tab's saved beginning to its current scroll position."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return
+        if self._tab_label_anchor(tab_index) is None:
+            return
+        if self.current_file is None:
+            return
+
+        if self.view_tabs.currentIndex() != tab_index:
+            self.view_tabs.setCurrentIndex(tab_index)
+            expected_key = self._current_preview_path_key()
+            if expected_key is None:
+                return
+            # Tab switching restores scroll in staged timers; wait until that
+            # settles before taking the "new beginning" snapshot.
+            QTimer.singleShot(
+                980,
+                lambda idx=tab_index, key=expected_key: self._reset_view_tab_beginning_to_current(
+                    idx, expected_key=key
+                ),
+            )
+            return
+
+        self._reset_view_tab_beginning_to_current(tab_index)
+
+    def _reset_view_tab_beginning_to_current(
+        self, tab_index: int, *, expected_key: str | None = None
+    ) -> None:
+        """Save the selected tab's current state as its new named beginning."""
+        if tab_index < 0 or tab_index >= self.view_tabs.count():
+            return
+        if self._tab_label_anchor(tab_index) is None:
+            return
+        path_key = self._current_preview_path_key()
+        if path_key is None:
+            return
+        if expected_key is not None and path_key != expected_key:
+            return
+
+        view_id = self._tab_view_id(tab_index)
+        if view_id is None:
+            return
+
+        if self._active_view_id == view_id:
+            self._capture_current_preview_scroll(force=True)
+
+        state = self._view_states.get(view_id) or {"scroll_y": 0.0, "top_line": 1}
+        try:
+            current_scroll_y = float(state.get("scroll_y", 0.0))
+        except Exception:
+            current_scroll_y = 0.0
+        if not math.isfinite(current_scroll_y):
+            current_scroll_y = 0.0
+        try:
+            current_top_line = max(1, int(state.get("top_line", 1)))
+        except Exception:
+            current_top_line = 1
+
+        data = self.view_tabs.tabData(tab_index)
+        updated_data = dict(data) if isinstance(data, dict) else {"view_id": view_id}
+        updated_data["custom_label_anchor_scroll_y"] = current_scroll_y
+        updated_data["custom_label_anchor_top_line"] = current_top_line
+        self.view_tabs.setTabData(tab_index, updated_data)
+        self._persist_document_view_session(path_key, capture_current=False)
+        self._refresh_named_view_markers_in_preview()
+        self.statusBar().showMessage(
+            f"Reset tab beginning to line {current_top_line}", 2800
+        )
 
     def _edit_view_tab_label(self, tab_index: int) -> None:
         """Prompt for a custom tab label; blank restores the dynamic line number."""
@@ -7739,20 +8038,13 @@ class MdExploreWindow(QMainWindow):
             self.view_tabs.setCurrentIndex(tab_index)
         expected_key = self._current_preview_path_key()
         if expected_key is not None:
-            self._preview_capture_enabled = False
-            self._scroll_restore_block_until = time.monotonic() + 0.8
-            QTimer.singleShot(
-                0, lambda key=expected_key: self._restore_current_preview_scroll(key)
+            has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
+                expected_key
             )
-            QTimer.singleShot(
-                180, lambda key=expected_key: self._restore_current_preview_scroll(key)
-            )
-            QTimer.singleShot(
-                520, lambda key=expected_key: self._restore_current_preview_scroll(key)
-            )
-            QTimer.singleShot(
-                850,
-                lambda key=expected_key: self._enable_preview_scroll_capture_for(key),
+            self._schedule_view_restore(
+                expected_key,
+                view_id,
+                needs_settle_restore=bool(has_math or has_mermaid or has_plantuml),
             )
         self.statusBar().showMessage(
             f"Returned tab to labeled beginning at line {anchor_top_line}", 3000
@@ -7763,6 +8055,8 @@ class MdExploreWindow(QMainWindow):
         if self.current_file is None or self._active_view_id is None:
             return
         now = time.monotonic()
+        if now < self._view_line_probe_block_until:
+            return
         if not force:
             if self._view_line_probe_pending:
                 return
@@ -7778,23 +8072,55 @@ class MdExploreWindow(QMainWindow):
         self._last_view_line_probe_at = now
         js = """
 (() => {
-  const probeX = Math.max(14, Math.floor(window.innerWidth * 0.42));
-  const probeYs = [10, 20, 34, 50, 72, 96];
-  for (const y of probeYs) {
-    const el = document.elementFromPoint(probeX, y);
-    if (!el) continue;
-    const tagged = el.closest('[data-md-line-start]');
-    if (!tagged) continue;
-    const value = parseInt(tagged.getAttribute('data-md-line-start') || "", 10);
-    if (!Number.isNaN(value)) return value + 1;
-  }
-  const taggedNodes = document.querySelectorAll('[data-md-line-start]');
+  const topBandY = 12;
+  const viewportHeight = Math.max(1, Number(window.innerHeight) || 0);
+  const taggedNodes = Array.from(document.querySelectorAll('[data-md-line-start]'));
+  let crossingLine = null;
+  let crossingTop = -Infinity;
+  let aboveLine = null;
+  let aboveBottom = -Infinity;
+  let belowLine = null;
+  let belowTop = Infinity;
   for (const node of taggedNodes) {
+    const rawValue = parseInt(node.getAttribute('data-md-line-start') || "", 10);
+    if (Number.isNaN(rawValue)) continue;
+    const lineValue = rawValue + 1;
     const rect = node.getBoundingClientRect();
-    if (rect.bottom < 0) continue;
-    const value = parseInt(node.getAttribute('data-md-line-start') || "", 10);
-    if (!Number.isNaN(value)) return value + 1;
+    if (!rect) continue;
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) continue;
+    if (rect.height <= 0) continue;
+    if (rect.bottom <= 0 || rect.top >= viewportHeight) continue;
+    if (rect.top <= topBandY && rect.bottom > topBandY) {
+      if (
+        rect.top > crossingTop
+        || (rect.top === crossingTop && (crossingLine === null || lineValue < crossingLine))
+      ) {
+        crossingTop = rect.top;
+        crossingLine = lineValue;
+      }
+      continue;
+    }
+    if (rect.bottom <= topBandY) {
+      if (
+        rect.bottom > aboveBottom
+        || (rect.bottom === aboveBottom && (aboveLine === null || lineValue > aboveLine))
+      ) {
+        aboveBottom = rect.bottom;
+        aboveLine = lineValue;
+      }
+      continue;
+    }
+    if (
+      rect.top < belowTop
+      || (rect.top === belowTop && (belowLine === null || lineValue < belowLine))
+    ) {
+      belowTop = rect.top;
+      belowLine = lineValue;
+    }
   }
+  if (crossingLine !== null) return crossingLine;
+  if (aboveLine !== null) return aboveLine;
+  if (belowLine !== null) return belowLine;
   return 1;
 })();
 """
@@ -7812,6 +8138,8 @@ class MdExploreWindow(QMainWindow):
     ) -> None:
         """Apply top-line probe result to active view tab when still current."""
         self._view_line_probe_pending = False
+        if time.monotonic() < self._view_line_probe_block_until:
+            return
         if self._current_preview_path_key() != expected_key:
             return
         if self._active_view_id != expected_view_id:
@@ -8328,8 +8656,7 @@ class MdExploreWindow(QMainWindow):
         if has_saved_scroll:
             # Re-apply a few times because late MathJax/Mermaid/layout work can
             # shift content after the initial load.
-            self._preview_capture_enabled = False
-            self._scroll_restore_block_until = time.monotonic() + 1.2
+            self._begin_preview_restore_block(1.2)
             QTimer.singleShot(
                 90, lambda key=current_key: self._restore_current_preview_scroll(key)
             )
@@ -8346,6 +8673,7 @@ class MdExploreWindow(QMainWindow):
         else:
             self._preview_capture_enabled = True
             self._scroll_restore_block_until = 0.0
+            self._view_line_probe_block_until = 0.0
         self._request_active_view_top_line_update(force=True)
         self._show_preview_progress_status()
         self._check_restore_overlay_progress()
@@ -8916,30 +9244,39 @@ class MdExploreWindow(QMainWindow):
             )
             self._sync_tree_multi_view_markers_to_model()
 
-    def _current_search_terms(self) -> list[str]:
-        """Extract searchable terms from the current query (operators excluded)."""
+    def _current_search_terms(self) -> list[tuple[str, bool]]:
+        """Extract searchable terms with case mode from the current query."""
         query = self.match_input.text().strip()
         if not query:
             return []
-        terms: list[str] = []
+        terms: list[tuple[str, bool]] = []
         seen: set[str] = set()
-        for token_type, token_value, is_quoted in self._tokenize_match_query(query):
+        for token_type, token_value, is_case_sensitive in self._tokenize_match_query(
+            query
+        ):
             if token_type != "TERM":
                 continue
-            term = token_value.strip()
-            if not term:
+            if not token_value.strip():
                 continue
-            key = f"Q:{term}" if is_quoted else f"I:{term.casefold()}"
+            term = token_value
+            key = f"S:{term}" if is_case_sensitive else f"I:{term.casefold()}"
             if key in seen:
                 continue
             seen.add(key)
-            terms.append(term)
-        terms.sort(key=len, reverse=True)
+            terms.append((term, bool(is_case_sensitive)))
+        terms.sort(key=lambda item: len(item[0]), reverse=True)
         return terms
 
     def _current_close_term_groups(self) -> list[list[tuple[str, bool]]]:
-        """Extract CLOSE(...) argument groups from the current query."""
+        """Extract NEAR(...) argument groups from the current query."""
         query = self.match_input.text().strip()
+        if not query:
+            return []
+
+        return self._extract_close_term_groups(query)
+
+    def _extract_close_term_groups(self, query: str) -> list[list[tuple[str, bool]]]:
+        """Extract NEAR(...) argument groups from an arbitrary search query."""
         if not query:
             return []
 
@@ -8949,12 +9286,12 @@ class MdExploreWindow(QMainWindow):
         token_count = len(tokens)
 
         while i < token_count:
-            token_type, _token_value, _token_quoted = tokens[i]
+            token_type, _token_value, _token_case_sensitive = tokens[i]
             if token_type != "CLOSE":
                 i += 1
                 continue
 
-            # Require function-style CLOSE (...) call shape.
+            # Require function-style NEAR (...) call shape.
             if i + 1 >= token_count or tokens[i + 1][0] != "LPAREN":
                 i += 1
                 continue
@@ -8964,7 +9301,7 @@ class MdExploreWindow(QMainWindow):
             is_valid = False
 
             while j < token_count:
-                part_type, part_value, part_quoted = tokens[j]
+                part_type, part_value, part_case_sensitive = tokens[j]
                 if part_type == "RPAREN":
                     is_valid = True
                     break
@@ -8972,12 +9309,11 @@ class MdExploreWindow(QMainWindow):
                     j += 1
                     continue
                 if part_type == "TERM":
-                    cleaned = part_value.strip()
-                    if cleaned:
-                        group.append((cleaned, part_quoted))
+                    if part_value.strip():
+                        group.append((part_value, part_case_sensitive))
                     j += 1
                     continue
-                # Any nested expression token invalidates this CLOSE group.
+                # Any nested expression token invalidates this NEAR group.
                 is_valid = False
                 break
 
@@ -8986,6 +9322,243 @@ class MdExploreWindow(QMainWindow):
             i = j + 1 if j > i else i + 1
 
         return groups
+
+    def _should_use_close_word_boundaries(self, term_text: str) -> bool:
+        """Return whether NEAR() proximity should treat the term as a whole word."""
+        return bool(term_text) and (not any(ch.isspace() for ch in term_text)) and bool(
+            re.fullmatch(r"\w+", term_text, flags=re.UNICODE)
+        )
+
+    def _compile_close_term_pattern(
+        self, term_text: str, is_case_sensitive: bool
+    ) -> re.Pattern[str]:
+        """Compile one NEAR() term matcher, adding word boundaries when needed."""
+        escaped = re.escape(term_text)
+        if self._should_use_close_word_boundaries(term_text):
+            escaped = rf"(?<!\w){escaped}(?!\w)"
+        flags = 0 if is_case_sensitive else re.IGNORECASE
+        return re.compile(escaped, flags)
+
+    def _collect_close_focus_windows(
+        self, content: str, groups: list[list[tuple[str, bool]]]
+    ) -> list[dict[str, object]]:
+        """Return qualifying non-overlapping NEAR() windows in document order."""
+        if not content or not groups:
+            return []
+
+        word_matches = list(re.finditer(r"\S+", content))
+        if not word_matches:
+            return []
+        word_starts = [match.start() for match in word_matches]
+
+        def earliest_window_for_group(
+            group: list[tuple[str, bool]],
+            min_start_char: int = 0,
+        ) -> dict[str, object] | None:
+            occurrences_by_term: list[list[tuple[int, int, int, int]]] = [
+                [] for _ in range(len(group))
+            ]
+
+            for term_index, (term_text, is_case_sensitive) in enumerate(group):
+                if not term_text:
+                    return None
+                pattern = self._compile_close_term_pattern(
+                    term_text, bool(is_case_sensitive)
+                )
+                for match in pattern.finditer(content):
+                    start_char, end_char = match.span()
+                    if start_char < min_start_char:
+                        continue
+                    start_word = bisect_right(word_starts, start_char) - 1
+                    if start_word < 0:
+                        continue
+                    end_probe = end_char - 1 if end_char > start_char else start_char
+                    end_word = bisect_right(word_starts, end_probe) - 1
+                    if end_word < start_word:
+                        end_word = start_word
+                    occurrences_by_term[term_index].append(
+                        (start_word, end_word, start_char, end_char)
+                    )
+
+            if any(not occurrences for occurrences in occurrences_by_term):
+                return None
+
+            for occurrences in occurrences_by_term:
+                occurrences.sort(key=lambda item: (item[2], item[0], item[1], item[3]))
+
+            ordered_terms = sorted(
+                range(len(group)), key=lambda idx: len(occurrences_by_term[idx])
+            )
+            best_assignment: dict[str, int] | None = None
+
+            def search(
+                order_index: int,
+                used_starts: set[int],
+                min_start_word: int | None,
+                max_end_word: int | None,
+                min_start_char_value: int | None,
+                max_end_char: int | None,
+            ) -> None:
+                nonlocal best_assignment
+                if order_index >= len(ordered_terms):
+                    if (
+                        min_start_word is None
+                        or max_end_word is None
+                        or min_start_char_value is None
+                        or max_end_char is None
+                    ):
+                        return
+                    candidate = {
+                        "span": max_end_word - min_start_word,
+                        "start_word": min_start_word,
+                        "end_word": max_end_word,
+                        "start_char": min_start_char_value,
+                        "end_char": max_end_char,
+                    }
+                    if best_assignment is None:
+                        best_assignment = candidate
+                        return
+                    if candidate["start_char"] < best_assignment["start_char"] or (
+                        candidate["start_char"] == best_assignment["start_char"]
+                        and (
+                            candidate["span"] < best_assignment["span"]
+                            or (
+                                candidate["span"] == best_assignment["span"]
+                                and candidate["end_char"] < best_assignment["end_char"]
+                            )
+                        )
+                    ):
+                        best_assignment = candidate
+                    return
+
+                term_index = ordered_terms[order_index]
+                for start_word, end_word, start_char, end_char in occurrences_by_term[
+                    term_index
+                ]:
+                    if start_char in used_starts:
+                        continue
+                    next_min_start_word = (
+                        start_word
+                        if min_start_word is None
+                        else min(min_start_word, start_word)
+                    )
+                    next_max_end_word = (
+                        end_word if max_end_word is None else max(max_end_word, end_word)
+                    )
+                    if next_max_end_word - next_min_start_word > SEARCH_CLOSE_WORD_GAP:
+                        continue
+                    next_min_start_char = (
+                        start_char
+                        if min_start_char_value is None
+                        else min(min_start_char_value, start_char)
+                    )
+                    next_max_end_char = (
+                        end_char if max_end_char is None else max(max_end_char, end_char)
+                    )
+                    if best_assignment is not None:
+                        if next_min_start_char > best_assignment["start_char"]:
+                            continue
+                        candidate_span = next_max_end_word - next_min_start_word
+                        if (
+                            next_min_start_char == best_assignment["start_char"]
+                            and candidate_span > best_assignment["span"]
+                        ):
+                            continue
+                    used_starts.add(start_char)
+                    search(
+                        order_index + 1,
+                        used_starts,
+                        next_min_start_word,
+                        next_max_end_word,
+                        next_min_start_char,
+                        next_max_end_char,
+                    )
+                    used_starts.remove(start_char)
+
+            search(0, set(), None, None, None, None)
+            if best_assignment is None:
+                return None
+
+            return {
+                "span": best_assignment["span"],
+                "start_char": best_assignment["start_char"],
+                "end_char": best_assignment["end_char"],
+                "terms": group,
+            }
+
+        windows: list[dict[str, object]] = []
+        for group in groups:
+            next_min_start_char = 0
+            while True:
+                candidate = earliest_window_for_group(group, next_min_start_char)
+                if candidate is None:
+                    break
+                windows.append(candidate)
+                next_min_start_char = max(
+                    next_min_start_char + 1, int(candidate["end_char"])
+                )
+
+        windows.sort(
+            key=lambda item: (
+                int(item.get("start_char", 10**9)),
+                int(item.get("span", 10**9)),
+                int(item.get("end_char", 10**9)),
+            )
+        )
+        return windows
+
+    def _best_close_focus_window(
+        self, content: str, groups: list[list[tuple[str, bool]]]
+    ) -> dict[str, object] | None:
+        """Return the first qualifying NEAR() window used for preview focus."""
+        windows = self._collect_close_focus_windows(content, groups)
+        return windows[0] if windows else None
+
+    def _count_highlighted_term_ranges(
+        self,
+        content: str,
+        terms: list[tuple[str, bool]],
+        *,
+        close_focus_range: tuple[int, int] | None = None,
+        enforce_close_boundaries: bool = False,
+    ) -> int:
+        """Count non-overlapping term highlight ranges in raw file content."""
+        if not content or not terms:
+            return 0
+
+        ranges: list[tuple[int, int]] = []
+        for term_text, is_case_sensitive in terms:
+            if not term_text.strip():
+                continue
+            if enforce_close_boundaries and self._should_use_close_word_boundaries(
+                term_text
+            ):
+                pattern = self._compile_close_term_pattern(
+                    term_text, bool(is_case_sensitive)
+                )
+            else:
+                flags = 0 if is_case_sensitive else re.IGNORECASE
+                pattern = re.compile(re.escape(term_text), flags)
+            for match in pattern.finditer(content):
+                start, end = match.span()
+                if close_focus_range is not None:
+                    focus_start, focus_end = close_focus_range
+                    if start < focus_start or end > focus_end:
+                        continue
+                ranges.append((start, end))
+
+        if not ranges:
+            return 0
+
+        ranges.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        deduped: list[tuple[int, int]] = []
+        last_end = -1
+        for start, end in ranges:
+            if start < last_end:
+                continue
+            deduped.append((start, end))
+            last_end = end
+        return len(deduped)
 
     def _remove_preview_search_highlights(self) -> None:
         """Remove in-preview search highlight spans from the current page."""
@@ -9009,12 +9582,16 @@ class MdExploreWindow(QMainWindow):
 
     def _highlight_preview_search_terms(
         self,
-        terms: list[str],
+        terms: list[tuple[str, bool]],
         scroll_to_first: bool,
         close_term_groups: list[list[tuple[str, bool]]] | None = None,
     ) -> None:
         """Highlight term matches in preview and optionally scroll to first one."""
-        cleaned_terms = [term.strip() for term in terms if term.strip()]
+        cleaned_terms = [
+            {"text": term_text, "caseSensitive": bool(is_case_sensitive)}
+            for term_text, is_case_sensitive in terms
+            if term_text.strip()
+        ]
         if not cleaned_terms:
             self._remove_preview_search_highlights()
             return
@@ -9025,10 +9602,14 @@ class MdExploreWindow(QMainWindow):
         close_groups_payload: list[list[dict[str, object]]] = []
         for group in close_term_groups or []:
             payload_group: list[dict[str, object]] = []
-            for term_text, is_quoted in group:
-                cleaned = term_text.strip()
-                if cleaned:
-                    payload_group.append({"text": cleaned, "quoted": bool(is_quoted)})
+            for term_text, is_case_sensitive in group:
+                if term_text.strip():
+                    payload_group.append(
+                        {
+                            "text": term_text,
+                            "caseSensitive": bool(is_case_sensitive),
+                        }
+                    )
             if len(payload_group) >= 2:
                 close_groups_payload.append(payload_group)
         close_groups_json = json.dumps(close_groups_payload)
@@ -9109,6 +9690,21 @@ class MdExploreWindow(QMainWindow):
     return lo;
   }
 
+  function normalizeTerms(items) {
+    if (!Array.isArray(items)) return [];
+    const normalized = [];
+    for (const item of items) {
+      if (!item || typeof item.text !== "string") continue;
+      const text = item.text;
+      if (!text.trim()) continue;
+      normalized.push({
+        text,
+        caseSensitive: !!item.caseSensitive,
+      });
+    }
+    return normalized;
+  }
+
   function normalizeCloseGroups(groups) {
     if (!Array.isArray(groups)) return [];
     const normalized = [];
@@ -9117,18 +9713,79 @@ class MdExploreWindow(QMainWindow):
       const next = [];
       for (const item of group) {
         if (!item || typeof item.text !== "string") continue;
-        const text = item.text.trim();
-        if (!text) continue;
-        next.push({ text, quoted: !!item.quoted });
+        const text = item.text;
+        if (!text.trim()) continue;
+        next.push({
+          text,
+          caseSensitive: !!item.caseSensitive,
+        });
       }
       if (next.length >= 2) normalized.push(next);
     }
     return normalized;
   }
 
+  function hasDistinctStartAssignment(windowOccurrences, termCount) {
+    const startsByTerm = Array.from({ length: termCount }, () => []);
+    for (const occurrence of windowOccurrences) {
+      if (!occurrence) continue;
+      const termIndex = Number(occurrence.term);
+      const startChar = Number(occurrence.start);
+      if (!Number.isInteger(termIndex) || termIndex < 0 || termIndex >= termCount) {
+        continue;
+      }
+      if (!Number.isFinite(startChar)) {
+        continue;
+      }
+      const starts = startsByTerm[termIndex];
+      if (!starts.includes(startChar)) {
+        starts.push(startChar);
+      }
+    }
+
+    const orderedTerms = startsByTerm
+      .map((starts, term) => ({ term, starts }))
+      .sort((left, right) => left.starts.length - right.starts.length);
+    if (orderedTerms.some((item) => !item.starts.length)) {
+      return false;
+    }
+
+    const usedStarts = new Set();
+    const assign = (orderIndex) => {
+      if (orderIndex >= orderedTerms.length) {
+        return true;
+      }
+      const entry = orderedTerms[orderIndex];
+      for (const startChar of entry.starts) {
+        if (usedStarts.has(startChar)) {
+          continue;
+        }
+        usedStarts.add(startChar);
+        if (assign(orderIndex + 1)) {
+          return true;
+        }
+        usedStarts.delete(startChar);
+      }
+      return false;
+    };
+
+    return assign(0);
+  }
+
+  function shouldUseCloseWordBoundaries(termText) {
+    return typeof termText === "string" && !!termText && !/\\s/.test(termText) && /^\\w+$/u.test(termText);
+  }
+
+  function isWordCharAt(text, index) {
+    if (index < 0 || index >= text.length) {
+      return false;
+    }
+    return /\\w/u.test(text.charAt(index));
+  }
+
+  const normalizedTerms = normalizeTerms(terms);
   const normalizedCloseGroups = normalizeCloseGroups(closeTermGroups);
-  let closeFocusRange = null;
-  let closeFocusTerms = null;
+  const closeFocusWindows = [];
 
   if (normalizedCloseGroups.length) {
     const wordMatches = [];
@@ -9144,20 +9801,48 @@ class MdExploreWindow(QMainWindow):
     if (wordMatches.length) {
       const wordStarts = wordMatches.map((item) => item.start);
 
-      function bestWindowForGroup(group) {
-        const occurrences = [];
-        const found = new Array(group.length).fill(false);
+      function earliestWindowForGroup(group, minStartChar = 0) {
+        const occurrencesByTerm = Array.from({ length: group.length }, () => []);
 
         for (let termIndex = 0; termIndex < group.length; termIndex += 1) {
           const termInfo = group[termIndex];
-          const pattern = new RegExp(escapeRegExp(termInfo.text), termInfo.quoted ? "g" : "gi");
+          const enforceWordBoundaries = shouldUseCloseWordBoundaries(termInfo.text);
+          const pattern = new RegExp(
+            escapeRegExp(termInfo.text),
+            termInfo.caseSensitive ? "g" : "gi"
+          );
           let m = null;
           while ((m = pattern.exec(fullText)) !== null) {
             const startChar = m.index;
-            const wordIndex = upperBound(wordStarts, startChar) - 1;
-            if (wordIndex >= 0) {
-              occurrences.push({ word: wordIndex, term: termIndex });
-              found[termIndex] = true;
+            const endChar = startChar + m[0].length;
+            if (startChar < minStartChar) {
+              if (pattern.lastIndex <= startChar) {
+                pattern.lastIndex = startChar + 1;
+              }
+              continue;
+            }
+            if (
+              enforceWordBoundaries &&
+              (isWordCharAt(fullText, startChar - 1) || isWordCharAt(fullText, endChar))
+            ) {
+              if (pattern.lastIndex <= startChar) {
+                pattern.lastIndex = startChar + 1;
+              }
+              continue;
+            }
+            const startWord = upperBound(wordStarts, startChar) - 1;
+            if (startWord >= 0) {
+              const endProbe = endChar > startChar ? endChar - 1 : startChar;
+              let endWord = upperBound(wordStarts, endProbe) - 1;
+              if (endWord < startWord) {
+                endWord = startWord;
+              }
+              occurrencesByTerm[termIndex].push({
+                startWord,
+                endWord,
+                start: startChar,
+                end: endChar,
+              });
             }
             if (pattern.lastIndex <= startChar) {
               pattern.lastIndex = startChar + 1;
@@ -9165,104 +9850,206 @@ class MdExploreWindow(QMainWindow):
           }
         }
 
-        if (!occurrences.length || found.some((value) => !value)) {
+        if (occurrencesByTerm.some((occurrences) => !occurrences.length)) {
           return null;
         }
 
-        occurrences.sort((a, b) => a.word - b.word);
-        const counts = new Array(group.length).fill(0);
-        let have = 0;
-        let left = 0;
+        for (const occurrences of occurrencesByTerm) {
+          occurrences.sort((left, right) => {
+            if (left.start !== right.start) return left.start - right.start;
+            if (left.startWord !== right.startWord) return left.startWord - right.startWord;
+            if (left.endWord !== right.endWord) return left.endWord - right.endWord;
+            return left.end - right.end;
+          });
+        }
+
+        const orderedTerms = occurrencesByTerm
+          .map((occurrences, termIndex) => ({ termIndex, count: occurrences.length }))
+          .sort((left, right) => left.count - right.count)
+          .map((entry) => entry.termIndex);
+
         let best = null;
 
-        for (let right = 0; right < occurrences.length; right += 1) {
-          const rightOcc = occurrences[right];
-          if (counts[rightOcc.term] === 0) {
-            have += 1;
+        const search = (
+          orderIndex,
+          usedStarts,
+          minStartWord,
+          maxEndWord,
+          minStartCharValue,
+          maxEndChar
+        ) => {
+          if (orderIndex >= orderedTerms.length) {
+            if (
+              minStartWord === null ||
+              maxEndWord === null ||
+              minStartCharValue === null ||
+              maxEndChar === null
+            ) {
+              return;
+            }
+            const span = maxEndWord - minStartWord;
+            if (
+              !best ||
+              minStartCharValue < best.startChar ||
+              (
+                minStartCharValue === best.startChar &&
+                (
+                  span < best.span ||
+                  (span === best.span && maxEndChar < best.endChar)
+                )
+              )
+            ) {
+              best = {
+                span,
+                startWord: minStartWord,
+                endWord: maxEndWord,
+                startChar: minStartCharValue,
+                endChar: maxEndChar,
+              };
+            }
+            return;
           }
-          counts[rightOcc.term] += 1;
 
-          while (have === group.length && left <= right) {
-            const leftOcc = occurrences[left];
-            const span = rightOcc.word - leftOcc.word;
-            if (span <= closeWordGap) {
-              if (!best || span < best.span || (span === best.span && leftOcc.word < best.leftWord)) {
-                best = { span, leftWord: leftOcc.word, rightWord: rightOcc.word };
+          const termIndex = orderedTerms[orderIndex];
+          for (const occurrence of occurrencesByTerm[termIndex]) {
+            if (usedStarts.has(occurrence.start)) {
+              continue;
+            }
+            const nextMinStartWord =
+              minStartWord === null
+                ? occurrence.startWord
+                : Math.min(minStartWord, occurrence.startWord);
+            const nextMaxEndWord =
+              maxEndWord === null
+                ? occurrence.endWord
+                : Math.max(maxEndWord, occurrence.endWord);
+            const span = nextMaxEndWord - nextMinStartWord;
+            if (span > closeWordGap) {
+              continue;
+            }
+            const nextMinStartChar =
+              minStartCharValue === null
+                ? occurrence.start
+                : Math.min(minStartCharValue, occurrence.start);
+            const nextMaxEndChar =
+              maxEndChar === null
+                ? occurrence.end
+                : Math.max(maxEndChar, occurrence.end);
+            if (best) {
+              if (nextMinStartChar > best.startChar) {
+                continue;
+              }
+              if (nextMinStartChar === best.startChar && span > best.span) {
+                continue;
               }
             }
-            counts[leftOcc.term] -= 1;
-            if (counts[leftOcc.term] === 0) {
-              have -= 1;
-            }
-            left += 1;
+            usedStarts.add(occurrence.start);
+            search(
+              orderIndex + 1,
+              usedStarts,
+              nextMinStartWord,
+              nextMaxEndWord,
+              nextMinStartChar,
+              nextMaxEndChar
+            );
+            usedStarts.delete(occurrence.start);
           }
-        }
+        };
+
+        search(0, new Set(), null, null, null, null);
 
         if (!best) {
           return null;
         }
-        const startWord = wordMatches[best.leftWord];
-        const endWord = wordMatches[best.rightWord];
-        if (!startWord || !endWord) {
-          return null;
-        }
         return {
           span: best.span,
-          startChar: startWord.start,
-          endChar: endWord.end,
+          startChar: best.startChar,
+          endChar: best.endChar,
           terms: group,
         };
       }
 
-      let chosenWindow = null;
       for (const group of normalizedCloseGroups) {
-        const candidate = bestWindowForGroup(group);
-        if (!candidate) continue;
-        if (!chosenWindow || candidate.span < chosenWindow.span || (candidate.span === chosenWindow.span && candidate.startChar < chosenWindow.startChar)) {
-          chosenWindow = candidate;
+        let nextMinStartChar = 0;
+        while (true) {
+          const candidate = earliestWindowForGroup(group, nextMinStartChar);
+          if (!candidate) {
+            break;
+          }
+          closeFocusWindows.push(candidate);
+          nextMinStartChar = Math.max(nextMinStartChar + 1, candidate.endChar);
         }
       }
 
-      if (chosenWindow) {
-        closeFocusRange = { startChar: chosenWindow.startChar, endChar: chosenWindow.endChar };
-        closeFocusTerms = chosenWindow.terms;
+      closeFocusWindows.sort((left, right) => {
+        if (left.startChar !== right.startChar) return left.startChar - right.startChar;
+        if (left.span !== right.span) return left.span - right.span;
+        return left.endChar - right.endChar;
+      });
+    }
+  }
+
+  // If NEAR(...) is present, highlight every qualifying NEAR window.
+  if (normalizedCloseGroups.length && !closeFocusWindows.length) {
+    return 0;
+  }
+
+  if (!normalizedCloseGroups.length && !normalizedTerms.length) return 0;
+
+  function addTermRanges(segment, ranges, termInfo, focusWindow = null) {
+    const rawText = termInfo && typeof termInfo.text === "string" ? termInfo.text : "";
+    const termText = rawText;
+    if (!termText.trim()) return;
+    const enforceWordBoundaries = !!focusWindow && shouldUseCloseWordBoundaries(termText);
+    const pattern = new RegExp(
+      escapeRegExp(termText),
+      termInfo.caseSensitive ? "g" : "gi"
+    );
+    let m = null;
+    while ((m = pattern.exec(segment.text)) !== null) {
+      const localStart = m.index;
+      const localEnd = localStart + m[0].length;
+      if (
+        enforceWordBoundaries &&
+        ((localStart > 0 && /\\w/u.test(segment.text.charAt(localStart - 1))) ||
+          (localEnd < segment.text.length && /\\w/u.test(segment.text.charAt(localEnd))))
+      ) {
+        if (pattern.lastIndex <= localStart) {
+          pattern.lastIndex = localStart + 1;
+        }
+        continue;
+      }
+      const absoluteStart = segment.start + localStart;
+      const absoluteEnd = segment.start + localEnd;
+      if (focusWindow) {
+        if (absoluteStart < focusWindow.startChar || absoluteEnd > focusWindow.endChar) {
+          if (pattern.lastIndex <= localStart) {
+            pattern.lastIndex = localStart + 1;
+          }
+          continue;
+        }
+      }
+      ranges.push({ start: localStart, end: localEnd });
+      if (pattern.lastIndex <= localStart) {
+        pattern.lastIndex = localStart + 1;
       }
     }
   }
 
-  // If CLOSE(...) is present, only highlight the matched CLOSE window.
-  if (normalizedCloseGroups.length && !closeFocusRange) {
-    return 0;
-  }
-
-  const targetTerms = closeFocusTerms || terms.map((text) => ({ text, quoted: false }));
-  if (!targetTerms.length) return 0;
-
   function collectRanges(segment) {
     const ranges = [];
-    for (const termInfo of targetTerms) {
-      const rawText = termInfo && typeof termInfo.text === "string" ? termInfo.text : "";
-      const termText = rawText.trim();
-      if (!termText) continue;
-      const pattern = new RegExp(escapeRegExp(termText), termInfo.quoted ? "g" : "gi");
-      let m = null;
-      while ((m = pattern.exec(segment.text)) !== null) {
-        const localStart = m.index;
-        const localEnd = localStart + m[0].length;
-        const absoluteStart = segment.start + localStart;
-        const absoluteEnd = segment.start + localEnd;
-        if (closeFocusRange) {
-          if (absoluteStart < closeFocusRange.startChar || absoluteEnd > closeFocusRange.endChar) {
-            if (pattern.lastIndex <= localStart) {
-              pattern.lastIndex = localStart + 1;
-            }
-            continue;
-          }
+    if (closeFocusWindows.length) {
+      for (const focusWindow of closeFocusWindows) {
+        if (segment.end <= focusWindow.startChar || segment.start >= focusWindow.endChar) {
+          continue;
         }
-        ranges.push({ start: localStart, end: localEnd });
-        if (pattern.lastIndex <= localStart) {
-          pattern.lastIndex = localStart + 1;
+        for (const termInfo of focusWindow.terms) {
+          addTermRanges(segment, ranges, termInfo, focusWindow);
         }
+      }
+    } else {
+      for (const termInfo of normalizedTerms) {
+        addTermRanges(segment, ranges, termInfo);
       }
     }
 
@@ -9358,33 +10145,41 @@ class MdExploreWindow(QMainWindow):
         """Compile a lightweight per-file hit counter from query terms.
 
         The counter mirrors search term semantics:
-        - Quoted terms are case-sensitive.
-        - Unquoted terms are case-insensitive.
+        - Single-quoted terms are case-sensitive.
+        - Double-quoted and unquoted terms are case-insensitive.
         - Boolean operators are ignored for counting; counts are additive across
           unique TERM tokens and are only used for files that already matched
           the full boolean predicate.
+        - NEAR(...) counts mirror preview highlighting: qualifying NEAR
+          windows are counted once each, with distinct qualifying occurrences
+          per term.
         """
         tokens = self._tokenize_match_query(query)
+        close_term_groups = self._extract_close_term_groups(query)
         compiled_patterns: list[re.Pattern[str]] = []
         seen: set[str] = set()
 
-        for token_type, token_value, is_quoted in tokens:
+        for token_type, token_value, is_case_sensitive in tokens:
             if token_type != "TERM":
                 continue
-            term = token_value.strip()
-            if not term:
+            if not token_value.strip():
                 continue
-            key = f"Q:{term}" if is_quoted else f"I:{term.casefold()}"
+            term = token_value
+            key = f"S:{term}" if is_case_sensitive else f"I:{term.casefold()}"
             if key in seen:
                 continue
             seen.add(key)
-            flags = 0 if is_quoted else re.IGNORECASE
+            flags = 0 if is_case_sensitive else re.IGNORECASE
             compiled_patterns.append(re.compile(re.escape(term), flags))
 
         if not compiled_patterns:
             return lambda _name, _content: 0
 
         def counter(file_name: str, content: str) -> int:
+            if close_term_groups:
+                return len(
+                    self._collect_close_focus_windows(content or "", close_term_groups)
+                )
             haystack = f"{file_name}\n{content}"
             total = 0
             for pattern in compiled_patterns:
@@ -9394,7 +10189,7 @@ class MdExploreWindow(QMainWindow):
         return counter
 
     def _compile_match_predicate(self, query: str):
-        """Compile boolean query with implicit AND, quotes, and CLOSE(...)."""
+        """Compile boolean query with implicit AND, quotes, and NEAR(...)."""
         tokens = self._tokenize_match_query(query)
         if not tokens:
             return lambda _name, _content: True
@@ -9413,7 +10208,7 @@ class MdExploreWindow(QMainWindow):
         def token_starts_expression(token_index: int) -> bool:
             if token_index < 0 or token_index >= len(tokens):
                 return False
-            token_type, token_value, _token_quoted = tokens[token_index]
+            token_type, token_value, _token_case_sensitive = tokens[token_index]
             if token_type in {"TERM", "LPAREN", "CLOSE"}:
                 return True
             if token_type == "OP" and token_value == "NOT":
@@ -9432,7 +10227,7 @@ class MdExploreWindow(QMainWindow):
             token = peek()
             if token is None:
                 raise QueryParseError("Unexpected end of query")
-            token_type, token_value, token_quoted = token
+            token_type, token_value, token_case_sensitive = token
             if expected_type is not None and token_type != expected_type:
                 raise QueryParseError(
                     f"Expected {expected_type} but found {token_type}"
@@ -9442,7 +10237,7 @@ class MdExploreWindow(QMainWindow):
                     f"Expected {expected_value} but found {token_value}"
                 )
             idx += 1
-            return token_type, token_value, token_quoted
+            return token_type, token_value, token_case_sensitive
 
         def parse_expression(allow_implicit_and: bool = True):
             return parse_or(allow_implicit_and)
@@ -9536,14 +10331,14 @@ class MdExploreWindow(QMainWindow):
             return combined
 
         def parse_close_call():
-            consume("CLOSE", "CLOSE")
+            consume("CLOSE", "NEAR")
             consume("LPAREN")
             terms: list[tuple[str, bool]] = []
             while True:
                 token = peek()
                 if token is None:
-                    raise QueryParseError("Unterminated CLOSE(...)")
-                token_type, token_value, token_quoted = token
+                    raise QueryParseError("Unterminated NEAR(...)")
+                token_type, token_value, token_case_sensitive = token
                 if token_type == "RPAREN":
                     break
                 if token_type == "COMMA":
@@ -9551,24 +10346,23 @@ class MdExploreWindow(QMainWindow):
                     continue
                 if token_type == "TERM":
                     consume("TERM")
-                    cleaned = token_value.strip()
-                    if cleaned:
-                        terms.append((cleaned, token_quoted))
+                    if token_value.strip():
+                        terms.append((token_value, token_case_sensitive))
                     continue
-                raise QueryParseError("CLOSE(...) accepts terms only")
+                raise QueryParseError("NEAR(...) accepts terms only")
             consume("RPAREN")
             if len(terms) < 2:
-                raise QueryParseError("CLOSE(...) requires at least two terms")
+                raise QueryParseError("NEAR(...) requires at least two terms")
             return ("CLOSE", terms)
 
         def parse_primary(_allow_implicit_and: bool = True):
             token = peek()
             if token is None:
                 raise QueryParseError("Missing query operand")
-            token_type, token_value, token_quoted = token
+            token_type, token_value, token_case_sensitive = token
             if token_type == "TERM":
                 consume("TERM")
-                return ("TERM", token_value, token_quoted)
+                return ("TERM", token_value, token_case_sensitive)
             if token_type == "CLOSE":
                 return parse_close_call()
             if (
@@ -9587,7 +10381,7 @@ class MdExploreWindow(QMainWindow):
 
         def term_matches(
             term: str,
-            is_quoted: bool,
+            is_case_sensitive: bool,
             file_name: str,
             file_content: str,
             file_name_folded: str,
@@ -9595,61 +10389,15 @@ class MdExploreWindow(QMainWindow):
         ) -> bool:
             if not term:
                 return False
-            if is_quoted:
+            if is_case_sensitive:
                 return term in file_name or term in file_content
             term_folded = term.casefold()
             return term_folded in file_name_folded or term_folded in file_content_folded
 
-        def close_terms_match(terms: list[tuple[str, bool]], file_content: str) -> bool:
-            content = file_content or ""
-            word_matches = list(re.finditer(r"\S+", content))
-            if not word_matches:
-                return False
-            # CLOSE() uses whitespace-delimited token positions, not line indexes.
-            word_starts = [match.start() for match in word_matches]
-            content_folded = content.casefold()
-            occurrences: list[tuple[int, int]] = []
-            term_found = [False] * len(terms)
-
-            for term_index, (term_text, is_quoted) in enumerate(terms):
-                if not term_text:
-                    return False
-                needle = term_text if is_quoted else term_text.casefold()
-                haystack = content if is_quoted else content_folded
-                search_start = 0
-                while True:
-                    char_index = haystack.find(needle, search_start)
-                    if char_index < 0:
-                        break
-                    word_index = bisect_right(word_starts, char_index) - 1
-                    if word_index >= 0:
-                        occurrences.append((word_index, term_index))
-                        term_found[term_index] = True
-                    search_start = char_index + 1
-
-            if not all(term_found) or not occurrences:
-                return False
-
-            occurrences.sort(key=lambda item: item[0])
-            counts = [0] * len(terms)
-            have = 0
-            left = 0
-
-            for right, (right_word, right_term_index) in enumerate(occurrences):
-                if counts[right_term_index] == 0:
-                    have += 1
-                counts[right_term_index] += 1
-
-                while have == len(terms) and left <= right:
-                    left_word, left_term_index = occurrences[left]
-                    if right_word - left_word <= SEARCH_CLOSE_WORD_GAP:
-                        return True
-                    counts[left_term_index] -= 1
-                    if counts[left_term_index] == 0:
-                        have -= 1
-                    left += 1
-
-            return False
+        def close_terms_match(
+            terms: list[tuple[str, bool]], file_content: str
+        ) -> bool:
+            return self._best_close_focus_window(file_content or "", [terms]) is not None
 
         def evaluate(
             node,
@@ -9660,10 +10408,10 @@ class MdExploreWindow(QMainWindow):
         ) -> bool:
             node_type = node[0]
             if node_type == "TERM":
-                _kind, term_text, is_quoted = node
+                _kind, term_text, is_case_sensitive = node
                 return term_matches(
                     term_text,
-                    bool(is_quoted),
+                    bool(is_case_sensitive),
                     file_name,
                     file_content,
                     file_name_folded,
@@ -9736,8 +10484,8 @@ class MdExploreWindow(QMainWindow):
     def _compile_simple_match_predicate(self, tokens: list[tuple[str, str, bool]]):
         """Fallback matcher: all terms must appear in filename or content."""
         terms = [
-            (value.strip(), is_quoted)
-            for token_type, value, is_quoted in tokens
+            (value, is_case_sensitive)
+            for token_type, value, is_case_sensitive in tokens
             if token_type == "TERM" and value.strip()
         ]
         if not terms:
@@ -9748,8 +10496,8 @@ class MdExploreWindow(QMainWindow):
             content_text = file_content or ""
             name_folded = name_text.casefold()
             content_folded = content_text.casefold()
-            for term_text, is_quoted in terms:
-                if is_quoted:
+            for term_text, is_case_sensitive in terms:
+                if is_case_sensitive:
                     if term_text not in name_text and term_text not in content_text:
                         return False
                 else:
@@ -9761,7 +10509,7 @@ class MdExploreWindow(QMainWindow):
         return predicate
 
     def _tokenize_match_query(self, query: str) -> list[tuple[str, str, bool]]:
-        """Tokenize query supporting AND/OR/NOT, CLOSE(...), quotes, and commas."""
+        """Tokenize query supporting operators plus single/double-quoted terms."""
         tokens: list[tuple[str, str, bool]] = []
         i = 0
         length = len(query)
@@ -9783,23 +10531,25 @@ class MdExploreWindow(QMainWindow):
                 tokens.append(("COMMA", ch, False))
                 i += 1
                 continue
-            if ch == '"':
+            if ch in {'"', "'"}:
+                quote_char = ch
+                is_case_sensitive = quote_char == "'"
                 i += 1
                 buffer: list[str] = []
                 while i < length:
                     current = query[i]
                     if current == "\\" and i + 1 < length:
                         next_char = query[i + 1]
-                        if next_char in {'"', "\\"}:
+                        if next_char in {quote_char, "\\"}:
                             buffer.append(next_char)
                             i += 2
                             continue
-                    if current == '"':
+                    if current == quote_char:
                         i += 1
                         break
                     buffer.append(current)
                     i += 1
-                tokens.append(("TERM", "".join(buffer), True))
+                tokens.append(("TERM", "".join(buffer), is_case_sensitive))
                 continue
 
             start = i
@@ -9811,8 +10561,8 @@ class MdExploreWindow(QMainWindow):
             upper = token_value.upper()
             if upper in {"AND", "OR", "NOT"}:
                 tokens.append(("OP", upper, False))
-            elif upper == "CLOSE":
-                tokens.append(("CLOSE", "CLOSE", False))
+            elif upper in {"NEAR", "CLOSE"}:
+                tokens.append(("CLOSE", "NEAR", False))
             else:
                 tokens.append(("TERM", token_value, False))
 
@@ -12216,8 +12966,45 @@ class MdExploreWindow(QMainWindow):
             4500,
         )
 
-    def _copy_files_to_clipboard(self, files: list[Path]) -> int:
-        """Copy file paths to clipboard with file-manager compatible MIME payloads."""
+    def _copy_destination_is_directory(self) -> bool:
+        """Return whether copy actions target a folder instead of the clipboard."""
+        radio = getattr(self, "copy_directory_radio", None)
+        return bool(radio is not None and radio.isChecked())
+
+    def _default_copy_destination_directory(self) -> Path:
+        """Return default folder used by the copy destination chooser."""
+        if (
+            isinstance(self._copy_destination_directory, Path)
+            and self._copy_destination_directory.is_dir()
+        ):
+            return self._copy_destination_directory
+        return self._effective_root_for_persistence()
+
+    def _prompt_copy_destination_directory(self) -> Path | None:
+        """Prompt for destination folder and remember the selection."""
+        default_directory = self._default_copy_destination_directory()
+        selected_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Target Directory",
+            str(default_directory),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not selected_path:
+            return None
+
+        selected = Path(selected_path).expanduser()
+        try:
+            selected = selected.resolve()
+        except Exception:
+            pass
+        if not selected.is_dir():
+            self.statusBar().showMessage("Selected directory is unavailable", 3500)
+            return None
+        self._copy_destination_directory = selected
+        return selected
+
+    def _normalize_unique_file_paths(self, files: list[Path]) -> list[Path]:
+        """Resolve and de-duplicate a list of filesystem paths."""
         normalized: list[Path] = []
         seen: set[str] = set()
         for path in files:
@@ -12230,6 +13017,11 @@ class MdExploreWindow(QMainWindow):
                 continue
             seen.add(key)
             normalized.append(resolved)
+        return normalized
+
+    def _copy_files_to_clipboard(self, files: list[Path]) -> int:
+        """Copy file paths to clipboard with file-manager compatible MIME payloads."""
+        normalized = self._normalize_unique_file_paths(files)
 
         clipboard = QApplication.clipboard()
         mime_data = QMimeData()
@@ -12249,8 +13041,134 @@ class MdExploreWindow(QMainWindow):
         clipboard.setMimeData(mime_data)
         return len(normalized)
 
+    def _view_session_for_path_key(self, path_key: str | None) -> dict | None:
+        """Return best-available persisted/in-memory view session for one markdown path."""
+        if not path_key:
+            return None
+
+        if path_key == self._current_preview_path_key():
+            self._save_document_view_session(path_key, capture_current=True)
+        self._load_persisted_document_view_session(path_key)
+        session = self._document_view_sessions.get(path_key)
+        if isinstance(session, dict):
+            cloned_session = self._clone_json_compatible_dict(session)
+            if cloned_session:
+                return cloned_session
+
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return None
+        directory, file_name = resolved
+        persisted = self._directory_view_sessions(directory).get(file_name)
+        if not isinstance(persisted, dict):
+            return None
+        cloned_session = self._clone_json_compatible_dict(persisted)
+        return cloned_session if cloned_session else None
+
+    def _merge_copied_file_metadata(
+        self, copied_pairs: list[tuple[Path, Path]], target_directory: Path
+    ) -> tuple[int, int, int]:
+        """Merge copied markdown metadata into destination .mdexplore sidecars."""
+        if not copied_pairs:
+            return 0, 0, 0
+
+        color_updates = 0
+        view_updates = 0
+        highlight_updates = 0
+        target_sessions = self._directory_view_sessions(target_directory)
+        target_highlights = self._directory_text_highlights(target_directory)
+        sessions_changed = False
+        highlights_changed = False
+
+        for source_path, destination_path in copied_pairs:
+            source_color = self.model.color_for_file(source_path)
+            normalized_color = (
+                source_color.strip()
+                if isinstance(source_color, str) and source_color.strip()
+                else None
+            )
+            self.model.set_color_for_file(destination_path, normalized_color)
+            if normalized_color is not None:
+                color_updates += 1
+
+            source_key = self._path_key(source_path)
+            source_session = self._view_session_for_path_key(source_key)
+            if self._should_persist_document_view_session(source_session):
+                target_sessions[destination_path.name] = self._clone_json_compatible_dict(
+                    source_session if isinstance(source_session, dict) else {}
+                )
+                sessions_changed = True
+                view_updates += 1
+            elif destination_path.name in target_sessions:
+                target_sessions.pop(destination_path.name, None)
+                sessions_changed = True
+
+            source_highlights = self._load_text_highlights_for_path_key(source_key)
+            if source_highlights:
+                target_highlights[destination_path.name] = self._clone_json_compatible_list(
+                    source_highlights
+                )
+                highlights_changed = True
+                highlight_updates += 1
+            elif destination_path.name in target_highlights:
+                target_highlights.pop(destination_path.name, None)
+                highlights_changed = True
+
+        if sessions_changed:
+            self._save_directory_view_sessions(target_directory)
+        if highlights_changed:
+            self._save_directory_text_highlights(target_directory)
+
+        for _source_path, destination_path in copied_pairs:
+            destination_key = self._path_key(destination_path)
+            if self._is_path_key_under_root(destination_key):
+                self._refresh_tree_multi_view_markers(changed_path_key=destination_key)
+
+        return color_updates, view_updates, highlight_updates
+
+    def _copy_files_to_directory_with_metadata(
+        self, files: list[Path]
+    ) -> tuple[int, int, int, int, int, Path] | None:
+        """Copy files into a chosen folder and merge their .mdexplore metadata."""
+        normalized = self._normalize_unique_file_paths(files)
+        if not normalized:
+            return None
+
+        target_directory = self._prompt_copy_destination_directory()
+        if target_directory is None:
+            return None
+
+        copied_pairs: list[tuple[Path, Path]] = []
+        copy_failures = 0
+        for source_path in normalized:
+            if not source_path.is_file():
+                copy_failures += 1
+                continue
+
+            destination_path = target_directory / source_path.name
+            if self._path_key(source_path) == self._path_key(destination_path):
+                copied_pairs.append((source_path, destination_path))
+                continue
+            try:
+                shutil.copy2(source_path, destination_path)
+                copied_pairs.append((source_path, destination_path))
+            except Exception:
+                copy_failures += 1
+
+        color_updates, view_updates, highlight_updates = self._merge_copied_file_metadata(
+            copied_pairs, target_directory
+        )
+        return (
+            len(copied_pairs),
+            copy_failures,
+            color_updates,
+            view_updates,
+            highlight_updates,
+            target_directory,
+        )
+
     def _copy_current_preview_file_to_clipboard(self) -> None:
-        """Copy the currently previewed markdown file path to clipboard."""
+        """Copy the current markdown file to clipboard or selected folder."""
         if self.current_file is None:
             self.statusBar().showMessage("No previewed markdown file to copy", 3000)
             return
@@ -12264,6 +13182,19 @@ class MdExploreWindow(QMainWindow):
             self.statusBar().showMessage("Previewed file is unavailable", 3000)
             return
 
+        if self._copy_destination_is_directory():
+            result = self._copy_files_to_directory_with_metadata([target])
+            if result is None:
+                return
+            copied, failed, colors, views, highlights, directory = result
+            self.statusBar().showMessage(
+                f"Copied {copied} file(s) to {directory} "
+                f"(metadata: colors {colors}, views {views}, highlights {highlights}; "
+                f"failures {failed})",
+                5000,
+            )
+            return
+
         copied = self._copy_files_to_clipboard([target])
         if copied:
             self.statusBar().showMessage(
@@ -12273,9 +13204,28 @@ class MdExploreWindow(QMainWindow):
     def _copy_highlighted_files_to_clipboard(
         self, color_value: str, color_name: str
     ) -> None:
-        """Copy highlighted file paths for a color to the system clipboard."""
+        """Copy highlighted markdown files to clipboard or selected folder."""
         scope = self._highlight_scope_directory()
         matches = self.model.collect_files_with_color(scope, color_value)
+        if self._copy_destination_is_directory():
+            if not matches:
+                self.statusBar().showMessage(
+                    f"No {color_name.lower()} highlighted file(s) to copy",
+                    3500,
+                )
+                return
+            result = self._copy_files_to_directory_with_metadata(matches)
+            if result is None:
+                return
+            copied, failed, colors, views, highlights, directory = result
+            self.statusBar().showMessage(
+                f"Copied {copied} {color_name.lower()} highlighted file(s) to {directory} "
+                f"(metadata: colors {colors}, views {views}, highlights {highlights}; "
+                f"failures {failed})",
+                5500,
+            )
+            return
+
         copied = self._copy_files_to_clipboard(matches)
         self.statusBar().showMessage(
             f"Copied {copied} {color_name.lower()} highlighted file(s) from {scope}",
@@ -12513,11 +13463,14 @@ class MdExploreWindow(QMainWindow):
             return
         self._preview_capture_enabled = True
         self._scroll_restore_block_until = 0.0
+        self._view_line_probe_block_until = 0.0
         self._capture_current_preview_scroll(force=True)
         self._capture_current_diagram_view_state(expected_key)
         self._request_active_view_top_line_update(force=True)
 
-    def _restore_current_preview_scroll(self, expected_key: str | None = None) -> None:
+    def _restore_current_preview_scroll(
+        self, expected_key: str | None = None, *, stabilize: bool = True
+    ) -> None:
         """Restore previously captured scroll position for the selected file."""
         path_key = self._current_preview_path_key()
         if path_key is None:
@@ -12563,10 +13516,79 @@ class MdExploreWindow(QMainWindow):
 
         scroll_json = json.dumps(scroll_value)
         top_line_json = json.dumps(int(max(1, top_line_fallback)))
+        stabilize_hook = "setTimeout(maybeCorrectLineDrift, 140);" if stabilize else ""
         js = f"""
 (() => {{
   const y = {scroll_json};
   const targetLine = {top_line_json};
+  const probeTopLine = () => {{
+    const topBandY = 12;
+    const viewportHeight = Math.max(1, Number(window.innerHeight) || 0);
+    const taggedNodes = Array.from(document.querySelectorAll("[data-md-line-start]"));
+    let crossingLine = null;
+    let crossingTop = -Infinity;
+    let aboveLine = null;
+    let aboveBottom = -Infinity;
+    let belowLine = null;
+    let belowTop = Infinity;
+    for (const node of taggedNodes) {{
+      const rawValue = parseInt(node.getAttribute("data-md-line-start") || "", 10);
+      if (Number.isNaN(rawValue)) {{
+        continue;
+      }}
+      const lineValue = rawValue + 1;
+      const rect = node.getBoundingClientRect();
+      if (!rect) {{
+        continue;
+      }}
+      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) {{
+        continue;
+      }}
+      if (rect.height <= 0) {{
+        continue;
+      }}
+      if (rect.bottom <= 0 || rect.top >= viewportHeight) {{
+        continue;
+      }}
+      if (rect.top <= topBandY && rect.bottom > topBandY) {{
+        if (
+          rect.top > crossingTop
+          || (rect.top === crossingTop && (crossingLine === null || lineValue < crossingLine))
+        ) {{
+          crossingTop = rect.top;
+          crossingLine = lineValue;
+        }}
+        continue;
+      }}
+      if (rect.bottom <= topBandY) {{
+        if (
+          rect.bottom > aboveBottom
+          || (rect.bottom === aboveBottom && (aboveLine === null || lineValue > aboveLine))
+        ) {{
+          aboveBottom = rect.bottom;
+          aboveLine = lineValue;
+        }}
+        continue;
+      }}
+      if (
+        rect.top < belowTop
+        || (rect.top === belowTop && (belowLine === null || lineValue < belowLine))
+      ) {{
+        belowTop = rect.top;
+        belowLine = lineValue;
+      }}
+    }}
+    if (crossingLine !== null) {{
+      return crossingLine;
+    }}
+    if (aboveLine !== null) {{
+      return aboveLine;
+    }}
+    if (belowLine !== null) {{
+      return belowLine;
+    }}
+    return 1;
+  }};
   // Apply twice (RAF + timeout) because late layout work can override scroll.
   const applyScrollY = () => {{
     requestAnimationFrame(() => window.scrollTo(0, y));
@@ -12577,6 +13599,7 @@ class MdExploreWindow(QMainWindow):
       applyScrollY();
       return;
     }}
+    const targetLineIndex = Math.max(0, targetLine - 1);
     let best = null;
     for (const node of Array.from(document.querySelectorAll("[data-md-line-start][data-md-line-end]"))) {{
       const start = Number(node.getAttribute("data-md-line-start"));
@@ -12584,7 +13607,7 @@ class MdExploreWindow(QMainWindow):
       if (!Number.isFinite(start) || !Number.isFinite(end)) {{
         continue;
       }}
-      if (targetLine < start || targetLine > end) {{
+      if (targetLineIndex < start || targetLineIndex >= end) {{
         continue;
       }}
       best = node;
@@ -12596,7 +13619,7 @@ class MdExploreWindow(QMainWindow):
         if (!Number.isFinite(start)) {{
           continue;
         }}
-        if (start >= targetLine) {{
+        if (start >= targetLineIndex) {{
           best = node;
           break;
         }}
@@ -12611,13 +13634,28 @@ class MdExploreWindow(QMainWindow):
     requestAnimationFrame(() => window.scrollTo(0, targetY));
     setTimeout(() => window.scrollTo(0, targetY), 60);
   }};
+  const maybeCorrectLineDrift = () => {{
+    if (targetLine <= 1) {{
+      return;
+    }}
+    const currentTopLine = probeTopLine();
+    if (!Number.isFinite(currentTopLine)) {{
+      applyLineFallback();
+      return;
+    }}
+    if (Math.abs(currentTopLine - targetLine) >= 3) {{
+      applyLineFallback();
+    }}
+  }};
   if (targetLine > 1 && (!Number.isFinite(y) || y <= 1)) {{
     applyLineFallback();
     return;
   }}
   applyScrollY();
+  __MDEXPLORE_LINE_STABILIZE_HOOK__
 }})();
 """
+        js = js.replace("__MDEXPLORE_LINE_STABILIZE_HOOK__", stabilize_hook)
         # Mutates page scroll position (no returned data consumed).
         self.preview.page().runJavaScript(js)
         self._request_active_view_top_line_update(force=True)
@@ -12833,6 +13871,7 @@ class MdExploreWindow(QMainWindow):
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
+        self._view_line_probe_block_until = 0.0
         if previous_path_key != next_path_key:
             self._load_persisted_document_view_session(next_path_key)
             restored = self._restore_document_view_session(next_path_key)
