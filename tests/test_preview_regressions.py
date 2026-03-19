@@ -34,6 +34,17 @@ SEARCH_MARK_TEXTS_JS = """
   )
 ))();
 """
+PERSISTENT_HIGHLIGHT_TEXTS_JS = """
+(() => JSON.stringify(
+  Array.from(
+    document.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]')
+  ).map((node) => ({
+    text: node.textContent || "",
+    id: node.getAttribute("data-mdexplore-persistent-highlight-id") || "",
+    kind: node.getAttribute("data-mdexplore-persistent-highlight-kind") || "",
+  }))
+))();
+"""
 SEARCH_VARIANTS_DOCUMENT_TEXT = """# Search Fixture
 
 Alpha beta GAMMA.
@@ -289,6 +300,54 @@ class PreviewRegressionHarness(unittest.TestCase):
         self.assertIsInstance(payload, list)
         return [str(item) for item in payload]
 
+    def persistent_highlight_spans(self) -> list[dict]:
+        raw = self.run_js(PERSISTENT_HIGHLIGHT_TEXTS_JS)
+        self.assertIsInstance(raw, str)
+        payload = json.loads(raw)
+        self.assertIsInstance(payload, list)
+        return [dict(item) for item in payload]
+
+    def await_callback_result(self, invoker, *, timeout_ms: int = 10000):
+        loop = QEventLoop()
+        holder: dict[str, object] = {}
+
+        def _done(result) -> None:
+            holder["result"] = result
+            loop.quit()
+
+        invoker(_done)
+        QTimer.singleShot(timeout_ms, loop.quit)
+        loop.exec()
+        if "result" not in holder:
+            self.fail("Timed out waiting for callback result")
+        return holder["result"]
+
+    def apply_persistent_highlights(self, entries: list[dict]) -> dict:
+        self.window._current_preview_text_highlights = list(entries)
+        expected_key = self.window._current_preview_path_key()
+        self.assertIsNotNone(expected_key)
+        result = self.await_callback_result(
+            lambda done: self.window._apply_persistent_preview_highlights(
+                expected_key, completion=done
+            )
+        )
+        self.assertIsInstance(result, dict)
+        return dict(result)
+
+    def request_live_highlight_target(self) -> dict:
+        result = self.await_callback_result(
+            lambda done: self.window._request_live_preview_highlight_target(done)
+        )
+        self.assertIsInstance(result, dict)
+        return dict(result)
+
+    def request_live_selection_offsets(self, hint: str = "") -> dict:
+        result = self.await_callback_result(
+            lambda done: self.window._request_live_preview_selection_offsets(hint, done)
+        )
+        self.assertIsInstance(result, dict)
+        return dict(result)
+
     def run_search_and_expect_highlights(
         self, query: str, expected_texts: list[str]
     ) -> None:
@@ -522,6 +581,108 @@ class SameDocumentSearchSyntaxRegressionTests(PreviewRegressionHarness):
 
 
 class PreviewMarkerRegressionTests(PreviewRegressionHarness):
+    def test_persistent_highlight_apply_and_live_probes_match_dom_ranges(self) -> None:
+        tall_text = "\n\n".join(
+            [f"filler line {index}" for index in range(1, 80)]
+            + ["alpha beta gamma"]
+            + [f"tail line {index}" for index in range(80, 140)]
+        ) + "\n"
+        self.load_markdown_text("persistent-highlight-apply.md", tall_text)
+        selection_seed = self.run_js(
+            """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  if (!root) return "missing-root";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const index = value.indexOf("beta");
+    if (index < 0) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + 4);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return "beta";
+  }
+  return "missing-beta";
+})();
+"""
+        )
+        self.assertEqual(selection_seed, "beta")
+        selected_offsets = self.request_live_selection_offsets()
+        self.assertTrue(bool(selected_offsets.get("hasSelection")))
+        self.assertEqual(selected_offsets.get("selectedText"), "beta")
+        start = int(selected_offsets["selectionOffsetStart"])
+        end = int(selected_offsets["selectionOffsetEnd"])
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+
+        apply_result = self.apply_persistent_highlights(
+            [{"id": "case1", "start": start, "end": end, "kind": "normal"}]
+        )
+        self.assertGreaterEqual(int(apply_result.get("applied", 0)), 1)
+        self.wait_until(
+            lambda: bool(self.persistent_highlight_spans())
+            and int(self.probe()["highlightMarkers"]) >= 1,
+            timeout_ms=4000,
+        )
+
+        spans = self.persistent_highlight_spans()
+        self.assertEqual(
+            spans,
+            [{"text": "beta", "id": "case1", "kind": "normal"}],
+        )
+        self.assertGreaterEqual(int(self.probe()["highlightMarkers"]), 1)
+
+        context_result = self.run_js(
+            """
+(() => {
+  const node = document.querySelector('span[data-mdexplore-persistent-highlight="1"]');
+  if (!node) return "missing";
+  const rect = node.getBoundingClientRect();
+  const options = {
+    bubbles: true,
+    cancelable: true,
+    button: 2,
+    clientX: rect.left + Math.max(1, rect.width / 2),
+    clientY: rect.top + Math.max(1, rect.height / 2),
+  };
+  node.dispatchEvent(new MouseEvent("contextmenu", options));
+  return "ok";
+})();
+"""
+        )
+        self.assertEqual(context_result, "ok")
+        live_target = self.request_live_highlight_target()
+        self.assertEqual(live_target.get("clickedHighlightId"), "case1")
+        if live_target.get("clickedOffset") is not None:
+            self.assertGreaterEqual(int(live_target["clickedOffset"]), start)
+            self.assertLessEqual(int(live_target["clickedOffset"]), end)
+
+        selection_result = self.run_js(
+            """
+(() => {
+  const node = document.querySelector('span[data-mdexplore-persistent-highlight="1"]');
+  if (!node) return "missing";
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return node.textContent || "";
+})();
+"""
+        )
+        self.assertEqual(selection_result, "beta")
+        live_selection = self.request_live_selection_offsets()
+        self.assertTrue(bool(live_selection.get("hasSelection")))
+        self.assertEqual(live_selection.get("selectedText"), "beta")
+        self.assertEqual(int(live_selection.get("selectionOffsetStart", -1)), start)
+        self.assertEqual(int(live_selection.get("selectionOffsetEnd", -1)), end)
+
     def test_search_marker_positions_track_scrollable_document_offsets(self) -> None:
         self.load_markdown_text("search-marker-positions.md", SEARCH_MARKER_POSITION_TEXT)
         self.window.match_input.setText("UNIQUEHIT")

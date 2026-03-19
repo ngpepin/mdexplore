@@ -39,7 +39,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `assets/ui/`: local UI icon/font assets (tree badges, tab actions, copy pin,
   and search-hit pill font).
 - `assets/js/`: externalized JavaScript templates used by preview/search/PDF flows.
-  - `assets/js/preview/`: preview-search DOM mutation/highlight scripts.
+  - `assets/js/preview/`: preview search/highlight/selection DOM scripts.
   - `assets/js/pdf/`: PDF preflight, DOM normalization, and restore scripts.
 - `vendor/`: vendored local runtime assets (Mermaid JS, MathJax, PlantUML jar,
   and related renderer sources/binaries when bootstrapped).

@@ -11,13 +11,19 @@ class JsAssetTests(unittest.TestCase):
     def test_required_preview_scripts_are_preloaded(self) -> None:
         sources = preload_js_assets(force_reload=True)
         self.assertTrue(JS_ASSET_DIR.is_dir())
+        self.assertIn("preview/apply_persistent_highlights.js", sources)
         self.assertIn("preview/clear_search_highlights.js", sources)
         self.assertIn("preview/highlight_search_terms.js", sources)
+        self.assertIn("preview/live_highlight_target.js", sources)
+        self.assertIn("preview/live_selection_offsets.js", sources)
         self.assertIn("pdf/precheck_layout.js", sources)
         self.assertIn("pdf/preprint_normalize.js", sources)
         self.assertIn("pdf/restore_preview_palette.js", sources)
+        self.assertTrue(sources["preview/apply_persistent_highlights.js"].strip())
         self.assertTrue(sources["preview/clear_search_highlights.js"].strip())
         self.assertTrue(sources["preview/highlight_search_terms.js"].strip())
+        self.assertTrue(sources["preview/live_highlight_target.js"].strip())
+        self.assertTrue(sources["preview/live_selection_offsets.js"].strip())
         self.assertTrue(sources["pdf/precheck_layout.js"].strip())
         self.assertTrue(sources["pdf/preprint_normalize.js"].strip())
         self.assertTrue(sources["pdf/restore_preview_palette.js"].strip())
@@ -38,6 +44,36 @@ class JsAssetTests(unittest.TestCase):
         self.assertNotIn("__SCROLL_BOOL__", rendered)
         self.assertNotIn("__CLOSE_WORD_GAP__", rendered)
         self.assertNotIn("__CLOSE_GROUPS_JSON__", rendered)
+
+    def test_rendered_live_selection_template_has_no_unresolved_placeholders(self) -> None:
+        rendered = render_js_asset(
+            "preview/live_selection_offsets.js",
+            {"__SELECTED_HINT__": json.dumps("Selected text")},
+        )
+        self.assertIn('selectedText = "Selected text";', rendered)
+        self.assertNotIn("__SELECTED_HINT__", rendered)
+
+    def test_rendered_apply_persistent_highlights_template_has_no_unresolved_placeholders(
+        self,
+    ) -> None:
+        rendered = render_js_asset(
+            "preview/apply_persistent_highlights.js",
+            {
+                "__PAYLOAD__": '[{"id":"case1","start":1,"end":5,"kind":"normal"}]',
+                "__COLOR__": json.dumps("rgba(1,2,3,0.4)"),
+                "__IMPORTANT_COLOR__": json.dumps("rgba(4,5,6,0.7)"),
+                "__IMPORTANT_TEXT_COLOR__": json.dumps("#010203"),
+                "__MARKER_COLOR__": json.dumps("rgba(7,8,9,0.8)"),
+                "__IMPORTANT_MARKER_COLOR__": json.dumps("rgba(9,8,7,0.9)"),
+                "__NORMAL_KIND__": "normal",
+                "__IMPORTANT_KIND__": "important",
+            },
+        )
+        self.assertIn('const incoming = [{"id":"case1","start":1,"end":5,"kind":"normal"}];', rendered)
+        self.assertIn('const highlightColor = "rgba(1,2,3,0.4)";', rendered)
+        self.assertIn('const importantHighlightTextColor = "#010203";', rendered)
+        self.assertNotIn("__PAYLOAD__", rendered)
+        self.assertNotIn("__IMPORTANT_KIND__", rendered)
 
     def test_rendered_pdf_precheck_template_has_no_unresolved_placeholders(self) -> None:
         rendered = render_js_asset(
