@@ -1073,6 +1073,95 @@ Intro paragraph.
         self.assertTrue(bool(probe.get("selectionHasHighlightedPart")))
         self.assertFalse(bool(probe.get("selectionHasUnhighlightedPart")))
 
+    def test_large_multiline_selection_prefers_live_offsets_over_cached_partial(self) -> None:
+        doc = """# Multi-line Highlight Fixture
+
+    ```text
+    10) A few packaging ideas for Upwork projects
+    11) You can also package these as fixed-scope offers:
+    12) Specialty Pharmacy Data Architecture Review
+    ```
+    """
+        self.load_markdown_text("multiline-highlight-prefers-live.md", doc)
+
+        selected_text = self.run_js(
+            """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  if (!root) return "";
+    const startNeedle = "10) A few packaging ideas for Upwork projects";
+    const endNeedle = "12) Specialty Pharmacy Data Architecture Review";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+        const startAt = value.indexOf(startNeedle);
+        const endAt = value.indexOf(endNeedle);
+        if (startAt < 0 || endAt < 0 || endAt <= startAt) continue;
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.setStart(node, startAt);
+        range.setEnd(node, endAt + endNeedle.length);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return selection.toString() || "";
+  }
+    return "";
+})();
+"""
+        )
+        self.assertIsInstance(selected_text, str)
+        self.assertIn("A few packaging ideas", selected_text)
+        self.assertIn("Specialty Pharmacy Data Architecture Review", selected_text)
+
+        live_offsets = self.request_live_selection_offsets(selected_text)
+        self.assertTrue(bool(live_offsets.get("hasSelection")))
+        live_start = int(live_offsets["selectionOffsetStart"])
+        live_end = int(live_offsets["selectionOffsetEnd"])
+        self.assertGreater(live_end, live_start)
+
+        lines = doc.splitlines(keepends=True)
+        start_line = next(
+            (i for i, line in enumerate(lines) if "10) A few packaging ideas" in line),
+            0,
+        )
+        end_line = (
+            next(
+                (
+                    i
+                    for i, line in enumerate(lines)
+                    if "12) Specialty Pharmacy Data Architecture Review" in line
+                ),
+                start_line,
+            )
+            + 1
+        )
+
+        # Simulate a stale/partial cached probe result from context-menu timing.
+        partial_info = {
+            "hasSelection": True,
+            "selectedText": "10) A few",
+            "selectionOffsetStart": live_start,
+            "selectionOffsetEnd": live_start + len("10) A few"),
+            "start": start_line,
+            "end": end_line,
+        }
+        self.window._add_persistent_preview_highlight(
+            partial_info,
+            selected_text,
+            kind=mdexplore.PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+        )
+
+        self.wait_until(
+            lambda: bool(self.persistent_highlight_spans()),
+            timeout_ms=6000,
+        )
+        by_id = self.persistent_highlight_text_by_id()
+        self.assertTrue(by_id)
+        joined = " ".join(by_id.values())
+        self.assertIn("A few packaging ideas for Upwork projects", joined)
+        self.assertIn("Specialty Pharmacy Data Architecture Review", joined)
+
     def test_search_marker_positions_track_scrollable_document_offsets(self) -> None:
         self.load_markdown_text("search-marker-positions.md", SEARCH_MARKER_POSITION_TEXT)
         self.window.match_input.setText("UNIQUEHIT")

@@ -5819,6 +5819,31 @@ class MdExploreWindow(QMainWindow):
             return None
         return (start, end)
 
+    def _selection_text_hint_from_line_range(
+        self, path_key: str | None, selection_info
+    ) -> str:
+        """Best-effort text hint reconstructed from probe line-range metadata."""
+        if not path_key or not isinstance(selection_info, dict):
+            return ""
+        start_raw = selection_info.get("start")
+        end_raw = selection_info.get("end")
+        if not isinstance(start_raw, (int, float)) or not isinstance(end_raw, (int, float)):
+            return ""
+        try:
+            lines = Path(path_key).read_text(encoding="utf-8", errors="replace").splitlines(
+                keepends=True
+            )
+        except Exception:
+            return ""
+        if not lines:
+            return ""
+        start = max(0, int(start_raw))
+        end = max(start + 1, int(end_raw))
+        start = min(start, len(lines) - 1)
+        end = min(end, len(lines))
+        snippet = "".join(lines[start:end]).strip()
+        return snippet[:4000] if snippet else ""
+
     def _request_live_preview_selection_offsets(
         self, selected_text_hint: str, callback
     ) -> None:
@@ -6175,6 +6200,21 @@ class MdExploreWindow(QMainWindow):
             raw_selected = selection_info.get("selectedText")
             if isinstance(raw_selected, str):
                 selected_text = raw_selected
+        normalized_selected_text = re.sub(r"\s+", " ", selected_text).strip()
+        normalized_hint_text = re.sub(r"\s+", " ", selected_text_hint or "").strip()
+        best_selected_text = (
+            selected_text_hint
+            if len(normalized_hint_text) > len(normalized_selected_text)
+            else selected_text
+        )
+        line_range_hint = self._selection_text_hint_from_line_range(path_key, selection_info)
+        normalized_line_range_hint = re.sub(r"\s+", " ", line_range_hint).strip()
+        if len(normalized_line_range_hint) > len(
+            re.sub(r"\s+", " ", str(best_selected_text or "")).strip()
+        ):
+            best_selected_text = line_range_hint
+        if not str(best_selected_text or "").strip():
+            best_selected_text = selected_text or selected_text_hint
         self._debug_log(
             "highlight-add start "
             f"path={path_key} cached_offsets={offsets} "
@@ -6182,20 +6222,54 @@ class MdExploreWindow(QMainWindow):
             f"kind={normalized_kind}"
         )
         if offsets is not None:
-            start, end = offsets
-            self._replace_persistent_preview_highlight_range(
-                path_key,
-                start,
-                end,
-                normalized_kind,
-                anchor_text=(selected_text or selected_text_hint),
+            cached_start, cached_end = offsets
+
+            def _apply_live_with_cached_fallback(live_info: dict) -> None:
+                if self._current_preview_path_key() != path_key:
+                    self._debug_log(
+                        "highlight-add live-probe ignored reason=path-changed "
+                        f"expected={path_key} actual={self._current_preview_path_key()}"
+                    )
+                    return
+                live_offsets = self._selection_offsets_from_info(live_info)
+                if live_offsets is not None:
+                    start_live, end_live = live_offsets
+                    self._debug_log(
+                        "highlight-add using-live-offsets "
+                        f"start={start_live} end={end_live} "
+                        f"cached_start={cached_start} cached_end={cached_end}"
+                    )
+                    self._replace_persistent_preview_highlight_range(
+                        path_key,
+                        start_live,
+                        end_live,
+                        normalized_kind,
+                        anchor_text=best_selected_text,
+                    )
+                    return
+
+                self._debug_log(
+                    "highlight-add using-cached-offsets "
+                    f"start={cached_start} end={cached_end}"
+                )
+                self._replace_persistent_preview_highlight_range(
+                    path_key,
+                    cached_start,
+                    cached_end,
+                    normalized_kind,
+                    anchor_text=best_selected_text,
+                )
+
+            self._request_live_preview_selection_offsets(
+                best_selected_text,
+                _apply_live_with_cached_fallback,
             )
             return
-        if not selected_text.strip():
-            selected_text = selected_text_hint
+        if not str(best_selected_text or "").strip():
+            best_selected_text = selected_text_hint
         self._debug_log(
             "highlight-add fallback-live-probe "
-            f"selected_len={len(selected_text)}"
+            f"selected_len={len(str(best_selected_text or ''))}"
         )
 
         def _apply_live_selection(live_info: dict) -> None:
@@ -6223,10 +6297,13 @@ class MdExploreWindow(QMainWindow):
                 start_live,
                 end_live,
                 normalized_kind,
-                anchor_text=(selected_text or selected_text_hint),
+                anchor_text=best_selected_text,
             )
 
-        self._request_live_preview_selection_offsets(selected_text, _apply_live_selection)
+        self._request_live_preview_selection_offsets(
+            str(best_selected_text or ""),
+            _apply_live_selection,
+        )
 
     def _remove_persistent_preview_highlight(
         self, selection_info, selected_text_hint: str = ""

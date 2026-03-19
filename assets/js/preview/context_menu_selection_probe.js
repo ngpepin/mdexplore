@@ -182,10 +182,24 @@
     return out;
   }
 
+  function compactSearchIndex(value) {
+    const source = typeof value === "string" ? value : "";
+    let compact = "";
+    const map = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (/\s/.test(ch)) continue;
+      compact += ch;
+      map.push(index);
+    }
+    return { text: compact, map };
+  }
+
   function nearestTextOffsets(selected, clickX, clickY) {
     if (!selected || !selected.length) return null;
     const haystack = rootTextContent();
     if (!haystack.length) return null;
+    const compactHaystack = compactSearchIndex(haystack);
     const candidates = [];
     const collapsed = selected.replace(/\s+/g, " ").trim();
     if (collapsed) candidates.push(collapsed);
@@ -193,6 +207,8 @@
     if (trimmed && !candidates.includes(trimmed)) candidates.push(trimmed);
     const noCR = selected.replace(/\r/g, "");
     if (noCR && !candidates.includes(noCR)) candidates.push(noCR);
+    const compact = selected.replace(/\s+/g, "");
+    if (compact && !candidates.includes(compact)) candidates.push(compact);
     if (selected && !candidates.includes(selected)) candidates.push(selected);
 
     const clickOffset = clickTextOffset(clickX, clickY);
@@ -205,6 +221,26 @@
           best = { start: idx, end: idx + candidate.length, score };
         }
         idx = haystack.indexOf(candidate, idx + Math.max(1, candidate.length));
+      }
+
+      const compactCandidate = candidate.replace(/\s+/g, "");
+      if (!compactCandidate) continue;
+      let compactIdx = compactHaystack.text.indexOf(compactCandidate);
+      while (compactIdx >= 0) {
+        const rawStart = compactHaystack.map[compactIdx];
+        const rawEnd =
+          compactHaystack.map[compactIdx + compactCandidate.length - 1] + 1;
+        if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+          break;
+        }
+        const score = clickOffset === null ? 0 : Math.abs(rawStart - clickOffset);
+        if (!best || score < best.score) {
+          best = { start: rawStart, end: rawEnd, score };
+        }
+        compactIdx = compactHaystack.text.indexOf(
+          compactCandidate,
+          compactIdx + Math.max(1, compactCandidate.length)
+        );
       }
     }
     if (!best) return null;
