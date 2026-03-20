@@ -33,6 +33,25 @@ Notes:
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
     - --pdf/-p includes searchable text extracted from PDF files.
+
+Examples:
+    # Filename-only search (default): stem contains fred OR paul
+    hfind.py --query "OR(fred, paul)" *.txt
+
+    # Recursive content search with stacked flags
+    hfind.py -cr "AND(product, roadmap)" "docs/*.md"
+
+    # NEAR is strict (terms must be within 50 words)
+    hfind.py -cv "NEAR(nicolas,pepin)" "notes/*.md"
+
+    # Exclude files mentioning john
+    hfind.py -rc "NOT(john)" "archive/*.md"
+
+    # Single-space boundary intent in quoted terms
+    hfind.py -cv "'Nico '" "people/*.md"
+
+    # Include PDF text extraction
+    hfind.py -rcvp "the" "library/*.pdf"
 """
 
 
