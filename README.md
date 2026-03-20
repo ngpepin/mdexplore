@@ -170,6 +170,64 @@ python3 /path/to/mdexplore/mdexplore.py [--mermaid-backend js|rust] [PATH]
 
 If `PATH` is omitted for direct run, the same config/home default rule applies.
 
+### hfind CLI
+
+`hfind` reuses mdexplore search syntax (AND/OR/NOT, quoted terms, `NEAR(...)`) for file discovery.
+
+Run via wrapper:
+
+```bash
+./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] PATTERN [PATTERN ...]
+```
+
+Run via Python directly:
+
+```bash
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] PATTERN [PATTERN ...]
+```
+
+Notes:
+
+- `--content` / `-c` is optional (default is filename-only search).
+- `--recursive` / `-r` is optional.
+- Short flags are stackable in any order (for example `-cr`, `-rc`).
+- If `-q` / `--query` is omitted, the first positional string is treated as the query.
+- Filename-only mode checks filename stem only (no extension, no path).
+
+Examples:
+
+```bash
+./hfind.sh --query "OR(fred, paul)" --content --recursive *.txt
+```
+
+Recursively searches from current directory for readable `.txt` files whose filename stem or content contains (case-insensitive) `fred` or `paul`.
+
+```bash
+./hfind.sh -q "OR(fred, paul)" -cr *.txt
+./hfind.sh -cr "OR(fred, paul)" *.txt
+./hfind.sh --recursive -c "OR(fred, paul)" *.txt
+```
+
+All above are valid shorthand forms.
+
+```bash
+./hfind.sh --query "OR(fred, paul)" *.txt
+```
+
+Searches filename stems only (current directory, non-recursive).
+
+```bash
+./hfind.sh -q "AND('Fred',paul)" /path/to/directory/*.md
+```
+
+Searches markdown filename stems in `/path/to/directory/` (non-recursive) where query requires case-sensitive `Fred` and case-insensitive `paul`.
+
+```bash
+./hfind.sh -rc "NEAR(\"Fred is my friend\", \"is a nice guy\")" "/path/to my/directory/*.md"
+```
+
+Uses escaped double quotes inside a `NEAR(...)` query while recursively searching matching markdown files.
+
 ### Full Bootstrap Script
 
 ```bash
