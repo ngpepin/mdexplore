@@ -19,10 +19,12 @@ def _create_pdf_with_text(path: Path, text: str) -> None:
 
 class HfindCliTests(unittest.TestCase):
     ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+    OSC8_ESCAPE_RE = re.compile(r"\x1b\]8;;[^\x1b\x07]*(?:\x1b\\|\x07)")
 
     @classmethod
     def _strip_ansi(cls, text: str) -> str:
-        return cls.ANSI_ESCAPE_RE.sub("", text)
+        cleaned = cls.OSC8_ESCAPE_RE.sub("", text)
+        return cls.ANSI_ESCAPE_RE.sub("", cleaned)
 
     def _run_main(self, args: list[str]) -> tuple[int, list[str]]:
         stream = io.StringIO()
@@ -202,8 +204,23 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(self._strip_ansi(lines[0]), str(source))
-            self.assertTrue(lines[0].startswith("\x1b[1;35m"))
-            self.assertTrue(lines[0].endswith("\x1b[0m"))
+            self.assertIn("\x1b[1;35m", lines[0])
+            self.assertIn("\x1b[0m", lines[0])
+
+    def test_filepath_hyperlink_uri_encodes_spaces(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-path-space-") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "demo file.txt"
+            source.write_text("hello\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "demo",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertIn("%20", lines[0])
+            self.assertEqual(self._strip_ansi(lines[0]), str(source))
 
     def test_verbose_near_is_strict_to_near_windows(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-near-strict-") as tmpdir:

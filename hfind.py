@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import quote
 
 from mdexplore_app import search as search_query
 
@@ -38,11 +39,25 @@ Notes:
 ANSI_YELLOW = "\033[33m"
 ANSI_BOLD_PURPLE = "\033[1;35m"
 ANSI_RESET = "\033[0m"
+OSC8_OPEN = "\033]8;;"
+OSC8_CLOSE = "\a"
 _BINARY_SAMPLE_BYTES = 8192
 
 
 def _style_filepath(path: Path) -> str:
-    return f"{ANSI_BOLD_PURPLE}{path}{ANSI_RESET}"
+    label = str(path)
+    try:
+        resolved = path.resolve()
+        uri = "file://" + quote(str(resolved), safe="/:-._~")
+    except Exception:
+        uri = ""
+    if not uri:
+        return f"{ANSI_BOLD_PURPLE}{label}{ANSI_RESET}"
+    return (
+        f"{OSC8_OPEN}{uri}{OSC8_CLOSE}"
+        f"{ANSI_BOLD_PURPLE}{label}{ANSI_RESET}"
+        f"{OSC8_OPEN}{OSC8_CLOSE}"
+    )
 
 
 def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]]:
