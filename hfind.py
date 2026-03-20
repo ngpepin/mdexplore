@@ -22,17 +22,18 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] PATTERN [PATTERN ...]
-    hfind.py -q QUERY [-c] [-r] [-v] [-p] PATTERN [PATTERN ...]
-    hfind.py -crvp QUERY PATTERN [PATTERN ...]
+    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] [PATTERN ...]
+    hfind.py -q QUERY [-c] [-r] [-v] [-p] [PATTERN ...]
+    hfind.py -crvp QUERY [PATTERN ...]
 
 Notes:
   - If -q/--query is omitted, the first positional argument is used as QUERY.
+    - If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
   - Default search checks filename stem only (no extension, no path).
   - --content/-c includes file contents in matching.
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
-    - --pdf/-p includes searchable text extracted from PDF files.
+    - --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
 
 Examples:
     # Filename-only search (default): stem contains fred OR paul
@@ -156,7 +157,7 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]
         query = positionals.pop(0)
 
     if not positionals:
-        raise _usage_error("error: missing file pattern(s)")
+        positionals = ["**/*" if recursive else "*"]
 
     return query, include_content, recursive, verbose, include_pdf, positionals
 
@@ -180,12 +181,12 @@ def _pdf_pattern_variants(pattern: str) -> list[str]:
     return [pattern, f"{base}.[pP][dD][fF]"]
 
 
-def _expand_patterns(patterns: list[str], recursive: bool, include_pdf: bool) -> list[Path]:
+def _expand_patterns(patterns: list[str], recursive: bool) -> list[Path]:
     seen: set[str] = set()
     out: list[Path] = []
 
     for raw in patterns:
-        raw_patterns = _pdf_pattern_variants(raw) if include_pdf else [raw]
+        raw_patterns = _pdf_pattern_variants(raw)
         expanded: list[str] = []
 
         for raw_pattern in raw_patterns:
@@ -479,25 +480,29 @@ def main(argv: list[str]) -> int:
         query, include_content, recursive, verbose, include_pdf, patterns = _parse_args(argv)
         predicate = search_query.compile_match_predicate(query)
 
-        candidates = _expand_patterns(patterns, recursive, include_pdf)
+        if include_pdf and not include_content:
+            print("note: --pdf has no effect unless --content/-c is set", file=sys.stderr)
+
+        candidates = _expand_patterns(patterns, recursive)
         match_count = 0
 
         for path in candidates:
             is_pdf = path.suffix.lower() == ".pdf"
-            if is_pdf and not include_pdf:
-                continue
-            if not is_pdf and _is_clearly_binary_file(path):
-                continue
             stem = path.stem
             content = ""
-            if is_pdf and include_pdf:
-                text = _read_pdf_text_if_possible(path)
-                content = text or ""
-            elif include_content or verbose:
-                text = _read_text_if_possible(path)
-                if text is None:
-                    continue
-                content = text
+
+            if include_content:
+                if is_pdf:
+                    if include_pdf:
+                        text = _read_pdf_text_if_possible(path)
+                        content = text or ""
+                else:
+                    if _is_clearly_binary_file(path):
+                        continue
+                    text = _read_text_if_possible(path)
+                    if text is None:
+                        continue
+                    content = text
             try:
                 if predicate(stem, content):
                     match_count += 1

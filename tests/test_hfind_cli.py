@@ -138,6 +138,50 @@ class HfindCliTests(unittest.TestCase):
         self.assertIn("error: --query requires a value", str(raised.exception))
         self.assertIn("Usage:", str(raised.exception))
 
+    def test_missing_pattern_defaults_to_current_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-default-pattern-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "john.md").write_text("x\n", encoding="utf-8")
+            (root / "sarah.md").write_text("x\n", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "john_nested.md").write_text("x\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code, lines = self._run_main([
+                    "john",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            stripped = [self._strip_ansi(line) for line in lines]
+            self.assertEqual(stripped, ["john.md"])
+
+    def test_missing_pattern_defaults_recursive_with_r(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-default-pattern-r-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "john.md").write_text("x\n", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "john_nested.md").write_text("x\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code, lines = self._run_main([
+                    "-r",
+                    "john",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            stripped = [self._strip_ansi(line) for line in lines]
+            self.assertEqual(stripped, ["john.md", str(Path("nested") / "john_nested.md")])
+
     def test_verbose_lists_matching_lines_with_highlights(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-verbose-lines-") as tmpdir:
             root = Path(tmpdir)
@@ -150,7 +194,7 @@ class HfindCliTests(unittest.TestCase):
             )
 
             code, lines = self._run_main([
-                "-v",
+                "-cv",
                 "pipelines",
                 str(root / "*.md"),
             ])
@@ -289,7 +333,7 @@ class HfindCliTests(unittest.TestCase):
             self.assertTrue(self._strip_ansi(lines[2]).startswith("2: "))
             self.assertTrue(self._strip_ansi(lines[3]).startswith("3: "))
 
-    def test_ignores_clearly_binary_files_even_on_filename_match(self) -> None:
+    def test_binary_files_are_not_skipped_in_filename_only_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-binary-skip-") as tmpdir:
             root = Path(tmpdir)
             text_file = root / "pepin-notes.txt"
@@ -301,6 +345,27 @@ class HfindCliTests(unittest.TestCase):
             )
 
             code, lines = self._run_main([
+                "pepin",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(binary_file), str(text_file)],
+            )
+
+    def test_binary_files_are_skipped_when_content_mode_enabled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-binary-content-") as tmpdir:
+            root = Path(tmpdir)
+            text_file = root / "notes.txt"
+            text_file.write_text("contains pepin\n", encoding="utf-8")
+
+            binary_file = root / "blob.bin"
+            binary_file.write_bytes(b"\x00\x01\x02\x03" + bytes(range(255, 200, -1)) * 64)
+
+            code, lines = self._run_main([
+                "-c",
                 "pepin",
                 str(root / "*"),
             ])
@@ -329,7 +394,7 @@ class HfindCliTests(unittest.TestCase):
             _create_pdf_with_text(pdf_path, "Nicolas Pepin")
 
             code, lines = self._run_main([
-                "-p",
+                "-cp",
                 "pepin",
                 str(root / "*.pdf"),
             ])
@@ -344,7 +409,7 @@ class HfindCliTests(unittest.TestCase):
             _create_pdf_with_text(pdf_path, "contains the keyword")
 
             code, lines = self._run_main([
-                "-p",
+                "-cp",
                 "the",
                 str(root / "*.pdf"),
             ])
@@ -362,7 +427,7 @@ class HfindCliTests(unittest.TestCase):
             hfind._read_pdf_text_if_possible = lambda _path: ""
             try:
                 code, lines = self._run_main([
-                    "-p",
+                    "-cp",
                     "the",
                     str(root / "*.pdf"),
                 ])
