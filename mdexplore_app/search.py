@@ -13,6 +13,9 @@ NearTermGroup = list[SearchTerm]
 NearFocusWindow = dict[str, object]
 
 
+_TERM_BOUNDARY_CLASS = r"[^\w]"
+
+
 def tokenize_match_query(query: str) -> list[SearchToken]:
     """Tokenize query supporting operators plus single/double-quoted terms."""
     tokens: list[SearchToken] = []
@@ -156,15 +159,64 @@ def should_use_near_word_boundaries(term_text: str) -> bool:
     )
 
 
+def compile_term_pattern(
+    term_text: str,
+    is_case_sensitive: bool,
+    *,
+    enforce_word_boundaries: bool = False,
+) -> re.Pattern[str]:
+    """Compile TERM/NEAR regex with optional boundary-aware space handling.
+
+    Leading/trailing spaces in the query are treated as boundary intent.
+    For example, `"Nico "` can match `"Nico."` or `"Nico\n"`.
+    """
+    text = term_text or ""
+    leading_space_count = len(text) - len(text.lstrip(" "))
+    trailing_space_count = len(text) - len(text.rstrip(" "))
+
+    use_leading_boundary_space = leading_space_count == 1
+    use_trailing_boundary_space = trailing_space_count == 1
+
+    if use_leading_boundary_space or use_trailing_boundary_space:
+        left_trim = 1 if use_leading_boundary_space else 0
+        right_trim = 1 if use_trailing_boundary_space else 0
+        core = text[left_trim : len(text) - right_trim if right_trim else len(text)]
+    else:
+        core = text
+
+    if core:
+        escaped = re.escape(core)
+    else:
+        escaped = re.escape(text)
+        use_leading_boundary_space = False
+        use_trailing_boundary_space = False
+
+    if use_leading_boundary_space:
+        escaped = rf"(?:^|(?<={_TERM_BOUNDARY_CLASS})){escaped}"
+    if use_trailing_boundary_space:
+        escaped = rf"{escaped}(?=$|(?={_TERM_BOUNDARY_CLASS}))"
+
+    if (
+        enforce_word_boundaries
+        and not use_leading_boundary_space
+        and not use_trailing_boundary_space
+        and should_use_near_word_boundaries(core)
+    ):
+        escaped = rf"(?<!\w){escaped}(?!\w)"
+
+    flags = 0 if is_case_sensitive else re.IGNORECASE
+    return re.compile(escaped, flags)
+
+
 def compile_near_term_pattern(
     term_text: str, is_case_sensitive: bool
 ) -> re.Pattern[str]:
     """Compile one NEAR() term matcher, adding word boundaries when needed."""
-    escaped = re.escape(term_text)
-    if should_use_near_word_boundaries(term_text):
-        escaped = rf"(?<!\w){escaped}(?!\w)"
-    flags = 0 if is_case_sensitive else re.IGNORECASE
-    return re.compile(escaped, flags)
+    return compile_term_pattern(
+        term_text,
+        is_case_sensitive,
+        enforce_word_boundaries=True,
+    )
 
 
 def collect_near_focus_windows(
@@ -356,11 +408,11 @@ def count_highlighted_term_ranges(
     for term_text, is_case_sensitive in terms:
         if not term_text.strip():
             continue
-        if enforce_near_boundaries and should_use_near_word_boundaries(term_text):
-            pattern = compile_near_term_pattern(term_text, bool(is_case_sensitive))
-        else:
-            flags = 0 if is_case_sensitive else re.IGNORECASE
-            pattern = re.compile(re.escape(term_text), flags)
+        pattern = compile_term_pattern(
+            term_text,
+            bool(is_case_sensitive),
+            enforce_word_boundaries=bool(enforce_near_boundaries),
+        )
         for match in pattern.finditer(content):
             start, end = match.span()
             if near_focus_range is not None:
@@ -403,8 +455,9 @@ def compile_match_hit_counter(query: str):
         if key in seen:
             continue
         seen.add(key)
-        flags = 0 if is_case_sensitive else re.IGNORECASE
-        compiled_patterns.append(re.compile(re.escape(token_value), flags))
+        compiled_patterns.append(
+            compile_term_pattern(token_value, bool(is_case_sensitive))
+        )
 
     if not compiled_patterns:
         return lambda _name, _content: 0
@@ -424,26 +477,24 @@ def compile_match_hit_counter(query: str):
 def _compile_simple_match_predicate(tokens: list[SearchToken]):
     """Fallback matcher: all terms must appear in filename or content."""
     terms = [
-        (value, is_case_sensitive)
+        (value, bool(is_case_sensitive))
         for token_type, value, is_case_sensitive in tokens
         if token_type == "TERM" and value.strip()
     ]
     if not terms:
         return lambda _file_name, _file_content: True
 
+    compiled_terms = [
+        compile_term_pattern(term_text, is_case_sensitive)
+        for term_text, is_case_sensitive in terms
+    ]
+
     def predicate(file_name: str, file_content: str) -> bool:
         name_text = file_name or ""
         content_text = file_content or ""
-        name_folded = name_text.casefold()
-        content_folded = content_text.casefold()
-        for term_text, is_case_sensitive in terms:
-            if is_case_sensitive:
-                if term_text not in name_text and term_text not in content_text:
-                    return False
-            else:
-                folded = term_text.casefold()
-                if folded not in name_folded and folded not in content_folded:
-                    return False
+        for pattern in compiled_terms:
+            if not pattern.search(name_text) and not pattern.search(content_text):
+                return False
         return True
 
     return predicate
@@ -640,10 +691,8 @@ def compile_match_predicate(query: str):
     ) -> bool:
         if not term:
             return False
-        if is_case_sensitive:
-            return term in file_name or term in file_content
-        term_folded = term.casefold()
-        return term_folded in file_name_folded or term_folded in file_content_folded
+        pattern = compile_term_pattern(term, is_case_sensitive)
+        return bool(pattern.search(file_name) or pattern.search(file_content))
 
     def near_terms_match(terms: list[SearchTerm], file_content: str) -> bool:
         return best_near_focus_window(file_content or "", [terms]) is not None

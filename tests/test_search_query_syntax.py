@@ -91,6 +91,35 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         self.assertTrue(predicate("example.md", "the quick brown fox"))
         self.assertFalse(predicate("example.md", "There is no trailing separator"))
 
+    def test_trailing_space_term_matches_punctuation_or_newline_boundary(self) -> None:
+        predicate = self.window._compile_match_predicate("'Nico '")
+        self.assertTrue(predicate("example.md", "Nico."))
+        self.assertTrue(predicate("example.md", "Nico)"))
+        self.assertTrue(predicate("example.md", "his name is Nico; which is a nickname"))
+        self.assertTrue(predicate("example.md", "his name is Nico\n"))
+        self.assertFalse(predicate("example.md", "Nicolai"))
+
+    def test_leading_and_trailing_space_term_matches_wrapping_boundaries(self) -> None:
+        predicate = self.window._compile_match_predicate("' Nico '")
+        self.assertTrue(predicate("example.md", "\nNico\n"))
+        self.assertTrue(predicate("example.md", "His name is Nico."))
+        self.assertFalse(predicate("example.md", "Nicolas"))
+
+    def test_near_with_space_bounded_term_accepts_punctuation_boundary(self) -> None:
+        predicate = self.window._compile_match_predicate("NEAR(' Nico ', pepin)")
+        self.assertTrue(predicate("example.md", "Nico.\nThis is close to pepin"))
+        self.assertFalse(predicate("example.md", "Nicolas\nThis is close to pepin"))
+
+    def test_double_leading_space_requires_literal_double_space(self) -> None:
+        predicate = self.window._compile_match_predicate("'  Nico'")
+        self.assertTrue(predicate("example.md", "  Nico appears"))
+        self.assertFalse(predicate("example.md", "\nNico appears"))
+
+    def test_double_trailing_space_requires_literal_double_space(self) -> None:
+        predicate = self.window._compile_match_predicate("'Nico  '")
+        self.assertTrue(predicate("example.md", "Nico  appears"))
+        self.assertFalse(predicate("example.md", "Nico. appears"))
+
     def test_near_query_respects_mixed_case_modes(self) -> None:
         predicate = self.window._compile_match_predicate(
             """NEAR('Exact Case' "other phrase")"""

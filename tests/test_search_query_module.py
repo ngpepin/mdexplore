@@ -52,6 +52,17 @@ class SearchQueryModuleTests(unittest.TestCase):
             [[("The ", True), ("quick brown", False)]],
         )
 
+    def test_compile_term_pattern_single_space_uses_boundary_mode(self) -> None:
+        pattern = search_query.compile_term_pattern("Nico ", True)
+        self.assertIsNotNone(pattern.search("Nico."))
+        self.assertIsNotNone(pattern.search("Nico)"))
+        self.assertIsNotNone(pattern.search("Nico\n"))
+
+    def test_compile_term_pattern_double_space_remains_literal(self) -> None:
+        pattern = search_query.compile_term_pattern("  Nico", True)
+        self.assertIsNotNone(pattern.search("  Nico"))
+        self.assertIsNone(pattern.search("\nNico"))
+
     def test_compile_match_predicate_falls_back_on_invalid_boolean_query(self) -> None:
         predicate = search_query.compile_match_predicate("alpha OR")
         self.assertTrue(predicate("example.md", "alpha appears here"))

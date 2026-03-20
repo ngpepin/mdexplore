@@ -60,6 +60,43 @@
     return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
+  function buildTermPattern(termText, caseSensitive, enforceWordBoundaries = false) {
+    const raw = String(termText || "");
+    const leadingSpaceMatch = raw.match(/^ +/);
+    const trailingSpaceMatch = raw.match(/ +$/);
+    const leadingSpaceCount = leadingSpaceMatch ? leadingSpaceMatch[0].length : 0;
+    const trailingSpaceCount = trailingSpaceMatch ? trailingSpaceMatch[0].length : 0;
+    const useLeadingBoundarySpace = leadingSpaceCount === 1;
+    const useTrailingBoundarySpace = trailingSpaceCount === 1;
+
+    const leftTrim = useLeadingBoundarySpace ? 1 : 0;
+    const rightTrim = useTrailingBoundarySpace ? 1 : 0;
+    const core =
+      useLeadingBoundarySpace || useTrailingBoundarySpace
+        ? raw.slice(leftTrim, rightTrim ? raw.length - rightTrim : raw.length)
+        : raw;
+
+    let source = escapeRegExp(core || raw);
+    const canUseBoundarySpaceMode = !!core;
+
+    if (canUseBoundarySpaceMode && useLeadingBoundarySpace) {
+      source = `(?:^|(?<=[^\\w]))${source}`;
+    }
+    if (canUseBoundarySpaceMode && useTrailingBoundarySpace) {
+      source = `${source}(?=$|(?=[^\\w]))`;
+    }
+    if (
+      enforceWordBoundaries &&
+      !useLeadingBoundarySpace &&
+      !useTrailingBoundarySpace &&
+      shouldUseCloseWordBoundaries(core)
+    ) {
+      source = `(?<!\\w)${source}(?!\\w)`;
+    }
+
+    return new RegExp(source, caseSensitive ? "g" : "gi");
+  }
+
   function upperBound(values, target) {
     let lo = 0;
     let hi = values.length;
@@ -160,13 +197,6 @@
     return typeof termText === "string" && !!termText && !/\s/.test(termText) && /^\w+$/u.test(termText);
   }
 
-  function isWordCharAt(text, index) {
-    if (index < 0 || index >= text.length) {
-      return false;
-    }
-    return /\w/u.test(text.charAt(index));
-  }
-
   const normalizedTerms = normalizeTerms(terms);
   const normalizedCloseGroups = normalizeNearGroups(nearTermGroups);
   const closeFocusWindows = [];
@@ -190,25 +220,16 @@
 
         for (let termIndex = 0; termIndex < group.length; termIndex += 1) {
           const termInfo = group[termIndex];
-          const enforceWordBoundaries = shouldUseCloseWordBoundaries(termInfo.text);
-          const pattern = new RegExp(
-            escapeRegExp(termInfo.text),
-            termInfo.caseSensitive ? "g" : "gi"
+          const pattern = buildTermPattern(
+            termInfo.text,
+            termInfo.caseSensitive,
+            true
           );
           let m = null;
           while ((m = pattern.exec(fullText)) !== null) {
             const startChar = m.index;
             const endChar = startChar + m[0].length;
             if (startChar < minStartChar) {
-              if (pattern.lastIndex <= startChar) {
-                pattern.lastIndex = startChar + 1;
-              }
-              continue;
-            }
-            if (
-              enforceWordBoundaries &&
-              (isWordCharAt(fullText, startChar - 1) || isWordCharAt(fullText, endChar))
-            ) {
               if (pattern.lastIndex <= startChar) {
                 pattern.lastIndex = startChar + 1;
               }
@@ -384,25 +405,15 @@
     const rawText = termInfo && typeof termInfo.text === "string" ? termInfo.text : "";
     const termText = rawText;
     if (!termText.trim()) return;
-    const enforceWordBoundaries = !!focusWindow && shouldUseCloseWordBoundaries(termText);
-    const pattern = new RegExp(
-      escapeRegExp(termText),
-      termInfo.caseSensitive ? "g" : "gi"
+    const pattern = buildTermPattern(
+      termText,
+      termInfo.caseSensitive,
+      !!focusWindow
     );
     let m = null;
     while ((m = pattern.exec(segment.text)) !== null) {
       const localStart = m.index;
       const localEnd = localStart + m[0].length;
-      if (
-        enforceWordBoundaries &&
-        ((localStart > 0 && /\w/u.test(segment.text.charAt(localStart - 1))) ||
-          (localEnd < segment.text.length && /\w/u.test(segment.text.charAt(localEnd))))
-      ) {
-        if (pattern.lastIndex <= localStart) {
-          pattern.lastIndex = localStart + 1;
-        }
-        continue;
-      }
       const absoluteStart = segment.start + localStart;
       const absoluteEnd = segment.start + localEnd;
       if (focusWindow) {

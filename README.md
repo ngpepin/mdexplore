@@ -177,19 +177,20 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] PATTERN [PATTERN ...]
 ```
 
 Notes:
 
 - `--content` / `-c` is optional (default is filename-only search).
 - `--recursive` / `-r` is optional.
+- `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - Short flags are stackable in any order (for example `-cr`, `-rc`).
 - If `-q` / `--query` is omitted, the first positional string is treated as the query.
 - Filename-only mode checks filename stem only (no extension, no path).
@@ -206,6 +207,7 @@ Recursively searches from current directory for readable `.txt` files whose file
 ./hfind.sh -q "OR(fred, paul)" -cr *.txt
 ./hfind.sh -cr "OR(fred, paul)" *.txt
 ./hfind.sh --recursive -c "OR(fred, paul)" *.txt
+./hfind.sh -crv "OR(fred, paul)" *.txt
 ```
 
 All above are valid shorthand forms.
@@ -227,6 +229,12 @@ Searches markdown filename stems in `/path/to/directory/` (non-recursive) where 
 ```
 
 Uses escaped double quotes inside a `NEAR(...)` query while recursively searching matching markdown files.
+
+```bash
+./hfind.sh -crv "NEAR(alpha,beta)" "./**/*.md"
+```
+
+For each matching file, prints matching line numbers and highlights the triggering terms in yellow. For `NEAR(...)`, this may include multiple nearby lines so both terms are visible.
 
 ### Full Bootstrap Script
 
