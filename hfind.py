@@ -13,15 +13,17 @@ import glob
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 
 from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--content] [--recursive] [--verbose] PATTERN [PATTERN ...]
-    hfind.py -q QUERY [-c] [-r] [-v] PATTERN [PATTERN ...]
-    hfind.py -crv QUERY PATTERN [PATTERN ...]
+    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] PATTERN [PATTERN ...]
+    hfind.py -q QUERY [-c] [-r] [-v] [-p] PATTERN [PATTERN ...]
+    hfind.py -crvp QUERY PATTERN [PATTERN ...]
 
 Notes:
   - If -q/--query is omitted, the first positional argument is used as QUERY.
@@ -29,19 +31,21 @@ Notes:
   - --content/-c includes file contents in matching.
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
+    - --pdf/-p includes searchable text extracted from PDF files.
 """
 
 
 ANSI_YELLOW = "\033[33m"
-ANSI_BOLD_GREEN = "\033[1;32m"
+ANSI_BOLD_PURPLE = "\033[1;35m"
 ANSI_RESET = "\033[0m"
+_BINARY_SAMPLE_BYTES = 8192
 
 
 def _style_filepath(path: Path) -> str:
-    return f"{ANSI_BOLD_GREEN}{path}{ANSI_RESET}"
+    return f"{ANSI_BOLD_PURPLE}{path}{ANSI_RESET}"
 
 
-def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, list[str]]:
+def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
 
@@ -49,6 +53,7 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, list[str]]:
     include_content = False
     recursive = False
     verbose = False
+    include_pdf = False
     positionals: list[str] = []
 
     i = 0
@@ -78,6 +83,10 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, list[str]]:
             verbose = True
             i += 1
             continue
+        if arg == "--pdf":
+            include_pdf = True
+            i += 1
+            continue
         if arg.startswith("-") and arg != "-":
             # Allow stacked short flags, e.g. -cr
             consumed_query = False
@@ -90,6 +99,9 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, list[str]]:
                     continue
                 if flag == "v":
                     verbose = True
+                    continue
+                if flag == "p":
+                    include_pdf = True
                     continue
                 if flag == "q":
                     if i + 1 >= len(argv):
@@ -112,7 +124,7 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, list[str]]:
     if not positionals:
         raise _usage_error("error: missing file pattern(s)")
 
-    return query, include_content, recursive, verbose, positionals
+    return query, include_content, recursive, verbose, include_pdf, positionals
 
 
 def _recursive_pattern(pattern: str) -> str:
@@ -125,17 +137,30 @@ def _recursive_pattern(pattern: str) -> str:
     return os.path.join(parent, "**", leaf)
 
 
-def _expand_patterns(patterns: list[str], recursive: bool) -> list[Path]:
+def _pdf_pattern_variants(pattern: str) -> list[str]:
+    """Return glob variants for case-insensitive PDF extension matching."""
+    if not pattern.lower().endswith(".pdf"):
+        return [pattern]
+    # Keep original first, then add extension-class variant for Linux globbing.
+    base = pattern[:-4]
+    return [pattern, f"{base}.[pP][dD][fF]"]
+
+
+def _expand_patterns(patterns: list[str], recursive: bool, include_pdf: bool) -> list[Path]:
     seen: set[str] = set()
     out: list[Path] = []
 
     for raw in patterns:
-        if recursive:
-            expanded = glob.glob(_recursive_pattern(raw), recursive=True)
-            if not expanded:
-                expanded = glob.glob(raw, recursive=True)
-        else:
-            expanded = glob.glob(raw, recursive=False)
+        raw_patterns = _pdf_pattern_variants(raw) if include_pdf else [raw]
+        expanded: list[str] = []
+
+        for raw_pattern in raw_patterns:
+            if recursive:
+                expanded.extend(glob.glob(_recursive_pattern(raw_pattern), recursive=True))
+                if not expanded:
+                    expanded.extend(glob.glob(raw_pattern, recursive=True))
+            else:
+                expanded.extend(glob.glob(raw_pattern, recursive=False))
 
         # If shell already expanded the pattern into explicit file args,
         # preserve them as literals too.
@@ -160,6 +185,68 @@ def _read_text_if_possible(path: Path) -> str | None:
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None
+
+
+def _read_pdf_text_if_possible(path: Path) -> str | None:
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        PdfReader = None  # type: ignore[assignment]
+
+    if PdfReader is not None:
+        try:
+            reader = PdfReader(str(path), strict=False)
+            pages: list[str] = []
+            for page in reader.pages:
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception:
+                    page_text = ""
+                pages.append(page_text)
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted
+        except Exception:
+            pass
+
+    # Fallback: poppler's pdftotext can decode some PDFs pypdf cannot.
+    pdftotext_cmd = shutil.which("pdftotext")
+    if pdftotext_cmd:
+        try:
+            result = subprocess.run(
+                [pdftotext_cmd, "-q", "-layout", str(path), "-"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout
+        except Exception:
+            pass
+
+    # Keep file eligible for filename matching even if content extraction fails.
+    return ""
+
+
+def _is_clearly_binary_file(path: Path) -> bool:
+    """Return whether a file appears to be binary from an initial byte sample."""
+    try:
+        with path.open("rb") as stream:
+            sample = stream.read(_BINARY_SAMPLE_BYTES)
+    except Exception:
+        return False
+
+    if not sample:
+        return False
+
+    # NUL bytes are a strong binary signal.
+    if b"\x00" in sample:
+        return True
+
+    text_like = set(b"\n\r\t\f\b") | set(range(32, 127))
+    non_text_count = sum(1 for byte in sample if byte not in text_like)
+    return (non_text_count / len(sample)) > 0.30
 
 
 def _line_spans(content: str) -> list[tuple[int, int, str]]:
@@ -354,39 +441,44 @@ def _print_verbose_result(path: Path, content: str, query: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    query, include_content, recursive, verbose, patterns = _parse_args(argv)
-    predicate = search_query.compile_match_predicate(query)
+    try:
+        query, include_content, recursive, verbose, include_pdf, patterns = _parse_args(argv)
+        predicate = search_query.compile_match_predicate(query)
 
-    candidates = _expand_patterns(patterns, recursive)
-    matches: list[Path] = []
+        candidates = _expand_patterns(patterns, recursive, include_pdf)
+        match_count = 0
 
-    match_contents: dict[str, str] = {}
-
-    for path in candidates:
-        stem = path.stem
-        content = ""
-        if include_content or verbose:
-            text = _read_text_if_possible(path)
-            if text is None:
+        for path in candidates:
+            is_pdf = path.suffix.lower() == ".pdf"
+            if is_pdf and not include_pdf:
                 continue
-            content = text
-        try:
-            if predicate(stem, content):
-                matches.append(path)
-                if verbose:
-                    match_contents[str(path)] = content
-        except Exception:
-            # Keep search resilient across odd parser/runtime edge cases.
-            continue
+            if not is_pdf and _is_clearly_binary_file(path):
+                continue
+            stem = path.stem
+            content = ""
+            if is_pdf and include_pdf:
+                text = _read_pdf_text_if_possible(path)
+                content = text or ""
+            elif include_content or verbose:
+                text = _read_text_if_possible(path)
+                if text is None:
+                    continue
+                content = text
+            try:
+                if predicate(stem, content):
+                    match_count += 1
+                    if verbose:
+                        _print_verbose_result(path, content, query)
+                    else:
+                        print(_style_filepath(path))
+            except Exception:
+                # Keep search resilient across odd parser/runtime edge cases.
+                continue
 
-    if verbose:
-        for path in matches:
-            _print_verbose_result(path, match_contents.get(str(path), ""), query)
-    else:
-        for path in matches:
-            print(_style_filepath(path))
-
-    return 0 if matches else 1
+        return 0 if match_count else 1
+    except KeyboardInterrupt:
+        print("Search interrupted by user.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

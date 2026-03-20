@@ -9,6 +9,14 @@ import unittest
 import hfind
 
 
+def _create_pdf_with_text(path: Path, text: str) -> None:
+    from reportlab.pdfgen import canvas
+
+    writer = canvas.Canvas(str(path))
+    writer.drawString(72, 720, text)
+    writer.save()
+
+
 class HfindCliTests(unittest.TestCase):
     ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -181,7 +189,7 @@ class HfindCliTests(unittest.TestCase):
             self.assertTrue(any("\x1b[33malpha\x1b[0m" in line for line in lines[1:]))
             self.assertTrue(any("\x1b[33mbeta\x1b[0m" in line for line in lines[1:]))
 
-    def test_filepath_output_uses_bold_green_style(self) -> None:
+    def test_filepath_output_uses_bold_purple_style(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-path-style-") as tmpdir:
             root = Path(tmpdir)
             source = root / "demo.txt"
@@ -194,7 +202,7 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(self._strip_ansi(lines[0]), str(source))
-            self.assertTrue(lines[0].startswith("\x1b[1;32m"))
+            self.assertTrue(lines[0].startswith("\x1b[1;35m"))
             self.assertTrue(lines[0].endswith("\x1b[0m"))
 
     def test_verbose_near_is_strict_to_near_windows(self) -> None:
@@ -263,6 +271,89 @@ class HfindCliTests(unittest.TestCase):
             self.assertTrue(self._strip_ansi(lines[1]).startswith("1: "))
             self.assertTrue(self._strip_ansi(lines[2]).startswith("2: "))
             self.assertTrue(self._strip_ansi(lines[3]).startswith("3: "))
+
+    def test_ignores_clearly_binary_files_even_on_filename_match(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-binary-skip-") as tmpdir:
+            root = Path(tmpdir)
+            text_file = root / "pepin-notes.txt"
+            text_file.write_text("plain text\n", encoding="utf-8")
+
+            binary_file = root / "pepin-binary.dat"
+            binary_file.write_bytes(
+                b"\x00\x01\x02\x03" + bytes(range(255, 200, -1)) * 64
+            )
+
+            code, lines = self._run_main([
+                "pepin",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(text_file)])
+
+    def test_pdf_files_are_ignored_without_pdf_flag(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-pdf-no-flag-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "resume.pdf"
+            _create_pdf_with_text(pdf_path, "Nicolas Pepin")
+
+            code, lines = self._run_main([
+                "pepin",
+                str(root / "*.pdf"),
+            ])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(lines, [])
+
+    def test_pdf_files_are_searchable_with_pdf_flag(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-pdf-flag-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "resume.pdf"
+            _create_pdf_with_text(pdf_path, "Nicolas Pepin")
+
+            code, lines = self._run_main([
+                "-p",
+                "pepin",
+                str(root / "*.pdf"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
+
+    def test_pdf_flag_matches_uppercase_pdf_extension_with_lowercase_pattern(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-pdf-case-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "resume.PDF"
+            _create_pdf_with_text(pdf_path, "contains the keyword")
+
+            code, lines = self._run_main([
+                "-p",
+                "the",
+                str(root / "*.pdf"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
+
+    def test_pdf_extraction_failure_still_allows_filename_matching(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-pdf-fallback-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "the-reference.pdf"
+            pdf_path.write_bytes(b"not a real pdf")
+
+            original_reader = hfind._read_pdf_text_if_possible
+            hfind._read_pdf_text_if_possible = lambda _path: ""
+            try:
+                code, lines = self._run_main([
+                    "-p",
+                    "the",
+                    str(root / "*.pdf"),
+                ])
+            finally:
+                hfind._read_pdf_text_if_possible = original_reader
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
 
 
 if __name__ == "__main__":

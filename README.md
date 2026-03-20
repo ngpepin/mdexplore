@@ -177,13 +177,13 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -191,6 +191,15 @@ Notes:
 - `--content` / `-c` is optional (default is filename-only search).
 - `--recursive` / `-r` is optional.
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
+- `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
+- `NEAR(...)` is strict in both `mdexplore` and `hfind`: a hit is only produced when all NEAR terms occur within the configured 50-word window.
+- In verbose `NEAR(...)` output, numbering reflects match semantics:
+  - lines that independently satisfy `NEAR(...)` are each numbered,
+  - lines shown only as contiguous context for a cross-line NEAR window are grouped and only the first line is numbered.
+- Quoted terms with exactly one leading and/or trailing literal space use boundary-aware matching at that edge (word boundary, punctuation, or line break can satisfy it).
+  - Example: `'Nico '` can match `Nico.`, `Nico)`, `Nico;`, or `Nico` followed by a line break.
+  - Example: `' Nico '` can match `\nNico\n` and `His name is Nico.`
+  - Exception: this boundary rule applies only to a single leading/trailing space. Terms like `'  Nico'` or `'Nico  '` require those two literal spaces.
 - Short flags are stackable in any order (for example `-cr`, `-rc`).
 - If `-q` / `--query` is omitted, the first positional string is treated as the query.
 - Filename-only mode checks filename stem only (no extension, no path).
@@ -207,7 +216,7 @@ Recursively searches from current directory for readable `.txt` files whose file
 ./hfind.sh -q "OR(fred, paul)" -cr *.txt
 ./hfind.sh -cr "OR(fred, paul)" *.txt
 ./hfind.sh --recursive -c "OR(fred, paul)" *.txt
-./hfind.sh -crv "OR(fred, paul)" *.txt
+./hfind.sh -crvp "OR(fred, paul)" *.txt
 ```
 
 All above are valid shorthand forms.
@@ -235,6 +244,13 @@ Uses escaped double quotes inside a `NEAR(...)` query while recursively searchin
 ```
 
 For each matching file, prints matching line numbers and highlights the triggering terms in yellow. For `NEAR(...)`, this may include multiple nearby lines so both terms are visible.
+
+```bash
+./hfind.sh -cv "'Nico '" "./**/*.md"
+./hfind.sh -cv "' Nico '" "./**/*.md"
+```
+
+Demonstrates the single-space boundary behavior for quoted terms (including punctuation and line-break boundaries).
 
 ### Full Bootstrap Script
 
