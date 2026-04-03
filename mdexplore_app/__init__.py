@@ -6,7 +6,7 @@ Keep this package limited to low-risk extraction boundaries:
 - extracted pure logic/helpers (`search`, `js`, `templates`)
 - worker implementations (`workers`)
 - reusable UI support classes that do not own main-window orchestration
-  (`tree`, `tabs`)
+  (`file_tree`, `tree`, `tabs`)
 
 `mdexplore.py` remains the application entrypoint and primary orchestrator.
 """
