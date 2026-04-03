@@ -8,6 +8,8 @@
     persistentEntries: [],
     searchTerms: [],
     lastClickedHighlightId: "",
+    lastSelectionPayload: null,
+    lastSelectionTimestamp: 0,
     refreshHandle: 0,
     observer: null,
   };
@@ -395,6 +397,20 @@ html, body {
       document.addEventListener("click", (event) => {
         state.lastClickedHighlightId = locateClickedHighlightId(event.clientX, event.clientY);
       }, true);
+      document.addEventListener("selectionchange", () => {
+        const snapshot = getSelectionInfo(0, 0);
+        if (snapshot && snapshot.hasSelection) {
+          state.lastSelectionPayload = {
+            selectedText: String(snapshot.selectedText || ""),
+            hasSelection: true,
+            page: snapshot.page,
+            start: snapshot.start,
+            end: snapshot.end,
+            multiPageSelection: Boolean(snapshot.multiPageSelection),
+          };
+          state.lastSelectionTimestamp = Date.now();
+        }
+      }, true);
       state.installed = true;
     }
     scheduleRefresh();
@@ -436,7 +452,7 @@ html, body {
     if (Number.isFinite(page) && page > 0) {
       currentApp.page = page;
     }
-    window.requestAnimationFrame(() => {
+    const applyScrollState = () => {
       const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
       const ratio = Number(stateValue.scrollRatio);
       const scrollTop = Number(stateValue.scrollTop);
@@ -445,6 +461,12 @@ html, body {
       } else if (Number.isFinite(scrollTop) && scrollTop >= 0) {
         container.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop));
       }
+    };
+    window.requestAnimationFrame(() => {
+      applyScrollState();
+      window.requestAnimationFrame(applyScrollState);
+      window.setTimeout(applyScrollState, 80);
+      window.setTimeout(applyScrollState, 220);
     });
     return true;
   }
@@ -475,6 +497,22 @@ html, body {
       clickedHighlightId: locateClickedHighlightId(Number(clickX) || 0, Number(clickY) || 0) || state.lastClickedHighlightId || "",
     };
     if (!selected || !selected.rangeCount || selected.isCollapsed) {
+      const cached = state.lastSelectionPayload;
+      if (
+        cached
+        && cached.hasSelection
+        && Date.now() - Number(state.lastSelectionTimestamp || 0) <= 1800
+      ) {
+        return {
+          selectedText: String(cached.selectedText || ""),
+          hasSelection: true,
+          page: cached.page,
+          start: cached.start,
+          end: cached.end,
+          multiPageSelection: Boolean(cached.multiPageSelection),
+          clickedHighlightId: payload.clickedHighlightId,
+        };
+      }
       return payload;
     }
     const range = selected.getRangeAt(0);
@@ -495,6 +533,17 @@ html, body {
     payload.page = startPage;
     payload.start = offsets.start;
     payload.end = offsets.end;
+    if (payload.hasSelection) {
+      state.lastSelectionPayload = {
+        selectedText: String(payload.selectedText || ""),
+        hasSelection: true,
+        page: payload.page,
+        start: payload.start,
+        end: payload.end,
+        multiPageSelection: Boolean(payload.multiPageSelection),
+      };
+      state.lastSelectionTimestamp = Date.now();
+    }
     return payload;
   }
 

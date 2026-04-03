@@ -16,7 +16,10 @@ class PdfExploreAssetTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         bridge = root / "pdfexplore" / "assets" / "viewer_bridge.js"
         self.assertTrue(bridge.is_file())
-        self.assertIn("__pdfexploreBridge", bridge.read_text(encoding="utf-8"))
+        source = bridge.read_text(encoding="utf-8")
+        self.assertIn("__pdfexploreBridge", source)
+        self.assertIn("lastSelectionPayload", source)
+        self.assertIn("setTimeout(applyScrollState", source)
 
 
 if __name__ == "__main__":

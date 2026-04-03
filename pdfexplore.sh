@@ -180,6 +180,12 @@ while [[ $# -gt 0 ]]; do
   fi
 done
 
+if [[ -z "${TARGET_PATH}" && ( -t 0 || -t 1 ) ]]; then
+  if [[ -n "${PWD:-}" && -d "${PWD}" ]]; then
+    TARGET_PATH="${PWD}"
+  fi
+fi
+
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "Creating virtual environment at ${VENV_DIR}..."
   python3 -m venv "${VENV_DIR}"
