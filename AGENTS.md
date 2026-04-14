@@ -13,7 +13,7 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
   - `Add View`
   - `Edit`
 - The `Recent` menu sits to the left of `^`.
-- The `Recent` dropdown must show up to 15 most recently navigated root directories, newest first.
+- The `Recent` dropdown must show up to 20 most recently navigated root directories, newest first.
 - A root should be recorded only after it has been active for at least 30 seconds and the user navigates to another root.
 
 ## Recent Directory Persistence Rules
@@ -22,7 +22,7 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
 - Lock file: `~/.mdexplore.cfg.lock`
 - Config payload (JSON):
   - `default_root`: string path
-  - `recent_roots`: array of string paths (max 15, newest first)
+  - `recent_roots`: array of string paths (max 20, newest first)
   - `copy_base64_images_enabled`: boolean toggle state for copy-time BASE64 embedding
 - Writes occur on root navigation and again on shutdown.
 - Backward compatibility: legacy plain-text config (single path line) must continue to load.

@@ -1081,7 +1081,7 @@ class PreviewPage(QWebEnginePage):
 
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
-    MAX_RECENT_ROOT_DIRECTORIES = 15
+    MAX_RECENT_ROOT_DIRECTORIES = 20
     MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
     CONFIG_LOCK_STALE_SECONDS = 120.0
     VIEWS_FILE_NAME = ".mdexplore-views.json"
@@ -1389,7 +1389,7 @@ class MdExploreWindow(QMainWindow):
         # scope; the right side hosts clipboard/search operations.
         self.recent_btn = QPushButton("Recent")
         self.recent_btn.setToolTip(
-            "Open one of the 15 most recently navigated root directories"
+            "Open one of the 20 most recently navigated root directories"
         )
         self.recent_menu = QMenu(self.recent_btn)
         self.recent_menu.aboutToShow.connect(

@@ -36,7 +36,7 @@ gradually decomposed.
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
-  - `Recent` opens a dropdown of the 15 most recently navigated root directories (most recent first).
+  - `Recent` opens a dropdown of the 20 most recently navigated root directories (most recent first).
     The list refreshes from disk each time the menu is opened so multiple running instances stay in sync.
     A root is added only after it has been active for at least 30 seconds and then you navigate to another root.
   - `^` moves root up one directory level.
@@ -106,7 +106,7 @@ gradually decomposed.
 - Last effective root plus recent-root history are persisted to `~/.mdexplore.cfg` on root navigation and on exit.
   - Payload format is JSON with keys `default_root`, `recent_roots`, and `copy_base64_images_enabled`
     (legacy plain-text config is still accepted on read).
-  - Recent roots are capped at 15 entries, ordered newest first.
+  - Recent roots are capped at 20 entries, ordered newest first.
   - Config writes use a lock file (`~/.mdexplore.cfg.lock`) with non-blocking, momentary locking.
   - If another instance holds the lock during a save attempt, that save is skipped silently.
   - Lock files older than 2 minutes are cleaned up automatically (silently).
