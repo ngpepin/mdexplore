@@ -88,6 +88,22 @@ class CopyBase64ToggleTests(unittest.TestCase):
         self.assertIn("[img-ref]: data:image/png;base64,", converted)
         self.assertNotIn("[img-ref]: ref-image.png", converted)
 
+    def test_convert_linked_image_markdown_to_data_uri(self) -> None:
+        source_md = self.root / "linked.md"
+        source_md.write_text("placeholder\n", encoding="utf-8")
+        image_path = self.root / "linked-image.png"
+        self._write_fixture_image(image_path)
+
+        markdown = "[![linked](linked-image.png)](linked-image.png)\n"
+        converted, count = self.window._convert_markdown_image_links_to_data_uri_for_copy(
+            markdown,
+            source_md,
+        )
+
+        self.assertEqual(count, 2)
+        self.assertGreaterEqual(converted.count("data:image/png;base64,"), 2)
+        self.assertNotIn("linked-image.png", converted)
+
     def test_clipboard_staging_uses_base64_rewritten_markdown(self) -> None:
         source_md = self.root / "clipboard.md"
         image_path = self.root / "clip-image.png"

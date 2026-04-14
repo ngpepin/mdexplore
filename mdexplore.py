@@ -1096,6 +1096,9 @@ class MdExploreWindow(QMainWindow):
     INLINE_IMAGE_LINK_RE = re.compile(
         r"!\[(?P<alt>[^\]]*)\]\(\s*(?P<dest><[^>]+>|[^)\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"
     )
+    LINKED_IMAGE_LINK_RE = re.compile(
+        r"\[\s*!\[(?P<alt>[^\]]*)\]\(\s*(?P<img_dest><[^>]+>|[^)\s]+)(?P<img_title>\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)\s*\]\(\s*(?P<link_dest><[^>]+>|[^)\s]+)(?P<link_title>\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"
+    )
     IMAGE_REFERENCE_USAGE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\[(?P<label>[^\]]*)\]")
     IMAGE_SHORT_REFERENCE_USAGE_RE = re.compile(r"!\[(?P<alt>[^\]]+)\](?![\(\[])")
     REFERENCE_DEFINITION_RE = re.compile(
@@ -1393,24 +1396,34 @@ class MdExploreWindow(QMainWindow):
             self._reload_recent_root_directories_before_menu_open
         )
         self.recent_btn.setMenu(self.recent_menu)
+        self._apply_compact_toolbar_button_width(
+            self.recent_btn, horizontal_padding_px=12, include_menu_indicator=True
+        )
         self._refresh_recent_root_menu()
 
         self.up_btn = QPushButton("^")
+        self._apply_compact_toolbar_button_width(self.up_btn, horizontal_padding_px=10)
         self.up_btn.clicked.connect(self._go_up_directory)
 
         refresh_btn = QPushButton("Refresh")
+        self._apply_compact_toolbar_button_width(refresh_btn, horizontal_padding_px=12)
         refresh_btn.clicked.connect(self._refresh_directory_view)
 
         self.pdf_btn = QPushButton("PDF")
+        self._apply_compact_toolbar_button_width(self.pdf_btn, horizontal_padding_px=12)
         self.pdf_btn.setToolTip(
             "Export the currently previewed markdown rendering to PDF"
         )
         self.pdf_btn.clicked.connect(self._export_current_preview_pdf)
 
         self.add_view_btn = QPushButton("Add View")
+        self._apply_compact_toolbar_button_width(
+            self.add_view_btn, horizontal_padding_px=12
+        )
         self.add_view_btn.clicked.connect(self._add_document_view)
 
         edit_btn = QPushButton("Edit")
+        self._apply_compact_toolbar_button_width(edit_btn, horizontal_padding_px=12)
         edit_btn.clicked.connect(self._edit_current_file)
 
         self.path_label = QLabel("")
@@ -1632,6 +1645,49 @@ class MdExploreWindow(QMainWindow):
         self._add_shortcuts()
         self.model.directoryLoaded.connect(self._maybe_apply_initial_split)
         QTimer.singleShot(0, self._maybe_apply_initial_split)
+
+    def _apply_compact_toolbar_button_width(
+        self,
+        button: QPushButton,
+        *,
+        horizontal_padding_px: int = 12,
+        include_menu_indicator: bool = False,
+    ) -> None:
+        """Size a top-bar button to text/icon width plus slim horizontal padding."""
+        if button is None:
+            return
+
+        text_width = button.fontMetrics().horizontalAdvance(button.text() or "")
+        icon_width = 0
+        icon = button.icon()
+        if not icon.isNull():
+            icon_size = button.iconSize()
+            if icon_size.isValid():
+                icon_width = int(icon_size.width()) + 4
+            else:
+                icon_width = int(
+                    button.style().pixelMetric(QStyle.PixelMetric.PM_SmallIconSize)
+                ) + 4
+
+        menu_indicator_width = 0
+        if include_menu_indicator or button.menu() is not None:
+            menu_indicator_width = max(
+                8,
+                int(
+                    button.style().pixelMetric(
+                        QStyle.PixelMetric.PM_MenuButtonIndicator
+                    )
+                ),
+            )
+
+        width = (
+            text_width
+            + icon_width
+            + menu_indicator_width
+            + max(8, int(horizontal_padding_px))
+        )
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.setFixedWidth(max(20, int(width)))
 
     def _add_shortcuts(self) -> None:
         """Register window-level keyboard shortcuts."""
@@ -7744,6 +7800,47 @@ class MdExploreWindow(QMainWindow):
         updated_text = self.INLINE_IMAGE_LINK_RE.sub(_replace, markdown_text)
         return updated_text, rewritten_count
 
+    def _rewrite_linked_image_links_to_data_uri(
+        self, markdown_text: str, source_path: Path
+    ) -> tuple[str, int]:
+        """Rewrite `[![...](img)](link)` markdown blocks to BASE64 image URIs."""
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            alt = match.group("alt") or ""
+            img_destination = match.group("img_dest") or ""
+            img_title = match.group("img_title") or ""
+            link_destination = match.group("link_dest") or ""
+            link_title = match.group("link_title") or ""
+
+            resolved_img_destination = img_destination
+            resolved_link_destination = link_destination
+
+            img_data_uri = self._image_link_to_data_uri(img_destination, source_path)
+            if img_data_uri:
+                resolved_img_destination = img_data_uri
+                rewritten_count += 1
+
+            link_data_uri = self._image_link_to_data_uri(link_destination, source_path)
+            if link_data_uri:
+                resolved_link_destination = link_data_uri
+                rewritten_count += 1
+
+            if (
+                resolved_img_destination == img_destination
+                and resolved_link_destination == link_destination
+            ):
+                return match.group(0)
+
+            return (
+                f"[![{alt}]({resolved_img_destination}{img_title})]"
+                f"({resolved_link_destination}{link_title})"
+            )
+
+        updated_text = self.LINKED_IMAGE_LINK_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
     def _rewrite_reference_image_links_to_data_uri(
         self, markdown_text: str, source_path: Path
     ) -> tuple[str, int]:
@@ -7788,13 +7885,16 @@ class MdExploreWindow(QMainWindow):
         self, markdown_text: str, source_path: Path
     ) -> tuple[str, int]:
         """Convert retrievable markdown image links to BASE64 data URIs."""
-        inline_updated, inline_count = self._rewrite_inline_image_links_to_data_uri(
+        linked_updated, linked_count = self._rewrite_linked_image_links_to_data_uri(
             markdown_text, source_path
+        )
+        inline_updated, inline_count = self._rewrite_inline_image_links_to_data_uri(
+            linked_updated, source_path
         )
         final_updated, ref_count = self._rewrite_reference_image_links_to_data_uri(
             inline_updated, source_path
         )
-        return final_updated, inline_count + ref_count
+        return final_updated, linked_count + inline_count + ref_count
 
     def _copy_markdown_file_with_optional_base64_images(
         self, source_path: Path, destination_path: Path
