@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -177,9 +178,31 @@ def load_default_root_from_config() -> Path:
         raw = cfg_path.read_text(encoding="utf-8").strip()
         if not raw:
             return fallback
-        candidate = Path(raw).expanduser()
-        if candidate.is_dir():
-            return candidate.resolve()
+        parsed = None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+
+        candidates: list[str] = []
+        if isinstance(parsed, dict):
+            default_root = parsed.get("default_root")
+            if isinstance(default_root, str) and default_root.strip():
+                candidates.append(default_root.strip())
+            recent_roots = parsed.get("recent_roots")
+            if isinstance(recent_roots, list):
+                for entry in recent_roots:
+                    if isinstance(entry, str) and entry.strip():
+                        candidates.append(entry.strip())
+        elif isinstance(parsed, str) and parsed.strip():
+            candidates.append(parsed.strip())
+        else:
+            candidates.append(raw)
+
+        for entry in candidates:
+            candidate = Path(entry).expanduser()
+            if candidate.is_dir():
+                return candidate.resolve()
     except Exception:
         pass
     return fallback

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import html
 import hashlib
 from html.parser import HTMLParser
 from io import BytesIO
 import json
 import math
+import mimetypes
 import os
 import re
 import shutil
@@ -18,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
 from collections import deque
 from difflib import SequenceMatcher
@@ -1077,12 +1081,26 @@ class PreviewPage(QWebEnginePage):
 
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
+    MAX_RECENT_ROOT_DIRECTORIES = 15
+    MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
+    CONFIG_LOCK_STALE_SECONDS = 120.0
     VIEWS_FILE_NAME = ".mdexplore-views.json"
     HIGHLIGHTING_FILE_NAME = ".mdexplore-highlighting.json"
+    CONFIG_DEFAULT_ROOT_KEY = "default_root"
+    CONFIG_RECENT_ROOTS_KEY = "recent_roots"
+    CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY = "copy_base64_images_enabled"
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
     DEBUG_LOG_FILE_NAME = "mdexplore.log"
     DEBUG_LOG_MAX_LINES = 10_000
+    INLINE_IMAGE_LINK_RE = re.compile(
+        r"!\[(?P<alt>[^\]]*)\]\(\s*(?P<dest><[^>]+>|[^)\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"
+    )
+    IMAGE_REFERENCE_USAGE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\[(?P<label>[^\]]*)\]")
+    IMAGE_SHORT_REFERENCE_USAGE_RE = re.compile(r"!\[(?P<alt>[^\]]+)\](?![\(\[])")
+    REFERENCE_DEFINITION_RE = re.compile(
+        r"(?m)^(?P<indent>\s{0,3})\[(?P<label>[^\]]+)\]:\s*(?P<dest><[^>]+>|[^\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'|\([^)]+\)))?\s*$"
+    )
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -1111,6 +1129,10 @@ class MdExploreWindow(QMainWindow):
         # - persisted view sessions: on-disk per-directory sidecars
         self.root = root.resolve()
         self.config_path = config_path
+        self._recent_root_directories = self._load_recent_root_directories_from_config()
+        self._recent_active_root: Path = self.root
+        self._recent_root_entered_at = time.monotonic()
+        self._copy_base64_images_enabled = self._load_copy_base64_toggle_from_config()
         self.renderer = MarkdownRenderer(mermaid_backend=mermaid_backend)
         self.current_file: Path | None = None
         self.last_directory_selection: Path | None = self.root
@@ -1216,6 +1238,8 @@ class MdExploreWindow(QMainWindow):
         self._preview_action_poll_inflight = False
         self._match_input_text = ""
         self._copy_destination_directory: Path | None = None
+        self._copy_base64_image_cache: dict[str, str | None] = {}
+        self._clipboard_copy_staging_directories: list[Path] = []
         # Search is debounced so filesystem/content scans do not run on every
         # keystroke while the user is still typing an expression.
         self.match_timer = QTimer(self)
@@ -1360,6 +1384,17 @@ class MdExploreWindow(QMainWindow):
 
         # Top-left document controls operate on directory scope and current file
         # scope; the right side hosts clipboard/search operations.
+        self.recent_btn = QPushButton("Recent")
+        self.recent_btn.setToolTip(
+            "Open one of the 15 most recently navigated root directories"
+        )
+        self.recent_menu = QMenu(self.recent_btn)
+        self.recent_menu.aboutToShow.connect(
+            self._reload_recent_root_directories_before_menu_open
+        )
+        self.recent_btn.setMenu(self.recent_menu)
+        self._refresh_recent_root_menu()
+
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
 
@@ -1391,6 +1426,14 @@ class MdExploreWindow(QMainWindow):
         copy_buttons_layout = QHBoxLayout(copy_buttons_widget)
         copy_buttons_layout.setContentsMargins(0, 0, 0, 0)
         copy_buttons_layout.setSpacing(4)
+        self.copy_image_base64_btn = QPushButton("")
+        self.copy_image_base64_btn.setFixedSize(22, 22)
+        self.copy_image_base64_btn.setStyleSheet("border: none; padding: 0px;")
+        self.copy_image_base64_btn.clicked.connect(
+            self._toggle_copy_base64_images_enabled
+        )
+        copy_buttons_layout.addWidget(self.copy_image_base64_btn)
+        self._update_copy_base64_button_state()
         copy_buttons_layout.addWidget(copy_label)
         self.copy_clipboard_radio = QRadioButton("Clipboard")
         self.copy_directory_radio = QRadioButton("Directory")
@@ -1420,9 +1463,7 @@ class MdExploreWindow(QMainWindow):
         copy_current_btn.setToolTip(
             "Copy currently previewed markdown file to selected destination"
         )
-        copy_current_btn.setStyleSheet(
-            "border: 1px solid #4b5563; border-radius: 3px; padding: 0px;"
-        )
+        copy_current_btn.setStyleSheet("border: none; padding: 0px;")
         pin_icon_path = _ui_asset_path("pin.png")
         if pin_icon_path.is_file():
             pin_icon = QIcon(str(pin_icon_path))
@@ -1490,6 +1531,7 @@ class MdExploreWindow(QMainWindow):
 
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.addWidget(self.recent_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
         top_bar.addWidget(self.pdf_btn)
@@ -4663,6 +4705,242 @@ class MdExploreWindow(QMainWindow):
             3500,
         )
 
+    def _config_lock_file_path(self) -> Path:
+        """Return the advisory lockfile path for config reads/writes."""
+        return self.config_path.with_name(f"{self.config_path.name}.lock")
+
+    def _cleanup_stale_config_lock_file(self) -> None:
+        """Delete stale config lock files older than policy threshold."""
+        lock_path = self._config_lock_file_path()
+        try:
+            if not lock_path.exists():
+                return
+            age_seconds = time.time() - float(lock_path.stat().st_mtime)
+            if age_seconds <= float(self.CONFIG_LOCK_STALE_SECONDS):
+                return
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            # Lock cleanup is best-effort and must stay silent.
+            pass
+
+    @staticmethod
+    def _coerce_config_bool(value) -> bool | None:
+        """Parse config bool values from bools or common string forms."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    @classmethod
+    def _parse_config_payload_text(
+        cls, raw_text: str
+    ) -> tuple[str | None, list[str], bool | None]:
+        """Parse cfg text into default-root, recent-root, and BASE64-toggle values."""
+        text = str(raw_text or "").strip()
+        if not text:
+            return None, [], None
+
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+        default_root: str | None = None
+        recent_roots: list[str] = []
+        copy_base64_images_enabled: bool | None = None
+        if isinstance(parsed, dict):
+            default_raw = parsed.get(cls.CONFIG_DEFAULT_ROOT_KEY)
+            if isinstance(default_raw, str) and default_raw.strip():
+                default_root = default_raw.strip()
+            recent_raw = parsed.get(cls.CONFIG_RECENT_ROOTS_KEY)
+            if isinstance(recent_raw, list):
+                for entry in recent_raw:
+                    if isinstance(entry, str) and entry.strip():
+                        recent_roots.append(entry.strip())
+            copy_base64_images_enabled = cls._coerce_config_bool(
+                parsed.get(cls.CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY)
+            )
+            return default_root, recent_roots, copy_base64_images_enabled
+        if isinstance(parsed, str) and parsed.strip():
+            return parsed.strip(), [], None
+        return text, [], None
+
+    def _normalize_recent_root_directories(
+        self, directories: list[Path | str]
+    ) -> list[Path]:
+        """Resolve, validate, de-duplicate, and cap recent root directories."""
+        normalized: list[Path] = []
+        seen: set[str] = set()
+        for raw_entry in directories:
+            if isinstance(raw_entry, Path):
+                candidate = raw_entry.expanduser()
+            else:
+                raw_text = str(raw_entry or "").strip()
+                if not raw_text:
+                    continue
+                candidate = Path(raw_text).expanduser()
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            try:
+                if not resolved.is_dir():
+                    continue
+            except Exception:
+                continue
+            key = self._path_key(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(resolved)
+            if len(normalized) >= self.MAX_RECENT_ROOT_DIRECTORIES:
+                break
+        return normalized
+
+    def _read_config_payload(self) -> tuple[Path | None, list[Path], bool | None]:
+        """Read cfg payload with brief best-effort advisory locking."""
+        raw = ""
+        lock_path = self._config_lock_file_path()
+        self._cleanup_stale_config_lock_file()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                lock_acquired = False
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    lock_acquired = True
+                except (BlockingIOError, OSError):
+                    lock_acquired = False
+                try:
+                    if self.config_path.exists():
+                        raw = self.config_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                finally:
+                    if lock_acquired:
+                        try:
+                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                        except Exception:
+                            pass
+        except Exception:
+            try:
+                if self.config_path.exists():
+                    raw = self.config_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+            except Exception:
+                raw = ""
+
+        default_root_raw, recent_roots_raw, copy_base64_enabled = (
+            self._parse_config_payload_text(raw)
+        )
+        default_root: Path | None = None
+        if default_root_raw:
+            normalized_default = self._normalize_recent_root_directories([default_root_raw])
+            if normalized_default:
+                default_root = normalized_default[0]
+        recent_roots = self._normalize_recent_root_directories(recent_roots_raw)
+        return default_root, recent_roots, copy_base64_enabled
+
+    def _load_recent_root_directories_from_config(self) -> list[Path]:
+        """Load and normalize recent roots from config (legacy/plain-text safe)."""
+        default_root, recent_roots, _copy_base64_enabled = self._read_config_payload()
+        merged: list[Path | str] = []
+        if default_root is not None:
+            merged.append(default_root)
+        merged.extend(recent_roots)
+        return self._normalize_recent_root_directories(merged)
+
+    def _load_copy_base64_toggle_from_config(self) -> bool:
+        """Load persisted BASE64 toggle state (defaulting to disabled)."""
+        _default_root, _recent_roots, copy_base64_enabled = self._read_config_payload()
+        return bool(copy_base64_enabled)
+
+    def _commit_recent_root_from_departure(
+        self, departed_root: Path, elapsed_seconds: float
+    ) -> None:
+        """Record departed root only if dwell time reaches minimum threshold."""
+        if float(elapsed_seconds) < float(self.MIN_RECENT_ROOT_DWELL_SECONDS):
+            return
+        self._record_recent_root_directory(departed_root)
+
+    def _on_recent_root_navigation(self, next_root: Path) -> None:
+        """Finalize previous root visit and start timing the next root visit."""
+        try:
+            target_root = next_root.resolve()
+        except Exception:
+            target_root = next_root
+        now = time.monotonic()
+        previous_root = getattr(self, "_recent_active_root", None)
+        previous_entered_at = float(getattr(self, "_recent_root_entered_at", now) or now)
+        if isinstance(previous_root, Path):
+            if self._path_key(previous_root) != self._path_key(target_root):
+                elapsed = max(0.0, now - previous_entered_at)
+                self._commit_recent_root_from_departure(previous_root, elapsed)
+        self._recent_active_root = target_root
+        self._recent_root_entered_at = now
+
+    def _refresh_recent_root_menu(self) -> None:
+        """Rebuild the Recent button dropdown actions from in-memory state."""
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        if not self._recent_root_directories:
+            empty_action = menu.addAction("(No recent directories)")
+            empty_action.setEnabled(False)
+            return
+
+        current_key = self._path_key(self.root) if isinstance(self.root, Path) else ""
+        for directory in self._recent_root_directories:
+            label = str(directory)
+            if current_key and self._path_key(directory) == current_key:
+                label = f"{label} (current)"
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, target=directory: self._open_recent_root_directory(
+                    target
+                )
+            )
+
+    def _reload_recent_root_directories_before_menu_open(self) -> None:
+        """Refresh recent roots from disk every time the Recent menu opens."""
+        on_disk = self._load_recent_root_directories_from_config()
+        merged: list[Path | str] = []
+        merged.extend(on_disk)
+        merged.extend(self._recent_root_directories)
+        self._recent_root_directories = self._normalize_recent_root_directories(merged)
+        self._refresh_recent_root_menu()
+
+    def _record_recent_root_directory(self, directory: Path) -> None:
+        """Push one root directory to the top of the in-memory recent list."""
+        merged: list[Path | str] = [directory]
+        merged.extend(self._recent_root_directories)
+        self._recent_root_directories = self._normalize_recent_root_directories(merged)
+        self._refresh_recent_root_menu()
+
+    def _open_recent_root_directory(self, directory: Path) -> None:
+        """Handle selection from the Recent dropdown."""
+        normalized = self._normalize_recent_root_directories([directory])
+        if not normalized:
+            self._recent_root_directories = self._normalize_recent_root_directories(
+                self._recent_root_directories
+            )
+            self._refresh_recent_root_menu()
+            self.statusBar().showMessage("Recent directory is unavailable", 3500)
+            return
+        target = normalized[0]
+        if self._path_key(target) == self._path_key(self.root):
+            self._refresh_recent_root_menu()
+            return
+        self._set_root_directory(target)
+
     def _set_root_directory(self, new_root: Path) -> None:
         """Re-root the tree view and reset file preview state."""
         self._stop_restore_overlay_monitor()
@@ -4670,7 +4948,8 @@ class MdExploreWindow(QMainWindow):
         self._capture_current_preview_scroll(force=True)
         self._persist_document_view_session()
         self._capture_splitter_sizes_for_session()
-        self.root = new_root.resolve()
+        self._on_recent_root_navigation(new_root)
+        self.root = self._recent_active_root
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         self.last_directory_selection = self.root
         self.current_file = None
@@ -4701,6 +4980,9 @@ class MdExploreWindow(QMainWindow):
         self._update_add_view_button_state()
         self._update_pdf_button_state()
         self._refresh_tree_multi_view_markers(full_scan=True)
+        # Keep on-disk recent roots current so other running instances can see
+        # navigation updates when opening their Recent menus.
+        self._persist_effective_root()
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _on_preview_load_finished(self, ok: bool) -> None:
@@ -7126,19 +7408,89 @@ class MdExploreWindow(QMainWindow):
         return self.root
 
     def _persist_effective_root(self) -> None:
-        """Persist the effective root for future no-argument launches."""
+        """Persist effective root + recent roots with a lock/merge write."""
         scope = self._effective_root_for_persistence()
         try:
-            self.config_path.write_text(str(scope.resolve()) + "\n", encoding="utf-8")
+            resolved_scope = scope.resolve()
+        except Exception:
+            resolved_scope = scope
+
+        lock_path = self._config_lock_file_path()
+        self._cleanup_stale_config_lock_file()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        def _serialize_payload(recent_roots: list[Path]) -> str:
+            payload = {
+                self.CONFIG_DEFAULT_ROOT_KEY: str(resolved_scope),
+                self.CONFIG_RECENT_ROOTS_KEY: [str(path) for path in recent_roots],
+                self.CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY: bool(
+                    self._copy_base64_images_enabled
+                ),
+            }
+            return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+        try:
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    # Another instance is currently updating config. Fail
+                    # silently as requested.
+                    return
+
+                raw = ""
+                try:
+                    if self.config_path.exists():
+                        raw = self.config_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                except Exception:
+                    raw = ""
+
+                (
+                    _on_disk_default,
+                    on_disk_recent,
+                    _on_disk_copy_base64_enabled,
+                ) = self._parse_config_payload_text(raw)
+                merged: list[Path | str] = []
+                merged.extend(self._recent_root_directories)
+                merged.extend(on_disk_recent)
+                merged_recent = self._normalize_recent_root_directories(merged)
+
+                serialized = _serialize_payload(merged_recent)
+                tmp_path = self.config_path.with_name(
+                    f".{self.config_path.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+                )
+                try:
+                    tmp_path.write_text(serialized, encoding="utf-8")
+                    tmp_path.replace(self.config_path)
+                finally:
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    except Exception:
+                        pass
+
+                self._recent_root_directories = merged_recent
+                self._refresh_recent_root_menu()
+
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
         except Exception:
             # Requested behavior is resilience; persistence failure should not
-            # block application exit.
+            # block operation or shutdown.
             pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_restore_overlay_monitor()
         self._persist_document_view_session()
         self._persist_effective_root()
+        self._cleanup_clipboard_copy_staging_directories()
         self._cleanup_preview_temp_files()
         super().closeEvent(event)
 
@@ -7251,9 +7603,284 @@ class MdExploreWindow(QMainWindow):
             normalized.append(resolved)
         return normalized
 
-    def _copy_files_to_clipboard(self, files: list[Path]) -> int:
-        """Copy file paths to clipboard with file-manager compatible MIME payloads."""
+    def _toggle_copy_base64_images_enabled(self) -> None:
+        """Toggle optional BASE64 image embedding for copied markdown files."""
+        self._copy_base64_images_enabled = not self._copy_base64_images_enabled
+        self._copy_base64_image_cache.clear()
+        self._update_copy_base64_button_state()
+        self._persist_effective_root()
+
+    def _update_copy_base64_button_state(self) -> None:
+        """Refresh button icon/tooltip for BASE64 image embedding toggle."""
+        button = getattr(self, "copy_image_base64_btn", None)
+        if button is None:
+            return
+        icon_name = (
+            "imagebase64-on.png"
+            if self._copy_base64_images_enabled
+            else "imagebase64-off.png"
+        )
+        icon_path = _ui_asset_path(icon_name)
+        if icon_path.is_file():
+            button.setIcon(QIcon(str(icon_path)))
+            button.setIconSize(QSize(19, 19))
+            button.setText("")
+        else:
+            button.setIcon(QIcon())
+            button.setText("B")
+        if self._copy_base64_images_enabled:
+            button.setToolTip("Turn BASE64 image encoding off")
+        else:
+            button.setToolTip("Turn BASE64 image encoding on")
+
+    @staticmethod
+    def _normalize_markdown_reference_label(raw_label: str) -> str:
+        """Normalize markdown reference labels using markdown's fold rules."""
+        return " ".join(str(raw_label or "").split()).casefold()
+
+    @staticmethod
+    def _strip_markdown_link_wrappers(raw_target: str) -> str:
+        """Strip optional markdown angle-bracket wrappers around link targets."""
+        cleaned = str(raw_target or "").strip()
+        if len(cleaned) >= 2 and cleaned.startswith("<") and cleaned.endswith(">"):
+            return cleaned[1:-1].strip()
+        return cleaned
+
+    def _image_link_to_data_uri(self, link_target: str, source_path: Path) -> str | None:
+        """Resolve one markdown image link target into a BASE64 data URI."""
+        target = self._strip_markdown_link_wrappers(link_target)
+        if not target or target.lower().startswith("data:"):
+            return None
+
+        parsed = urllib.parse.urlparse(target)
+        raw_bytes: bytes | None = None
+        mime_type: str | None = None
+        cache_key: str | None = None
+
+        if parsed.scheme in {"http", "https"}:
+            cache_key = f"url::{target}"
+            if cache_key in self._copy_base64_image_cache:
+                return self._copy_base64_image_cache[cache_key]
+            try:
+                request = urllib.request.Request(
+                    target,
+                    headers={"User-Agent": "mdexplore-copy/1.0"},
+                )
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    raw_bytes = response.read()
+                    content_type = str(response.headers.get("Content-Type", "")).strip()
+                    if content_type:
+                        mime_type = content_type.split(";", 1)[0].strip().lower()
+            except Exception:
+                self._copy_base64_image_cache[cache_key] = None
+                return None
+        else:
+            local_path: Path | None = None
+            if parsed.scheme == "file":
+                local_raw = urllib.parse.unquote(parsed.path or "")
+                if local_raw:
+                    local_path = Path(local_raw).expanduser()
+            elif parsed.scheme == "":
+                path_part = urllib.parse.unquote(parsed.path or target)
+                if path_part:
+                    local_path = Path(path_part).expanduser()
+                    if not local_path.is_absolute():
+                        local_path = source_path.parent / local_path
+            if local_path is None:
+                return None
+            try:
+                resolved_local = local_path.resolve()
+            except Exception:
+                resolved_local = local_path
+            if not resolved_local.is_file():
+                return None
+            cache_key = f"file::{self._path_key(resolved_local)}"
+            if cache_key in self._copy_base64_image_cache:
+                return self._copy_base64_image_cache[cache_key]
+            try:
+                raw_bytes = resolved_local.read_bytes()
+            except Exception:
+                self._copy_base64_image_cache[cache_key] = None
+                return None
+            guessed_mime, _encoding = mimetypes.guess_type(str(resolved_local))
+            if guessed_mime:
+                mime_type = guessed_mime.lower()
+
+        if not raw_bytes:
+            if cache_key is not None:
+                self._copy_base64_image_cache[cache_key] = None
+            return None
+        if not mime_type:
+            guessed_mime, _encoding = mimetypes.guess_type(parsed.path or target)
+            mime_type = (
+                guessed_mime.lower()
+                if isinstance(guessed_mime, str) and guessed_mime.strip()
+                else "application/octet-stream"
+            )
+
+        encoded = base64.b64encode(raw_bytes).decode("ascii")
+        data_uri = f"data:{mime_type};base64,{encoded}"
+        if cache_key is not None:
+            self._copy_base64_image_cache[cache_key] = data_uri
+        return data_uri
+
+    def _rewrite_inline_image_links_to_data_uri(
+        self, markdown_text: str, source_path: Path
+    ) -> tuple[str, int]:
+        """Rewrite inline markdown image links to BASE64 data URIs when possible."""
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            destination = match.group("dest") or ""
+            data_uri = self._image_link_to_data_uri(destination, source_path)
+            if not data_uri:
+                return match.group(0)
+            rewritten_count += 1
+            alt = match.group("alt") or ""
+            title = match.group("title") or ""
+            return f"![{alt}]({data_uri}{title})"
+
+        updated_text = self.INLINE_IMAGE_LINK_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
+    def _rewrite_reference_image_links_to_data_uri(
+        self, markdown_text: str, source_path: Path
+    ) -> tuple[str, int]:
+        """Rewrite image reference definitions used by image links to BASE64 URIs."""
+        referenced_labels: set[str] = set()
+        for match in self.IMAGE_REFERENCE_USAGE_RE.finditer(markdown_text):
+            label = str(match.group("label") or "").strip()
+            alt = str(match.group("alt") or "").strip()
+            resolved_label = label if label else alt
+            if resolved_label:
+                referenced_labels.add(
+                    self._normalize_markdown_reference_label(resolved_label)
+                )
+        for match in self.IMAGE_SHORT_REFERENCE_USAGE_RE.finditer(markdown_text):
+            alt = str(match.group("alt") or "").strip()
+            if alt:
+                referenced_labels.add(self._normalize_markdown_reference_label(alt))
+        if not referenced_labels:
+            return markdown_text, 0
+
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            label = str(match.group("label") or "")
+            normalized_label = self._normalize_markdown_reference_label(label)
+            if normalized_label not in referenced_labels:
+                return match.group(0)
+            destination = match.group("dest") or ""
+            data_uri = self._image_link_to_data_uri(destination, source_path)
+            if not data_uri:
+                return match.group(0)
+            rewritten_count += 1
+            indent = match.group("indent") or ""
+            title = match.group("title") or ""
+            return f"{indent}[{label}]: {data_uri}{title}"
+
+        updated_text = self.REFERENCE_DEFINITION_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
+    def _convert_markdown_image_links_to_data_uri_for_copy(
+        self, markdown_text: str, source_path: Path
+    ) -> tuple[str, int]:
+        """Convert retrievable markdown image links to BASE64 data URIs."""
+        inline_updated, inline_count = self._rewrite_inline_image_links_to_data_uri(
+            markdown_text, source_path
+        )
+        final_updated, ref_count = self._rewrite_reference_image_links_to_data_uri(
+            inline_updated, source_path
+        )
+        return final_updated, inline_count + ref_count
+
+    def _copy_markdown_file_with_optional_base64_images(
+        self, source_path: Path, destination_path: Path
+    ) -> tuple[bool, int]:
+        """Copy one markdown file, optionally embedding image links as BASE64."""
+        if self._path_key(source_path) == self._path_key(destination_path):
+            return True, 0
+        if (
+            not self._copy_base64_images_enabled
+            or source_path.suffix.lower() != ".md"
+        ):
+            try:
+                shutil.copy2(source_path, destination_path)
+                return True, 0
+            except Exception:
+                return False, 0
+
+        try:
+            original_text = source_path.read_text(encoding="utf-8")
+        except Exception:
+            try:
+                shutil.copy2(source_path, destination_path)
+                return True, 0
+            except Exception:
+                return False, 0
+
+        converted_text, converted_count = (
+            self._convert_markdown_image_links_to_data_uri_for_copy(
+                original_text, source_path
+            )
+        )
+        try:
+            if converted_count <= 0:
+                shutil.copy2(source_path, destination_path)
+            else:
+                destination_path.write_text(converted_text, encoding="utf-8")
+                try:
+                    shutil.copystat(source_path, destination_path)
+                except Exception:
+                    pass
+            return True, converted_count
+        except Exception:
+            return False, 0
+
+    def _prepare_clipboard_copy_paths(
+        self, files: list[Path]
+    ) -> tuple[list[Path], int, int]:
+        """Prepare clipboard copy file paths, staging transformed markdown when enabled."""
         normalized = self._normalize_unique_file_paths(files)
+        if not self._copy_base64_images_enabled:
+            return normalized, 0, 0
+        if not normalized:
+            return [], 0, 0
+
+        staging_dir = Path(tempfile.mkdtemp(prefix="mdexplore-copy-"))
+        self._clipboard_copy_staging_directories.append(staging_dir)
+        staged_paths: list[Path] = []
+        converted_links = 0
+        failures = 0
+        for source_path in normalized:
+            destination_path = staging_dir / source_path.name
+            copied, encoded_count = self._copy_markdown_file_with_optional_base64_images(
+                source_path, destination_path
+            )
+            if copied:
+                staged_paths.append(destination_path)
+                converted_links += encoded_count
+            else:
+                failures += 1
+        return staged_paths, converted_links, failures
+
+    def _cleanup_clipboard_copy_staging_directories(self) -> None:
+        """Remove temporary directories used for clipboard copy staging."""
+        for directory in self._clipboard_copy_staging_directories:
+            try:
+                shutil.rmtree(directory, ignore_errors=True)
+            except Exception:
+                pass
+        self._clipboard_copy_staging_directories = []
+
+    def _copy_files_to_clipboard(self, files: list[Path]) -> tuple[int, int, int]:
+        """Copy file paths to clipboard with file-manager compatible MIME payloads."""
+        prepared_paths, converted_links, staging_failures = (
+            self._prepare_clipboard_copy_paths(files)
+        )
+        normalized = self._normalize_unique_file_paths(prepared_paths)
 
         clipboard = QApplication.clipboard()
         mime_data = QMimeData()
@@ -7271,7 +7898,7 @@ class MdExploreWindow(QMainWindow):
         # Keep plain text for editors/terminals.
         mime_data.setText("\n".join(str(path) for path in normalized))
         clipboard.setMimeData(mime_data)
-        return len(normalized)
+        return len(normalized), converted_links, staging_failures
 
     def _view_session_for_path_key(self, path_key: str | None) -> dict | None:
         """Return best-available persisted/in-memory view session for one markdown path."""
@@ -7360,7 +7987,7 @@ class MdExploreWindow(QMainWindow):
 
     def _copy_files_to_directory_with_metadata(
         self, files: list[Path]
-    ) -> tuple[int, int, int, int, int, Path] | None:
+    ) -> tuple[int, int, int, int, int, int, Path] | None:
         """Copy files into a chosen folder and merge their .mdexplore metadata."""
         normalized = self._normalize_unique_file_paths(files)
         if not normalized:
@@ -7372,6 +7999,7 @@ class MdExploreWindow(QMainWindow):
 
         copied_pairs: list[tuple[Path, Path]] = []
         copy_failures = 0
+        converted_links_total = 0
         for source_path in normalized:
             if not source_path.is_file():
                 copy_failures += 1
@@ -7381,10 +8009,13 @@ class MdExploreWindow(QMainWindow):
             if self._path_key(source_path) == self._path_key(destination_path):
                 copied_pairs.append((source_path, destination_path))
                 continue
-            try:
-                shutil.copy2(source_path, destination_path)
+            copied, converted_count = self._copy_markdown_file_with_optional_base64_images(
+                source_path, destination_path
+            )
+            if copied:
                 copied_pairs.append((source_path, destination_path))
-            except Exception:
+                converted_links_total += converted_count
+            else:
                 copy_failures += 1
 
         color_updates, view_updates, highlight_updates = self._merge_copied_file_metadata(
@@ -7396,6 +8027,7 @@ class MdExploreWindow(QMainWindow):
             color_updates,
             view_updates,
             highlight_updates,
+            converted_links_total,
             target_directory,
         )
 
@@ -7418,19 +8050,29 @@ class MdExploreWindow(QMainWindow):
             result = self._copy_files_to_directory_with_metadata([target])
             if result is None:
                 return
-            copied, failed, colors, views, highlights, directory = result
+            copied, failed, colors, views, highlights, converted_links, directory = result
+            base64_note = (
+                f"; BASE64 images embedded {converted_links}"
+                if self._copy_base64_images_enabled
+                else ""
+            )
             self.statusBar().showMessage(
                 f"Copied {copied} file(s) to {directory} "
                 f"(metadata: colors {colors}, views {views}, highlights {highlights}; "
-                f"failures {failed})",
+                f"failures {failed}{base64_note})",
                 5000,
             )
             return
 
-        copied = self._copy_files_to_clipboard([target])
+        copied, converted_links, staging_failures = self._copy_files_to_clipboard([target])
         if copied:
+            suffix = ""
+            if self._copy_base64_images_enabled:
+                suffix = f" (BASE64 images embedded {converted_links})"
+                if staging_failures > 0:
+                    suffix += f" [staging failures {staging_failures}]"
             self.statusBar().showMessage(
-                f"Copied previewed file to clipboard: {target.name}", 4000
+                f"Copied previewed file to clipboard: {target.name}{suffix}", 4000
             )
 
     def _copy_highlighted_files_to_clipboard(
@@ -7449,18 +8091,28 @@ class MdExploreWindow(QMainWindow):
             result = self._copy_files_to_directory_with_metadata(matches)
             if result is None:
                 return
-            copied, failed, colors, views, highlights, directory = result
+            copied, failed, colors, views, highlights, converted_links, directory = result
+            base64_note = (
+                f"; BASE64 images embedded {converted_links}"
+                if self._copy_base64_images_enabled
+                else ""
+            )
             self.statusBar().showMessage(
                 f"Copied {copied} {color_name.lower()} highlighted file(s) to {directory} "
                 f"(metadata: colors {colors}, views {views}, highlights {highlights}; "
-                f"failures {failed})",
+                f"failures {failed}{base64_note})",
                 5500,
             )
             return
 
-        copied = self._copy_files_to_clipboard(matches)
+        copied, converted_links, staging_failures = self._copy_files_to_clipboard(matches)
+        suffix = ""
+        if self._copy_base64_images_enabled:
+            suffix = f" (BASE64 images embedded {converted_links})"
+            if staging_failures > 0:
+                suffix += f" [staging failures {staging_failures}]"
         self.statusBar().showMessage(
-            f"Copied {copied} {color_name.lower()} highlighted file(s) from {scope}",
+            f"Copied {copied} {color_name.lower()} highlighted file(s) from {scope}{suffix}",
             4000,
         )
 
@@ -8340,7 +8992,7 @@ class MdExploreWindow(QMainWindow):
                 self._pending_pdf_layout_hints = dict(diagram_layout)
 
         if math_ready and mermaid_ready and plantuml_ready and fonts_ready:
-            self._trigger_pdf_print(output_path, source_key)
+            self._prepare_preview_images_for_pdf_export(output_path, source_key)
             return
 
         if attempt < PDF_EXPORT_PRECHECK_MAX_ATTEMPTS:
@@ -8361,7 +9013,101 @@ class MdExploreWindow(QMainWindow):
             "Proceeding with PDF export before all preview assets reported ready",
             3500,
         )
-        self._trigger_pdf_print(output_path, source_key)
+        self._prepare_preview_images_for_pdf_export(output_path, source_key)
+
+    def _prepare_preview_images_for_pdf_export(
+        self, output_path: Path, source_key: str
+    ) -> None:
+        """Inline retrievable preview image sources as BASE64 data URIs before print."""
+        source_path = Path(source_key).expanduser()
+        self.statusBar().showMessage(
+            f"Embedding retrievable images before PDF export: {output_path.name}..."
+        )
+        js = """
+(() => {
+  const seen = new Set();
+  const sources = [];
+  for (const img of Array.from(document.images || [])) {
+    const attrSrc = String(img.getAttribute("src") || "").trim();
+    const absSrc = String(img.src || "").trim();
+    const candidate = attrSrc || absSrc;
+    if (!candidate) continue;
+    const lowered = candidate.toLowerCase();
+    if (lowered.startsWith("data:") || lowered.startsWith("blob:")) continue;
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    sources.push(candidate);
+  }
+  return JSON.stringify(sources);
+})();
+"""
+        self.preview.page().runJavaScript(
+            js,
+            lambda result, target=output_path, key=source_key, source=source_path: self._on_pdf_embed_image_sources_collected(
+                target, key, source, result
+            ),
+        )
+
+    def _on_pdf_embed_image_sources_collected(
+        self,
+        output_path: Path,
+        source_key: str,
+        source_path: Path,
+        result,
+    ) -> None:
+        """Resolve preview image sources and replace retrievable ones with data URIs."""
+        sources: list[str] = []
+        if isinstance(result, list):
+            sources = [str(item).strip() for item in result if str(item).strip()]
+        elif isinstance(result, str):
+            raw_text = result.strip()
+            if raw_text:
+                try:
+                    parsed = json.loads(raw_text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    sources = [str(item).strip() for item in parsed if str(item).strip()]
+                else:
+                    sources = [raw_text]
+
+        replacements: dict[str, str] = {}
+        for source in sources:
+            lowered = source.lower()
+            if lowered.startswith("data:") or lowered.startswith("blob:"):
+                continue
+            data_uri = self._image_link_to_data_uri(source, source_path)
+            if data_uri:
+                replacements[source] = data_uri
+
+        if not replacements:
+            self._trigger_pdf_print(output_path, source_key)
+            return
+
+        replacements_json = json.dumps(replacements, ensure_ascii=False)
+        apply_js = f"""
+(() => {{
+  const replacementMap = {replacements_json};
+  let updated = 0;
+  for (const img of Array.from(document.images || [])) {{
+    const attrSrc = String(img.getAttribute("src") || "").trim();
+    const absSrc = String(img.src || "").trim();
+    const replacement = replacementMap[attrSrc] || replacementMap[absSrc];
+    if (!replacement) continue;
+    img.setAttribute("src", replacement);
+    img.src = replacement;
+    updated += 1;
+  }}
+  return updated;
+}})();
+"""
+
+        def _after_replace(_result) -> None:
+            QTimer.singleShot(
+                120, lambda target=output_path, key=source_key: self._trigger_pdf_print(target, key)
+            )
+
+        self.preview.page().runJavaScript(apply_js, _after_replace)
 
     def _trigger_pdf_print(self, output_path: Path, source_key: str) -> None:
         """Start Qt WebEngine PDF generation for the active preview page."""

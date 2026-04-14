@@ -36,9 +36,13 @@ gradually decomposed.
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
+  - `Recent` opens a dropdown of the 15 most recently navigated root directories (most recent first).
+    The list refreshes from disk each time the menu is opened so multiple running instances stay in sync.
+    A root is added only after it has been active for at least 30 seconds and then you navigate to another root.
   - `^` moves root up one directory level.
   - `Refresh` rescans the current directory view to pick up new/deleted files.
   - `PDF` exports the current preview to `<filename>.pdf` with centered page numbering (`N of M`).
+    During export, retrievable image sources are inlined as BASE64 data URIs so images render in the PDF instead of relying on external links; broken links are left unchanged.
   - `Add View` creates another tabbed view of the same document at the current top visible line.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
@@ -71,6 +75,12 @@ gradually decomposed.
   actions prompt for confirmation before clearing.
 - Top-right copy controls are labeled `Copy to: () Clipboard () Directory`,
   with `Clipboard` selected by default.
+- A BASE64 image toggle button sits beside the copy color buttons:
+  - `off` tooltip: `Turn BASE64 image encoding on`
+  - `on` tooltip: `Turn BASE64 image encoding off`
+  - toggle state persists in `~/.mdexplore.cfg` across restarts (`copy_base64_images_enabled`).
+  - when enabled, copied markdown (clipboard staging or directory copy) converts
+    retrievable image links (local paths and URLs) into embedded BASE64 `data:` URIs.
 - In `Clipboard` mode, color buttons copy matching highlighted files and the
   pin button copies the currently previewed markdown file.
 - In `Directory` mode, pin/color actions open a target-folder picker, then copy
@@ -93,9 +103,15 @@ gradually decomposed.
     selected-text/fuzzy line matching as fallback, and finally the full source
     file if no match is possible.
 - Clipboard copy uses file URI MIME formats compatible with Nemo/Nautilus paste.
-- Last effective root is persisted to `~/.mdexplore.cfg` on exit.
+- Last effective root plus recent-root history are persisted to `~/.mdexplore.cfg` on root navigation and on exit.
+  - Payload format is JSON with keys `default_root`, `recent_roots`, and `copy_base64_images_enabled`
+    (legacy plain-text config is still accepted on read).
+  - Recent roots are capped at 15 entries, ordered newest first.
+  - Config writes use a lock file (`~/.mdexplore.cfg.lock`) with non-blocking, momentary locking.
+  - If another instance holds the lock during a save attempt, that save is skipped silently.
+  - Lock files older than 2 minutes are cleaned up automatically (silently).
   - If no directory is selected at quit time, the most recently selected/expanded
-    directory is used.
+    directory is used for `default_root`.
 
 ## Requirements
 
@@ -130,7 +146,7 @@ It is safe to rerun. After bootstrap, use `mdexplore.sh` for normal launches.
 
 When no `PATH` is supplied, the app opens:
 
-1. the path stored in `~/.mdexplore.cfg` (if valid), otherwise
+1. `default_root` from `~/.mdexplore.cfg` (if valid), otherwise
 2. your home directory.
 
 To open a specific root directory:
@@ -158,7 +174,7 @@ mdexplore.sh [--mermaid-backend js|rust] [PATH]
 - `--mermaid-backend` is optional (`js` default, `rust` requires `mmdr`).
 - Supports plain paths and `file://` URIs (for `.desktop` `%u` launches).
 - If a file path is passed, mdexplore opens its parent directory.
-- If omitted, `~/.mdexplore.cfg` is used (falling back to home directory).
+- If omitted, `default_root` in `~/.mdexplore.cfg` is used (falling back to home directory).
 - `--help` prints usage.
 
 ### Direct Python run
