@@ -14,6 +14,32 @@ NearFocusWindow = dict[str, object]
 
 
 _TERM_BOUNDARY_CLASS = r"[^\w]"
+_INLINE_IMAGE_DATA_URI_RE = re.compile(
+    r"data:image/[a-z0-9.+-]+;base64,[a-z0-9+/=_\r\n-]+",
+    flags=re.IGNORECASE,
+)
+
+
+def strip_inline_image_data_uris(
+    text: str, *, preserve_line_structure: bool = True
+) -> str:
+    """Mask inline image data-URI payloads to avoid search false positives."""
+    if not text:
+        return ""
+    if _INLINE_IMAGE_DATA_URI_RE.search(text) is None:
+        return text
+
+    if not preserve_line_structure:
+        # Fast path for matching/counting flows that do not need source-offset
+        # parity with original text.
+        return _INLINE_IMAGE_DATA_URI_RE.sub(" ", text)
+
+    def _mask(match: re.Match[str]) -> str:
+        return "".join(
+            char if char in {"\n", "\r"} else " " for char in match.group(0)
+        )
+
+    return _INLINE_IMAGE_DATA_URI_RE.sub(_mask, text)
 
 
 def tokenize_match_query(query: str) -> list[SearchToken]:
@@ -401,7 +427,8 @@ def count_highlighted_term_ranges(
     enforce_near_boundaries: bool = False,
 ) -> int:
     """Count non-overlapping term highlight ranges in raw file content."""
-    if not content or not terms:
+    normalized_content = strip_inline_image_data_uris(content or "")
+    if not normalized_content or not terms:
         return 0
 
     ranges: list[tuple[int, int]] = []
@@ -413,7 +440,7 @@ def count_highlighted_term_ranges(
             bool(is_case_sensitive),
             enforce_word_boundaries=bool(enforce_near_boundaries),
         )
-        for match in pattern.finditer(content):
+        for match in pattern.finditer(normalized_content):
             start, end = match.span()
             if near_focus_range is not None:
                 focus_start, focus_end = near_focus_range
@@ -435,7 +462,9 @@ def count_highlighted_term_ranges(
     return len(deduped)
 
 
-def compile_match_hit_counter(query: str):
+def compile_match_hit_counter(
+    query: str, *, strip_inline_image_data: bool = True
+):
     """Compile a lightweight per-file hit counter from query terms."""
     tokens = tokenize_match_query(query)
     near_term_groups = extract_near_term_groups(query)
@@ -463,9 +492,15 @@ def compile_match_hit_counter(query: str):
         return lambda _name, _content: 0
 
     def counter(file_name: str, content: str) -> int:
+        normalized_content = content or ""
+        if strip_inline_image_data:
+            normalized_content = strip_inline_image_data_uris(
+                normalized_content,
+                preserve_line_structure=False,
+            )
         if near_term_groups:
-            return len(collect_near_focus_windows(content or "", near_term_groups))
-        haystack = f"{file_name}\n{content}"
+            return len(collect_near_focus_windows(normalized_content, near_term_groups))
+        haystack = f"{file_name}\n{normalized_content}"
         total = 0
         for pattern in compiled_patterns:
             total += len(pattern.findall(haystack))
@@ -474,7 +509,9 @@ def compile_match_hit_counter(query: str):
     return counter
 
 
-def _compile_simple_match_predicate(tokens: list[SearchToken]):
+def _compile_simple_match_predicate(
+    tokens: list[SearchToken], *, strip_inline_image_data: bool = True
+):
     """Fallback matcher: all terms must appear in filename or content."""
     terms = [
         (value, bool(is_case_sensitive))
@@ -492,6 +529,11 @@ def _compile_simple_match_predicate(tokens: list[SearchToken]):
     def predicate(file_name: str, file_content: str) -> bool:
         name_text = file_name or ""
         content_text = file_content or ""
+        if strip_inline_image_data:
+            content_text = strip_inline_image_data_uris(
+                content_text,
+                preserve_line_structure=False,
+            )
         for pattern in compiled_terms:
             if not pattern.search(name_text) and not pattern.search(content_text):
                 return False
@@ -500,7 +542,9 @@ def _compile_simple_match_predicate(tokens: list[SearchToken]):
     return predicate
 
 
-def compile_match_predicate(query: str):
+def compile_match_predicate(
+    query: str, *, strip_inline_image_data: bool = True
+):
     """Compile boolean query with implicit AND, quotes, and NEAR(...)."""
     tokens = tokenize_match_query(query)
     if not tokens:
@@ -764,11 +808,18 @@ def compile_match_predicate(query: str):
         if idx != len(tokens):
             raise QueryParseError("Unexpected trailing query tokens")
     except QueryParseError:
-        return _compile_simple_match_predicate(tokens)
+        return _compile_simple_match_predicate(
+            tokens, strip_inline_image_data=strip_inline_image_data
+        )
 
     def predicate(file_name: str, file_content: str) -> bool:
         name_text = file_name or ""
         content_text = file_content or ""
+        if strip_inline_image_data:
+            content_text = strip_inline_image_data_uris(
+                content_text,
+                preserve_line_structure=False,
+            )
         return evaluate(
             expression,
             name_text,

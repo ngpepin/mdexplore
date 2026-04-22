@@ -124,6 +124,46 @@ class HfindCliTests(unittest.TestCase):
                 [str(source_dir / "one.md")],
             )
 
+    def test_content_search_ignores_inline_image_base64_data(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-base64-ignore-") as tmpdir:
+            root = Path(tmpdir)
+            base64_only = root / "base64.md"
+            base64_only.write_text(
+                "![img](data:image/png;base64,AAAAAniCoBBBB)\n",
+                encoding="utf-8",
+            )
+            visible = root / "visible.md"
+            visible.write_text("Nico appears in visible text\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-c",
+                "Nico",
+                str(root / "*.md"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(visible)])
+
+    def test_verbose_ignores_inline_image_base64_data_for_line_hits(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-base64-verbose-") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "nico.md"
+            source.write_text(
+                "![img](data:image/png;base64,AAAAAniCoBBBB)\n",
+                encoding="utf-8",
+            )
+
+            code, lines = self._run_main([
+                "-cv",
+                "Nico",
+                str(root / "*.md"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(self._strip_ansi(lines[0]), str(source))
+            self.assertEqual(self._strip_ansi(lines[1]), "(filename match only)")
+            self.assertEqual(len(lines), 2)
+
     def test_help_short_flag_prints_usage_and_exits_zero(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

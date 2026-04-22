@@ -47,14 +47,19 @@ class ColorizedExtensionModel(QFileSystemModel):
     _SEARCH_COUNT_TEXT_MAX = 99
     _SEARCH_COUNT_OVERSAMPLE = 8
     _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
+    SEARCH_FILENAME_MATCH_COLOR = "#f7e27a"
+    OUT_OF_SCOPE_FILENAME_BG = "#9ca3af"
+    OUT_OF_SCOPE_FILENAME_BG_ALPHA = 46
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._dir_color_map: dict[str, dict[str, str]] = {}
         self._loaded_dirs: set[str] = set()
         self._search_match_counts: dict[str, int] = {}
+        self._search_filename_match_paths: set[str] = set()
         self._multi_view_paths: set[str] = set()
         self._highlighted_preview_paths: set[str] = set()
+        self._effective_scope_root_key: str | None = None
         self._primary_icon = self._load_primary_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
@@ -105,6 +110,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
             if self.matches_file_info(info):
+                path_key = self._path_key(Path(info.filePath()))
                 color_name = self._color_for_file(Path(info.filePath()))
                 if color_name:
                     color = QColor(color_name)
@@ -117,8 +123,17 @@ class ColorizedExtensionModel(QFileSystemModel):
                         return QBrush(
                             QColor("#101418") if luminance > 0.6 else QColor("#f8fafc")
                         )
+                if path_key in self._search_filename_match_paths:
+                    return QBrush(QColor(self.SEARCH_FILENAME_MATCH_COLOR))
         if role == Qt.ItemDataRole.FontRole:
             info = self.fileInfo(index)
+            if info.isDir():
+                scope_key = self._effective_scope_root_key
+                if scope_key and self._path_key(Path(info.filePath())) == scope_key:
+                    base_font = super().data(index, role)
+                    font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
+                    font.setBold(True)
+                    return font
             if self.matches_file_info(info):
                 if self._search_match_counts.get(
                     self._path_key(Path(info.filePath())), 0
@@ -151,6 +166,8 @@ class ColorizedExtensionModel(QFileSystemModel):
         return color if color.isValid() else None
 
     def highlight_foreground_for_path(self, path: Path) -> QColor | None:
+        if self._path_key(path) in self._search_filename_match_paths:
+            return QColor(self.SEARCH_FILENAME_MATCH_COLOR)
         background = self.highlight_background_for_path(path)
         if background is None:
             return None
@@ -233,7 +250,12 @@ class ColorizedExtensionModel(QFileSystemModel):
     def set_search_match_paths(self, paths: set[Path]) -> None:
         self.set_search_match_counts({path: 1 for path in paths})
 
-    def set_search_match_counts(self, match_counts: dict[Path, int]) -> None:
+    def set_search_match_counts(
+        self,
+        match_counts: dict[Path, int],
+        *,
+        filename_match_path_keys: set[str] | None = None,
+    ) -> None:
         next_counts: dict[str, int] = {}
         for path, raw_count in match_counts.items():
             try:
@@ -244,12 +266,21 @@ class ColorizedExtensionModel(QFileSystemModel):
                 continue
             next_counts[self._path_key(path)] = count
         self._search_match_counts = next_counts
+        if filename_match_path_keys is None:
+            self._search_filename_match_paths = set(next_counts.keys())
+        else:
+            self._search_filename_match_paths = {
+                str(path_key)
+                for path_key in filename_match_path_keys
+                if isinstance(path_key, str) and path_key in next_counts
+            }
         self._decorated_icon_cache.clear()
 
     def clear_search_match_paths(self) -> None:
-        if not self._search_match_counts:
+        if not self._search_match_counts and not self._search_filename_match_paths:
             return
         self._search_match_counts.clear()
+        self._search_filename_match_paths.clear()
         self._decorated_icon_cache.clear()
 
     def set_multi_view_paths(self, paths: set[Path]) -> None:
@@ -291,6 +322,33 @@ class ColorizedExtensionModel(QFileSystemModel):
             return
         self._highlighted_preview_paths.clear()
         self._decorated_icon_cache.clear()
+
+    def set_effective_scope_directory(self, directory: Path | None) -> bool:
+        """Set active scope root used for out-of-scope row shading."""
+        next_key: str | None = None
+        if isinstance(directory, Path):
+            next_key = self._path_key(directory)
+        if next_key == self._effective_scope_root_key:
+            return False
+        self._effective_scope_root_key = next_key
+        return True
+
+    def out_of_scope_background_for_path(self, path: Path) -> QColor | None:
+        """Return faint background color for visible files outside active scope."""
+        scope_key = self._effective_scope_root_key
+        if not scope_key:
+            return None
+        path_key = self._path_key(path)
+        if path_key == scope_key:
+            return None
+        scope_prefix = scope_key + os.sep
+        if path_key.startswith(scope_prefix):
+            return None
+        color = QColor(self.OUT_OF_SCOPE_FILENAME_BG)
+        if not color.isValid():
+            return None
+        color.setAlpha(max(0, min(255, int(self.OUT_OF_SCOPE_FILENAME_BG_ALPHA))))
+        return color
 
     def _path_key(self, path: Path) -> str:
         try:
@@ -543,17 +601,22 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
             return
 
         file_path = Path(info.filePath())
+        out_of_scope_background = model.out_of_scope_background_for_path(file_path)
         background = model.highlight_background_for_path(file_path)
-        if background is None:
+        if out_of_scope_background is None and background is None:
             super().paint(painter, option, index)
             return
-
-        super().paint(painter, option, index)
 
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
+
+        # Draw the standard row chrome/icon once, but suppress built-in text so
+        # custom background rows do not render duplicated glyphs.
+        base_opt = QStyleOptionViewItem(opt)
+        base_opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, base_opt, painter, widget)
 
         text_rect = style.subElementRect(
             QStyle.SubElement.SE_ItemViewItemText, opt, widget
@@ -561,8 +624,12 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         highlight_rect = text_rect.adjusted(-2, 1, 2, -1)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRect(highlight_rect)
+        if out_of_scope_background is not None:
+            painter.setBrush(out_of_scope_background)
+            painter.drawRect(highlight_rect)
+        if background is not None:
+            painter.setBrush(background)
+            painter.drawRect(highlight_rect)
         painter.restore()
 
         foreground = model.highlight_foreground_for_path(file_path)

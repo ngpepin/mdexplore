@@ -9,6 +9,7 @@ Examples:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ USAGE = """Usage:
 Notes:
   - If -q/--query is omitted, the first positional argument is used as QUERY.
     - If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
-  - Default search checks filename stem only (no extension, no path).
+  - Default search checks filename (including extension, no path).
   - --content/-c includes file contents in matching.
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
@@ -62,6 +63,20 @@ ANSI_RESET = "\033[0m"
 OSC8_OPEN = "\033]8;;"
 OSC8_CLOSE = "\a"
 _BINARY_SAMPLE_BYTES = 8192
+
+
+def _configured_search_workers() -> int:
+    raw = os.environ.get("HFIND_SEARCH_THREADS", "").strip()
+    try:
+        configured = int(raw)
+    except Exception:
+        configured = 0
+    if configured > 0:
+        return configured
+    return max(4, min(24, (os.cpu_count() or 2) * 3))
+
+
+_MAX_SEARCH_WORKERS = _configured_search_workers()
 
 
 def _style_filepath(path: Path) -> str:
@@ -304,6 +319,7 @@ def _iter_term_ranges(
     *,
     enforce_near_boundaries: bool = False,
 ) -> list[tuple[int, int]]:
+    searchable_text = search_query.strip_inline_image_data_uris(text or "")
     ranges: list[tuple[int, int]] = []
     for term_text, is_case_sensitive in terms:
         if not term_text:
@@ -313,7 +329,7 @@ def _iter_term_ranges(
             bool(is_case_sensitive),
             enforce_word_boundaries=bool(enforce_near_boundaries),
         )
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(searchable_text):
             ranges.append(match.span())
     ranges.sort(key=lambda item: (item[0], -(item[1] - item[0])))
     merged: list[tuple[int, int]] = []
@@ -356,13 +372,16 @@ def _highlight_line(
 
 def _collect_verbose_line_numbers(content: str, query: str) -> set[int]:
     line_numbers: set[int] = set()
+    searchable_content = search_query.strip_inline_image_data_uris(content or "")
     spans = _line_spans(content)
     if not spans:
         return line_numbers
 
     terms = search_query.extract_search_terms(query)
     near_groups = search_query.extract_near_term_groups(query)
-    near_windows = search_query.collect_near_focus_windows(content, near_groups)
+    near_windows = search_query.collect_near_focus_windows(
+        searchable_content, near_groups
+    )
 
     # NEAR() is strict: only include lines that overlap qualifying NEAR windows.
     if near_groups:
@@ -417,7 +436,10 @@ def _line_has_self_contained_near_match(
         return False
     if not line_text:
         return False
-    return bool(search_query.collect_near_focus_windows(line_text, near_groups))
+    searchable_line_text = search_query.strip_inline_image_data_uris(line_text)
+    return bool(
+        search_query.collect_near_focus_windows(searchable_line_text, near_groups)
+    )
 
 
 def _print_verbose_result(path: Path, content: str, query: str) -> None:
@@ -475,44 +497,99 @@ def _print_verbose_result(path: Path, content: str, query: str) -> None:
         print(f"  {line_no}: {rendered}")
 
 
+def _scan_candidate_for_query(
+    index: int,
+    path: Path,
+    predicate,
+    *,
+    include_content: bool,
+    include_pdf: bool,
+) -> tuple[int, Path, str, bool]:
+    """Read one candidate and evaluate query match state."""
+    is_pdf = path.suffix.lower() == ".pdf"
+    file_name = path.name
+    content = ""
+
+    if include_content:
+        if is_pdf:
+            if include_pdf:
+                text = _read_pdf_text_if_possible(path)
+                content = text or ""
+        else:
+            if _is_clearly_binary_file(path):
+                return index, path, "", False
+            text = _read_text_if_possible(path)
+            if text is None:
+                return index, path, "", False
+            content = text
+
+    searchable_content = search_query.strip_inline_image_data_uris(
+        content,
+        preserve_line_structure=False,
+    )
+    try:
+        matched = bool(predicate(file_name, searchable_content))
+    except Exception:
+        matched = False
+    return index, path, content, matched
+
+
 def main(argv: list[str]) -> int:
     try:
         query, include_content, recursive, verbose, include_pdf, patterns = _parse_args(argv)
-        predicate = search_query.compile_match_predicate(query)
+        predicate = search_query.compile_match_predicate(
+            query, strip_inline_image_data=False
+        )
 
         if include_pdf and not include_content:
             print("note: --pdf has no effect unless --content/-c is set", file=sys.stderr)
 
         candidates = _expand_patterns(patterns, recursive)
         match_count = 0
+        if not candidates:
+            return 1
 
-        for path in candidates:
-            is_pdf = path.suffix.lower() == ".pdf"
-            stem = path.stem
-            content = ""
+        worker_count = max(1, min(_MAX_SEARCH_WORKERS, len(candidates)))
+        results: list[tuple[int, Path, str, bool]] = []
+        if worker_count <= 1:
+            for index, path in enumerate(candidates):
+                results.append(
+                    _scan_candidate_for_query(
+                        index,
+                        path,
+                        predicate,
+                        include_content=include_content,
+                        include_pdf=include_pdf,
+                    )
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(
+                        _scan_candidate_for_query,
+                        index,
+                        path,
+                        predicate,
+                        include_content=include_content,
+                        include_pdf=include_pdf,
+                    ): index
+                    for index, path in enumerate(candidates)
+                }
+                for future in as_completed(future_map):
+                    try:
+                        results.append(future.result())
+                    except Exception:
+                        continue
 
-            if include_content:
-                if is_pdf:
-                    if include_pdf:
-                        text = _read_pdf_text_if_possible(path)
-                        content = text or ""
-                else:
-                    if _is_clearly_binary_file(path):
-                        continue
-                    text = _read_text_if_possible(path)
-                    if text is None:
-                        continue
-                    content = text
-            try:
-                if predicate(stem, content):
-                    match_count += 1
-                    if verbose:
-                        _print_verbose_result(path, content, query)
-                    else:
-                        print(_style_filepath(path))
-            except Exception:
-                # Keep search resilient across odd parser/runtime edge cases.
+        results.sort(key=lambda item: item[0])
+        for _index, path, content, matched in results:
+            if not matched:
                 continue
+            match_count += 1
+            if verbose:
+                _print_verbose_result(path, content, query)
+            else:
+                print(_style_filepath(path))
 
         return 0 if match_count else 1
     except KeyboardInterrupt:

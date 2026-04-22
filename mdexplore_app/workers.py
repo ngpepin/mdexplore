@@ -3,15 +3,93 @@
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
 import json
 import os
 import subprocess
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .pdf import extract_plantuml_error_details, stamp_pdf_page_numbers
+from . import search as search_query
+
+
+_SEARCH_CONTENT_CACHE_MAX_ENTRIES = 512
+_SEARCH_CONTENT_CACHE_MAX_CHARS = 64 * 1024 * 1024
+_SEARCH_CONTENT_CACHE_LOCK = Lock()
+_SEARCH_CONTENT_CACHE: OrderedDict[str, tuple[int, int, str]] = OrderedDict()
+_SEARCH_CONTENT_CACHE_TOTAL_CHARS = 0
+
+
+def _lookup_cached_search_content(
+    path_key: str, mtime_ns: int, size: int
+) -> str | None:
+    with _SEARCH_CONTENT_CACHE_LOCK:
+        cached = _SEARCH_CONTENT_CACHE.get(path_key)
+        if cached is None:
+            return None
+        cached_mtime_ns, cached_size, cached_text = cached
+        if cached_mtime_ns != mtime_ns or cached_size != size:
+            return None
+        _SEARCH_CONTENT_CACHE.move_to_end(path_key)
+        return cached_text
+
+
+def _store_cached_search_content(
+    path_key: str, mtime_ns: int, size: int, searchable_text: str
+) -> None:
+    global _SEARCH_CONTENT_CACHE_TOTAL_CHARS
+    with _SEARCH_CONTENT_CACHE_LOCK:
+        previous = _SEARCH_CONTENT_CACHE.pop(path_key, None)
+        if previous is not None:
+            _SEARCH_CONTENT_CACHE_TOTAL_CHARS -= len(previous[2])
+        _SEARCH_CONTENT_CACHE[path_key] = (mtime_ns, size, searchable_text)
+        _SEARCH_CONTENT_CACHE_TOTAL_CHARS += len(searchable_text)
+        while (
+            len(_SEARCH_CONTENT_CACHE) > _SEARCH_CONTENT_CACHE_MAX_ENTRIES
+            or _SEARCH_CONTENT_CACHE_TOTAL_CHARS > _SEARCH_CONTENT_CACHE_MAX_CHARS
+        ):
+            _evicted_key, evicted = _SEARCH_CONTENT_CACHE.popitem(last=False)
+            _SEARCH_CONTENT_CACHE_TOTAL_CHARS -= len(evicted[2])
+
+
+def _load_searchable_markdown_content(path: Path) -> tuple[str, str]:
+    """Return `(path_key, searchable_content)` for one markdown file."""
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    path_key = str(resolved)
+
+    mtime_ns: int | None = None
+    size: int | None = None
+    try:
+        stat = resolved.stat()
+        mtime_ns = int(stat.st_mtime_ns)
+        size = int(stat.st_size)
+    except Exception:
+        stat = None
+
+    if mtime_ns is not None and size is not None:
+        cached = _lookup_cached_search_content(path_key, mtime_ns, size)
+        if cached is not None:
+            return path_key, cached
+
+    try:
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        content = ""
+    searchable_content = search_query.strip_inline_image_data_uris(
+        content,
+        preserve_line_structure=False,
+    )
+
+    if mtime_ns is not None and size is not None:
+        _store_cached_search_content(path_key, mtime_ns, size, searchable_content)
+    return path_key, searchable_content
 
 
 class PreviewRenderWorkerSignals(QObject):
@@ -317,3 +395,68 @@ class TreeMarkerScanWorker(QRunnable):
                 if file_name.lower().endswith(".md") and isinstance(raw_entries, list):
                     highlights_by_file[file_name] = raw_entries
         return highlights_by_file
+
+
+class SearchScanWorkerSignals(QObject):
+    """Signals emitted by background markdown search workers."""
+
+    finished = Signal(int, object, object, object, str)
+
+
+class SearchScanWorker(QRunnable):
+    """Scan a markdown-file chunk for query matches in background."""
+
+    def __init__(self, request_id: int, query: str, paths: list[Path]) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.query = query
+        self.paths = list(paths)
+        self.signals = SearchScanWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            predicate = search_query.compile_match_predicate(
+                self.query,
+                strip_inline_image_data=False,
+            )
+            hit_counter = search_query.compile_match_hit_counter(
+                self.query,
+                strip_inline_image_data=False,
+            )
+            filename_terms = search_query.extract_search_terms(self.query)
+            filename_patterns = [
+                search_query.compile_term_pattern(term_text, bool(is_case_sensitive))
+                for term_text, is_case_sensitive in filename_terms
+                if term_text
+            ]
+
+            matched_paths: list[str] = []
+            match_counts: dict[str, int] = {}
+            filename_match_paths: list[str] = []
+
+            for path in self.paths:
+                try:
+                    path_key, searchable_content = _load_searchable_markdown_content(path)
+                    if not predicate(path.name, searchable_content):
+                        continue
+                except Exception:
+                    continue
+
+                matched_paths.append(path_key)
+                if any(pattern.search(path.name) for pattern in filename_patterns):
+                    filename_match_paths.append(path_key)
+                try:
+                    count = hit_counter(path.name, searchable_content)
+                except Exception:
+                    count = 1
+                match_counts[path_key] = count if count > 0 else 1
+
+            self.signals.finished.emit(
+                self.request_id,
+                matched_paths,
+                match_counts,
+                filename_match_paths,
+                "",
+            )
+        except Exception as exc:
+            self.signals.finished.emit(self.request_id, [], {}, [], str(exc))

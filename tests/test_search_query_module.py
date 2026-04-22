@@ -91,6 +91,16 @@ class SearchQueryModuleTests(unittest.TestCase):
             2,
         )
 
+    def test_predicate_ignores_inline_image_data_uri_payloads(self) -> None:
+        predicate = search_query.compile_match_predicate("Nico")
+        content = "![img](data:image/png;base64,AAAAAniCoBBBB)\n"
+        self.assertFalse(predicate("example.md", content))
+
+    def test_hit_counter_ignores_inline_image_data_uri_payloads(self) -> None:
+        counter = search_query.compile_match_hit_counter("Nico")
+        content = "Visible Nico text\n![img](data:image/png;base64,AAAAAniCoBBBB)\n"
+        self.assertEqual(counter("example.md", content), 1)
+
     def test_legacy_close_alias_remains_accepted(self) -> None:
         predicate = search_query.compile_match_predicate("""CLOSE(alpha,beta)""")
         self.assertTrue(predicate("example.md", "alpha goes with beta"))

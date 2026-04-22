@@ -151,12 +151,21 @@ from mdexplore_app.workers import (
     PdfExportWorker,
     PlantUmlRenderWorker,
     PreviewRenderWorker,
+    SearchScanWorker,
     TreeMarkerScanWorker,
 )
 
 
 PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW = "preview_text_v2"
 PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE = "markdown_source_v1"
+_PREVIEW_INLINE_DATA_IMAGE_SRC_RE = re.compile(
+    r'(<img\b[^>]*?\bsrc=)(["\'])(data:[^"\']+;base64,[^"\']+)\2',
+    flags=re.IGNORECASE,
+)
+_PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES = {
+    "image/svg+xml": ".svg",
+    "image/jpeg": ".jpg",
+}
 
 
 class _PreviewLogicalTextExtractor(HTMLParser):
@@ -1114,6 +1123,7 @@ class MdExploreWindow(QMainWindow):
         ("Medium Gray", "#9ca3af"),
         ("Red", "#ef7d7d"),
     ]
+    DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
 
     def __init__(
         self,
@@ -1141,6 +1151,15 @@ class MdExploreWindow(QMainWindow):
         self.last_directory_selection: Path | None = self.root
         self.cache: dict[str, tuple[int, int, str]] = {}
         self.current_match_files: list[Path] = []
+        self._search_scan_request_id = 0
+        self._search_scan_expected_workers = 0
+        self._search_scan_completed_workers = 0
+        self._search_scan_total_candidates = 0
+        self._search_scan_scope: Path | None = None
+        self._search_scan_candidate_order: dict[str, int] = {}
+        self._search_scan_match_counts: dict[str, int] = {}
+        self._search_scan_filename_match_paths: set[str] = set()
+        self._search_scan_error_count = 0
         self._pending_preview_search_terms: list[tuple[str, bool]] = []
         self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
         self._render_pool = QThreadPool(self)
@@ -1152,6 +1171,18 @@ class MdExploreWindow(QMainWindow):
         self._tree_marker_scan_request_id = 0
         self._active_tree_marker_scan_workers: set[TreeMarkerScanWorker] = set()
         self._tree_marker_scan_dirty_paths: set[str] = set()
+        self._search_scan_pool = QThreadPool(self)
+        raw_search_threads = os.environ.get("MDEXPLORE_SEARCH_THREADS", "").strip()
+        try:
+            configured_search_threads = int(raw_search_threads)
+        except Exception:
+            configured_search_threads = 0
+        if configured_search_threads > 0:
+            search_scan_threads = configured_search_threads
+        else:
+            search_scan_threads = self.DEFAULT_SEARCH_SCAN_MAX_THREADS
+        self._search_scan_pool.setMaxThreadCount(search_scan_threads)
+        self._active_search_scan_workers: set[SearchScanWorker] = set()
         self._plantuml_pool = QThreadPool(self)
         # Let independent PlantUML blocks render concurrently; keep a modest
         # upper bound to avoid CPU saturation on large documents.
@@ -1235,6 +1266,8 @@ class MdExploreWindow(QMainWindow):
                 f"gpu_context={bool(gpu_context_available)}"
             )
         self._preview_html_temp_files: deque[Path] = deque()
+        self._preview_data_image_files_by_hash: dict[str, Path] = {}
+        self._preview_data_image_temp_files: set[Path] = set()
         self._view_line_probe_pending = False
         self._last_view_line_probe_at = 0.0
         self._view_tab_restore_request_id = 0
@@ -1247,7 +1280,7 @@ class MdExploreWindow(QMainWindow):
         # keystroke while the user is still typing an expression.
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
-        self.match_timer.setInterval(1000)
+        self.match_timer.setInterval(3000)
         self.match_timer.timeout.connect(self._run_match_search)
         self._scroll_capture_timer = QTimer(self)
         self._scroll_capture_timer.setInterval(200)
@@ -1300,6 +1333,7 @@ class MdExploreWindow(QMainWindow):
         self._pdf_diagram_probe_timer.timeout.connect(
             self._probe_pdf_diagram_readiness
         )
+        self._suspend_directory_open_on_expand = False
         # Keep user-adjusted tree/preview pane widths for this app run.
         self._session_splitter_sizes: list[int] | None = None
         self._initial_split_applied = False
@@ -1338,6 +1372,7 @@ class MdExploreWindow(QMainWindow):
             self._on_tree_selection_changed
         )
         self.tree.expanded.connect(self._on_tree_directory_expanded)
+        self.tree.collapsed.connect(self._on_tree_directory_collapsed)
 
         self.preview = QWebEngineView()
         self._preview_page = PreviewPage(self.preview)
@@ -3206,6 +3241,9 @@ class MdExploreWindow(QMainWindow):
         stat = resolved.stat()
         cache_key = str(resolved)
         markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+        markdown_text = self._normalize_markdown_inline_image_data_uris_for_preview(
+            markdown_text
+        )
         has_math, has_mermaid, has_plantuml = (
             self._detect_special_features_from_markdown(markdown_text)
         )
@@ -4445,6 +4483,165 @@ class MdExploreWindow(QMainWindow):
             except Exception:
                 pass
 
+    @staticmethod
+    def _preview_data_image_extension_for_mime_type(mime_type: str) -> str:
+        """Return a stable file suffix for one preview image MIME type."""
+        normalized = str(mime_type or "").strip().lower()
+        if not normalized:
+            return ".img"
+        override = _PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES.get(normalized)
+        if override:
+            return override
+        guessed = mimetypes.guess_extension(normalized) or ".img"
+        if guessed == ".jpe":
+            return ".jpg"
+        if not guessed.startswith("."):
+            return f".{guessed}"
+        return guessed
+
+    @staticmethod
+    def _preview_data_image_temp_dir() -> Path:
+        """Return temp directory used for extracted inline preview images."""
+        return Path(tempfile.gettempdir()) / "mdexplore-preview-data-images"
+
+    def _preview_data_image_file_url(self, data_uri: str) -> str | None:
+        """Persist one inline base64 data URI to a temp file and return a file URL."""
+        raw_data_uri = str(data_uri or "").strip()
+        if not raw_data_uri:
+            return None
+
+        digest = hashlib.sha1(raw_data_uri.encode("utf-8", errors="replace")).hexdigest()
+        cached_path = self._preview_data_image_files_by_hash.get(digest)
+        if cached_path is not None and cached_path.exists():
+            self._preview_data_image_temp_files.add(cached_path)
+            return QUrl.fromLocalFile(str(cached_path)).toString()
+
+        if "," not in raw_data_uri:
+            return None
+        header, payload = raw_data_uri.split(",", 1)
+        normalized_header = header.strip().lower()
+        if not normalized_header.startswith("data:"):
+            return None
+        if ";base64" not in normalized_header:
+            return None
+        declared_mime_type = normalized_header[5:].split(";", 1)[0].strip().lower()
+
+        compact_payload = re.sub(r"\s+", "", payload or "")
+        if not compact_payload:
+            return None
+        try:
+            raw_bytes = base64.b64decode(compact_payload, validate=False)
+        except Exception:
+            return None
+        if not raw_bytes:
+            return None
+        mime_type = self._preview_data_image_mime_type_from_bytes(
+            raw_bytes, declared_mime_type
+        )
+        if not mime_type:
+            return None
+
+        temp_dir = self._preview_data_image_temp_dir()
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return None
+
+        suffix = self._preview_data_image_extension_for_mime_type(mime_type)
+        output_path = temp_dir / f"{digest}{suffix}"
+        try:
+            if (
+                not output_path.exists()
+                or output_path.stat().st_size != len(raw_bytes)
+            ):
+                output_path.write_bytes(raw_bytes)
+        except Exception:
+            return None
+
+        self._preview_data_image_files_by_hash[digest] = output_path
+        self._preview_data_image_temp_files.add(output_path)
+        return QUrl.fromLocalFile(str(output_path)).toString()
+
+    @staticmethod
+    def _preview_data_image_mime_type_from_bytes(
+        raw_bytes: bytes, declared_mime_type: str
+    ) -> str | None:
+        """Infer image MIME type for one data URI payload.
+
+        Accept declared image MIME types directly. For generic declarations like
+        `application/octet-stream`, inspect magic bytes to detect common formats.
+        """
+        declared = str(declared_mime_type or "").strip().lower()
+        if declared.startswith("image/"):
+            return declared
+        if not raw_bytes:
+            return None
+
+        head = raw_bytes[:16]
+        if head.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if head.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+            return "image/gif"
+        if head.startswith(b"BM"):
+            return "image/bmp"
+        if len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        if head.startswith(b"II*\x00") or head.startswith(b"MM\x00*"):
+            return "image/tiff"
+        if head.startswith(b"\x00\x00\x01\x00"):
+            return "image/x-icon"
+        if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
+            return "image/avif"
+        if len(raw_bytes) >= 12 and raw_bytes[4:12] in {
+            b"ftypheic",
+            b"ftypheix",
+            b"ftyphevc",
+            b"ftyphevx",
+        }:
+            return "image/heic"
+
+        lowered = raw_bytes[:2048].decode("utf-8", errors="ignore").lstrip().lower()
+        if lowered.startswith("<svg") or (
+            lowered.startswith("<?xml") and "<svg" in lowered
+        ):
+            return "image/svg+xml"
+        return None
+
+    def _materialize_preview_inline_data_images(self, html_doc: str) -> str:
+        """Replace inline base64 data-image URLs in preview HTML with temp file URLs."""
+        if "data:" not in str(html_doc or "").lower():
+            return html_doc
+
+        def _replace(match: re.Match[str]) -> str:
+            local_file_url = self._preview_data_image_file_url(match.group(3))
+            if not local_file_url:
+                return match.group(0)
+            prefix = match.group(1)
+            quote = match.group(2)
+            return f"{prefix}{quote}{local_file_url}{quote}"
+
+        try:
+            return _PREVIEW_INLINE_DATA_IMAGE_SRC_RE.sub(_replace, html_doc)
+        except Exception:
+            return html_doc
+
+    def _cleanup_preview_data_image_temp_files(self) -> None:
+        """Delete temporary files created from inline preview data-image sources."""
+        stale_paths = tuple(self._preview_data_image_temp_files)
+        self._preview_data_image_temp_files.clear()
+        self._preview_data_image_files_by_hash.clear()
+        for path in stale_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        try:
+            self._preview_data_image_temp_dir().rmdir()
+        except Exception:
+            pass
+
     def _track_preview_temp_file(self, temp_path: Path) -> None:
         """Track temp preview files and clean up old entries eagerly."""
         self._preview_html_temp_files.append(temp_path)
@@ -4461,15 +4658,16 @@ class MdExploreWindow(QMainWindow):
         # named-view marker push to repopulate the overlay after loadFinished.
         self._last_named_view_marker_payload_key = None
         self._last_named_view_marker_payload_json = None
+        prepared_html_doc = self._materialize_preview_inline_data_images(html_doc)
         try:
-            encoded_size = len(html_doc.encode("utf-8", errors="replace"))
+            encoded_size = len(prepared_html_doc.encode("utf-8", errors="replace"))
         except Exception:
-            encoded_size = len(html_doc)
+            encoded_size = len(prepared_html_doc)
         if encoded_size <= PREVIEW_SETHTML_MAX_BYTES:
-            self.preview.setHtml(html_doc, base_url)
+            self.preview.setHtml(prepared_html_doc, base_url)
             return
         try:
-            prepared = self._html_with_base_href(html_doc, base_url)
+            prepared = self._html_with_base_href(prepared_html_doc, base_url)
             temp_dir = Path(tempfile.gettempdir()) / "mdexplore-preview"
             temp_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -4487,7 +4685,7 @@ class MdExploreWindow(QMainWindow):
             return
         except Exception:
             # If temp-file load setup fails, fall back to direct setHtml.
-            self.preview.setHtml(html_doc, base_url)
+            self.preview.setHtml(prepared_html_doc, base_url)
 
     def _ensure_non_empty_status_message(self) -> None:
         """Keep a non-empty status bar message instead of blank idle periods."""
@@ -5225,10 +5423,14 @@ class MdExploreWindow(QMainWindow):
 
     def _restore_expanded_directory_paths(self, paths: list[str]) -> None:
         """Restore expanded directories that still exist after a model refresh."""
-        for path_text in paths:
-            index = self.model.index(path_text)
-            if index.isValid():
-                self.tree.expand(index)
+        self._suspend_directory_open_on_expand = True
+        try:
+            for path_text in paths:
+                index = self.model.index(path_text)
+                if index.isValid():
+                    self.tree.expand(index)
+        finally:
+            self._suspend_directory_open_on_expand = False
 
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         """Refresh tree contents to detect newly created/deleted markdown files."""
@@ -5337,6 +5539,7 @@ class MdExploreWindow(QMainWindow):
         """Debounce free-form match input before running a new search."""
         self._match_input_text = text
         self.match_clear_action.setVisible(bool(text.strip()))
+        self._cancel_pending_search_scan()
         if not text.strip():
             self.match_timer.stop()
             self._clear_match_results()
@@ -5364,6 +5567,23 @@ class MdExploreWindow(QMainWindow):
         self._tree_marker_scan_request_id += 1
         self._tree_marker_scan_pool.clear()
         self._tree_marker_scan_dirty_paths.clear()
+
+    def _reset_search_scan_state(self) -> None:
+        """Reset per-request aggregated search worker state."""
+        self._search_scan_expected_workers = 0
+        self._search_scan_completed_workers = 0
+        self._search_scan_total_candidates = 0
+        self._search_scan_scope = None
+        self._search_scan_candidate_order.clear()
+        self._search_scan_match_counts.clear()
+        self._search_scan_filename_match_paths.clear()
+        self._search_scan_error_count = 0
+
+    def _cancel_pending_search_scan(self) -> None:
+        """Drop queued background search scans and invalidate stale results."""
+        self._search_scan_request_id += 1
+        self._search_scan_pool.clear()
+        self._reset_search_scan_state()
 
     def _merge_live_tree_marker_state(
         self,
@@ -5492,46 +5712,140 @@ class MdExploreWindow(QMainWindow):
 
     def _clear_match_results(self) -> None:
         """Clear bolded search matches without affecting persisted highlights."""
+        self._cancel_pending_search_scan()
         self.current_match_files = []
         self.model.clear_search_match_paths()
         self.tree.viewport().update()
         self._remove_preview_search_highlights()
 
     def _run_match_search(self) -> None:
-        """Search current scope non-recursively and bold matching markdown files."""
+        """Search visible tree files in background workers and bold matches."""
         query = self.match_input.text().strip()
         if not query:
             self._clear_match_results()
             return
 
         scope = self._highlight_scope_directory()
-        predicate = self._compile_match_predicate(query)
-        hit_counter = self._compile_match_hit_counter(query)
-        candidates = self._list_markdown_files_non_recursive(scope)
-        self.statusBar().showMessage(
-            f"Searching {len(candidates)} markdown file(s) in {scope}...",
+        candidates = self._list_visible_markdown_files_in_tree()
+        self._cancel_pending_search_scan()
+        request_id = self._search_scan_request_id
+        self._search_scan_total_candidates = len(candidates)
+        self._search_scan_scope = self.root
+        self._search_scan_candidate_order = {
+            self._path_key(path): index for index, path in enumerate(candidates)
+        }
+
+        if not candidates:
+            self.current_match_files = []
+            self.model.clear_search_match_paths()
+            self.tree.viewport().update()
+            self.statusBar().showMessage(
+                f"Matched 0 of 0 visible markdown file(s) in tree under {self.root}",
+                2500,
+            )
+            self._remove_preview_search_highlights()
+            self._reset_search_scan_state()
+            return
+
+        worker_limit = max(
+            1,
+            min(self._search_scan_pool.maxThreadCount(), len(candidates)),
         )
-        matches: list[Path] = []
-        match_counts: dict[Path, int] = {}
+        # Use smaller chunks than worker count so the pool can rebalance
+        # uneven file sizes and keep CPU utilization higher.
+        target_chunks = max(worker_limit, worker_limit * 4)
+        chunk_size = max(1, int(math.ceil(len(candidates) / target_chunks)))
+        started_workers = 0
+        for start in range(0, len(candidates), chunk_size):
+            chunk = candidates[start : start + chunk_size]
+            if not chunk:
+                continue
+            worker = SearchScanWorker(request_id, query, chunk)
+            self._active_search_scan_workers.add(worker)
+            worker.signals.finished.connect(self._on_search_scan_finished)
+            self._search_scan_pool.start(worker)
+            started_workers += 1
 
-        for path in candidates:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                content = ""
-            # Search over file name + body to support quick discovery.
-            if predicate(path.name, content):
-                matches.append(path)
-                count = hit_counter(path.name, content)
-                match_counts[path] = count if count > 0 else 1
+        self._search_scan_expected_workers = started_workers
+        self.statusBar().showMessage(
+            f"Searching {len(candidates)} visible markdown file(s) in tree under {scope} using {started_workers} worker(s)..."
+        )
 
-        self.current_match_files = matches
-        self.model.set_search_match_counts(match_counts)
+    def _on_search_scan_finished(
+        self,
+        request_id: int,
+        matched_paths,
+        match_counts,
+        filename_match_paths,
+        error_text: str,
+    ) -> None:
+        """Merge completed search chunk results and apply when all workers finish."""
+        worker_to_remove = None
+        for worker in self._active_search_scan_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_search_scan_workers.remove(worker_to_remove)
+
+        if request_id != self._search_scan_request_id:
+            return
+
+        self._search_scan_completed_workers += 1
+        if error_text:
+            self._search_scan_error_count += 1
+
+        if isinstance(match_counts, dict):
+            for raw_path_key, raw_count in match_counts.items():
+                if not isinstance(raw_path_key, str):
+                    continue
+                try:
+                    count = int(raw_count)
+                except Exception:
+                    count = 0
+                self._search_scan_match_counts[raw_path_key] = count if count > 0 else 1
+        if isinstance(matched_paths, (list, tuple, set)):
+            for raw_path_key in matched_paths:
+                if not isinstance(raw_path_key, str):
+                    continue
+                if raw_path_key not in self._search_scan_match_counts:
+                    self._search_scan_match_counts[raw_path_key] = 1
+        if isinstance(filename_match_paths, (list, tuple, set)):
+            for raw_path_key in filename_match_paths:
+                if isinstance(raw_path_key, str):
+                    self._search_scan_filename_match_paths.add(raw_path_key)
+
+        if self._search_scan_completed_workers < self._search_scan_expected_workers:
+            return
+
+        ordered_match_keys = sorted(
+            self._search_scan_match_counts.keys(),
+            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
+        )
+        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
+        model_counts = {
+            Path(path_key): self._search_scan_match_counts[path_key]
+            for path_key in ordered_match_keys
+        }
+        self.model.set_search_match_counts(
+            model_counts,
+            filename_match_path_keys=self._search_scan_filename_match_paths,
+        )
         self.tree.viewport().update()
-        self.statusBar().showMessage(
-            f"Matched {len(matches)} of {len(candidates)} markdown file(s) in {scope}",
-            3500,
+
+        if self._search_scan_scope is not None:
+            scope_text = str(self._search_scan_scope)
+        else:
+            scope_text = str(self._highlight_scope_directory())
+        status_message = (
+            f"Matched {len(self.current_match_files)} of {self._search_scan_total_candidates} visible markdown file(s) in tree under {scope_text}"
         )
+        if self._search_scan_error_count > 0:
+            status_message = (
+                f"{status_message} ({self._search_scan_error_count} worker error(s))"
+            )
+        self.statusBar().showMessage(status_message, 3500)
+
         if self.current_file is not None:
             if self._is_path_in_current_matches(self.current_file):
                 self._highlight_preview_search_terms(
@@ -5541,6 +5855,8 @@ class MdExploreWindow(QMainWindow):
                 )
             else:
                 self._remove_preview_search_highlights()
+
+        self._reset_search_scan_state()
 
     @staticmethod
     def _path_key(path: Path) -> str:
@@ -5843,7 +6159,57 @@ class MdExploreWindow(QMainWindow):
                 pass
         return files
 
-    def _compile_match_hit_counter(self, query: str):
+    def _list_visible_markdown_files_in_tree(self) -> list[Path]:
+        """Return markdown files that are currently visible in the tree UI."""
+        root_index = self.tree.rootIndex()
+        if not root_index.isValid():
+            return self._list_markdown_files_non_recursive(self._highlight_scope_directory())
+
+        files: list[Path] = []
+        seen: set[str] = set()
+
+        def _append_file(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            files.append(resolved)
+
+        def _walk_visible_children(parent_index) -> None:
+            if self.model.canFetchMore(parent_index):
+                self.model.fetchMore(parent_index)
+            row_count = self.model.rowCount(parent_index)
+            for row in range(row_count):
+                if self.tree.isRowHidden(row, parent_index):
+                    continue
+                index = self.model.index(row, 0, parent_index)
+                if not index.isValid():
+                    continue
+                path = Path(self.model.filePath(index))
+                try:
+                    if path.is_file() and path.suffix.lower() == ".md":
+                        _append_file(path)
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    is_dir = path.is_dir()
+                except Exception:
+                    is_dir = False
+                if is_dir and self.tree.isExpanded(index):
+                    _walk_visible_children(index)
+
+        _walk_visible_children(root_index)
+        return files
+
+    def _compile_match_hit_counter(
+        self, query: str, *, strip_inline_image_data: bool = True
+    ):
         """Compile a lightweight per-file hit counter from query terms.
 
         The counter mirrors search term semantics:
@@ -5856,11 +6222,17 @@ class MdExploreWindow(QMainWindow):
           windows are counted once each, with distinct qualifying occurrences
           per term.
         """
-        return _search_query.compile_match_hit_counter(query)
+        return _search_query.compile_match_hit_counter(
+            query, strip_inline_image_data=strip_inline_image_data
+        )
 
-    def _compile_match_predicate(self, query: str):
+    def _compile_match_predicate(
+        self, query: str, *, strip_inline_image_data: bool = True
+    ):
         """Compile boolean query with implicit AND, quotes, and NEAR(...)."""
-        return _search_query.compile_match_predicate(query)
+        return _search_query.compile_match_predicate(
+            query, strip_inline_image_data=strip_inline_image_data
+        )
 
     def _tokenize_match_query(self, query: str) -> list[tuple[str, str, bool]]:
         """Tokenize query supporting operators plus single/double-quoted terms."""
@@ -5939,6 +6311,8 @@ class MdExploreWindow(QMainWindow):
 
     def _on_tree_directory_expanded(self, index) -> None:
         """Treat expanded directories as active scope for quit persistence/title."""
+        if self._suspend_directory_open_on_expand:
+            return
         if not index.isValid():
             return
         path = Path(self.model.filePath(index))
@@ -5946,10 +6320,48 @@ class MdExploreWindow(QMainWindow):
             return
         was_selected = self.tree.currentIndex() == index
         self.tree.setCurrentIndex(index)
-        self.last_directory_selection = path.resolve()
+        try:
+            self.last_directory_selection = path.resolve()
+        except Exception:
+            self.last_directory_selection = path
         self._update_window_title()
         if was_selected:
             self._rerun_active_search_for_scope()
+
+    def _on_tree_directory_collapsed(self, index) -> None:
+        """When active scope collapses, move scope to parent and rerun search."""
+        if not index.isValid():
+            return
+        collapsed_path = Path(self.model.filePath(index))
+        if not collapsed_path.is_dir():
+            return
+
+        current_index = self.tree.currentIndex()
+        if not current_index.isValid() or current_index != index:
+            self._rerun_active_search_for_scope()
+            return
+
+        parent_index = index.parent()
+        if not parent_index.isValid():
+            parent_index = self.tree.rootIndex()
+
+        next_scope = self.root
+        if parent_index.isValid():
+            parent_path = Path(self.model.filePath(parent_index))
+            if parent_path.is_dir():
+                try:
+                    next_scope = parent_path.resolve()
+                except Exception:
+                    next_scope = parent_path
+        self.last_directory_selection = next_scope
+
+        if parent_index.isValid() and parent_index != current_index:
+            self.tree.setCurrentIndex(parent_index)
+            # Selection change will refresh title/scope and rerun active search.
+            return
+
+        self._update_window_title()
+        self._rerun_active_search_for_scope()
 
     def _show_preview_context_menu(self, pos) -> None:
         """Extend the preview context menu with a markdown copy action."""
@@ -7444,6 +7856,8 @@ class MdExploreWindow(QMainWindow):
     def _update_window_title(self) -> None:
         """Show the effective root in the application window title."""
         scope = self._highlight_scope_directory()
+        if self.model.set_effective_scope_directory(scope):
+            self.tree.viewport().update()
         self.setWindowTitle(f"mdexplore - {scope}")
 
     def _effective_root_for_persistence(self) -> Path:
@@ -7547,6 +7961,7 @@ class MdExploreWindow(QMainWindow):
         self._persist_document_view_session()
         self._persist_effective_root()
         self._cleanup_clipboard_copy_staging_directories()
+        self._cleanup_preview_data_image_temp_files()
         self._cleanup_preview_temp_files()
         super().closeEvent(event)
 
@@ -7701,6 +8116,168 @@ class MdExploreWindow(QMainWindow):
         if len(cleaned) >= 2 and cleaned.startswith("<") and cleaned.endswith(">"):
             return cleaned[1:-1].strip()
         return cleaned
+
+    def _normalize_existing_data_image_uri_target(
+        self,
+        link_target: str,
+        decode_cache: dict[str, str | None] | None = None,
+    ) -> str | None:
+        """Normalize one markdown data-URI image target to an `image/*` MIME header.
+
+        Some sources emit image payloads as `data:application/octet-stream;base64,...`.
+        markdown-it rejects those as image destinations. Convert only when payload
+        bytes positively identify a known image format.
+        """
+        target = self._strip_markdown_link_wrappers(link_target)
+        if not target:
+            return None
+        lowered = target.lower()
+        if not lowered.startswith("data:") or ";base64," not in lowered:
+            return None
+        if lowered.startswith("data:image/"):
+            return None
+
+        if decode_cache is not None and target in decode_cache:
+            return decode_cache[target]
+
+        normalized_target: str | None = None
+        try:
+            header, payload = target.split(",", 1)
+            declared_mime_type = header[5:].split(";", 1)[0].strip().lower()
+            compact_payload = re.sub(r"\s+", "", payload or "")
+            if compact_payload:
+                raw_bytes = base64.b64decode(compact_payload, validate=False)
+                mime_type = self._preview_data_image_mime_type_from_bytes(
+                    raw_bytes, declared_mime_type
+                )
+                if mime_type and mime_type.startswith("image/"):
+                    normalized_target = f"data:{mime_type};base64,{compact_payload}"
+        except Exception:
+            normalized_target = None
+
+        if decode_cache is not None:
+            decode_cache[target] = normalized_target
+        return normalized_target
+
+    def _rewrite_inline_image_link_data_uri_mime_types(
+        self,
+        markdown_text: str,
+        decode_cache: dict[str, str | None],
+    ) -> tuple[str, int]:
+        """Rewrite inline markdown image data URIs to valid `image/*` MIME types."""
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            destination = match.group("dest") or ""
+            normalized_destination = self._normalize_existing_data_image_uri_target(
+                destination, decode_cache
+            )
+            if not normalized_destination:
+                return match.group(0)
+            rewritten_count += 1
+            alt = match.group("alt") or ""
+            title = match.group("title") or ""
+            return f"![{alt}]({normalized_destination}{title})"
+
+        updated_text = self.INLINE_IMAGE_LINK_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
+    def _rewrite_linked_image_link_data_uri_mime_types(
+        self,
+        markdown_text: str,
+        decode_cache: dict[str, str | None],
+    ) -> tuple[str, int]:
+        """Rewrite linked image markdown blocks with normalized image data URIs."""
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            alt = match.group("alt") or ""
+            img_destination = match.group("img_dest") or ""
+            img_title = match.group("img_title") or ""
+            link_destination = match.group("link_dest") or ""
+            link_title = match.group("link_title") or ""
+
+            normalized_img_destination = self._normalize_existing_data_image_uri_target(
+                img_destination, decode_cache
+            )
+            if not normalized_img_destination:
+                return match.group(0)
+            rewritten_count += 1
+            return (
+                f"[![{alt}]({normalized_img_destination}{img_title})]"
+                f"({link_destination}{link_title})"
+            )
+
+        updated_text = self.LINKED_IMAGE_LINK_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
+    def _rewrite_reference_image_link_data_uri_mime_types(
+        self,
+        markdown_text: str,
+        decode_cache: dict[str, str | None],
+    ) -> tuple[str, int]:
+        """Rewrite image-reference definitions to normalized data-image MIME types."""
+        referenced_labels: set[str] = set()
+        for match in self.IMAGE_REFERENCE_USAGE_RE.finditer(markdown_text):
+            label = str(match.group("label") or "").strip()
+            alt = str(match.group("alt") or "").strip()
+            resolved_label = label if label else alt
+            if resolved_label:
+                referenced_labels.add(
+                    self._normalize_markdown_reference_label(resolved_label)
+                )
+        for match in self.IMAGE_SHORT_REFERENCE_USAGE_RE.finditer(markdown_text):
+            alt = str(match.group("alt") or "").strip()
+            if alt:
+                referenced_labels.add(self._normalize_markdown_reference_label(alt))
+        if not referenced_labels:
+            return markdown_text, 0
+
+        rewritten_count = 0
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten_count
+            label = str(match.group("label") or "")
+            normalized_label = self._normalize_markdown_reference_label(label)
+            if normalized_label not in referenced_labels:
+                return match.group(0)
+            destination = match.group("dest") or ""
+            normalized_destination = self._normalize_existing_data_image_uri_target(
+                destination, decode_cache
+            )
+            if not normalized_destination:
+                return match.group(0)
+            rewritten_count += 1
+            indent = match.group("indent") or ""
+            title = match.group("title") or ""
+            return f"{indent}[{label}]: {normalized_destination}{title}"
+
+        updated_text = self.REFERENCE_DEFINITION_RE.sub(_replace, markdown_text)
+        return updated_text, rewritten_count
+
+    def _normalize_markdown_inline_image_data_uris_for_preview(
+        self, markdown_text: str
+    ) -> str:
+        """Normalize markdown image data URIs so preview renderer keeps them as `<img>`."""
+        lowered = str(markdown_text or "").lower()
+        if "data:" not in lowered or ";base64," not in lowered:
+            return markdown_text
+
+        decode_cache: dict[str, str | None] = {}
+        linked_updated, _linked_count = (
+            self._rewrite_linked_image_link_data_uri_mime_types(
+                markdown_text, decode_cache
+            )
+        )
+        inline_updated, _inline_count = self._rewrite_inline_image_link_data_uri_mime_types(
+            linked_updated, decode_cache
+        )
+        final_updated, _ref_count = self._rewrite_reference_image_link_data_uri_mime_types(
+            inline_updated, decode_cache
+        )
+        return final_updated
 
     def _image_link_to_data_uri(self, link_target: str, source_path: Path) -> str | None:
         """Resolve one markdown image link target into a BASE64 data URI."""
