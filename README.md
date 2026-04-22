@@ -17,6 +17,7 @@ module, but low-risk support code is now split into `mdexplore_app/`:
 - `mdexplore_app/tree.py`: markdown tree model and delegate (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: custom multi-view tab bar (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF write/stamp steps.
+- `mdexplore_app/fast_base64.py`: shared BASE64 helpers with SIMD/native fast path fallback.
 
 This is intentionally a first-stage modularization. Most behavior and call flow
 still lives in `mdexplore.py` so feature risk stays low while the file is
@@ -30,6 +31,7 @@ gradually decomposed.
 - PlantUML diagram renders run in background workers so markdown preview stays responsive.
 - Supports:
   - CommonMark + tables + strikethrough.
+  - Markdown rendering defaults to `cmarkgfm` for speed, with automatic fallback to `markdown-it-py` when unavailable/incompatible.
   - TeX/LaTeX math via MathJax.
   - Mermaid diagrams with improved dark-theme contrast.
   - Optional Rust Mermaid backend via `mmdr` (`--mermaid-backend rust`).
@@ -47,6 +49,8 @@ gradually decomposed.
   - `Edit` opens the selected file in VS Code (`code` CLI).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
+- Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
+- Copy-time BASE64 image conversion warms image targets in parallel before rewrite for faster large-file copy/export workflows.
 - Mermaid SVGs are cached in-memory per app run to avoid re-rendering when returning to previously viewed files.
 - Mermaid keeps separate in-memory cache modes for GUI (`auto`) and PDF (`pdf`) rendering.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
@@ -160,6 +164,7 @@ What the launcher does:
 - Creates `.venv` inside the project if missing.
 - Uses `.venv/bin/python` directly (does not alter your current shell session).
 - Installs dependencies when `requirements.txt` changes.
+- Verifies key runtime imports and self-heals by reinstalling dependencies when the venv is incomplete.
 - Runs the app.
 
 ## Usage
@@ -171,7 +176,8 @@ mdexplore.sh [--mermaid-backend js|rust] [PATH]
 ```
 
 - `PATH` is optional.
-- `--mermaid-backend` is optional (`js` default, `rust` requires `mmdr`).
+- `--mermaid-backend` is optional. For `mdexplore.sh`, the launcher defaults to
+  `rust` when not specified. (`mdexplore.py` direct runs default to `js`.)
 - Supports plain paths and `file://` URIs (for `.desktop` `%u` launches).
 - If a file path is passed, mdexplore opens its parent directory.
 - If omitted, `default_root` in `~/.mdexplore.cfg` is used (falling back to home directory).
@@ -704,6 +710,33 @@ Rust backend executable override:
 ```bash
 MDEXPLORE_MERMAID_RS_BIN=/absolute/path/to/mmdr /path/to/mdexplore/mdexplore.sh --mermaid-backend rust
 ```
+
+## Markdown Engine and BASE64 Performance Knobs
+
+- Markdown engine selection:
+  - `MDEXPLORE_MARKDOWN_ENGINE=cmark` (default): uses `cmarkgfm`.
+  - `MDEXPLORE_MARKDOWN_ENGINE=markdown-it`: forces `markdown-it-py`.
+  - If `cmarkgfm` is unavailable at runtime, mdexplore automatically falls back to `markdown-it-py`.
+
+Example:
+
+```bash
+MDEXPLORE_MARKDOWN_ENGINE=markdown-it /path/to/mdexplore/mdexplore.sh
+```
+
+- BASE64 image worker threads (preview data-URI materialization + copy-time prefetch):
+  - `MDEXPLORE_BASE64_IMAGE_THREADS=<N>`
+  - Default is CPU-based (`max(2, min(32, cpu_count * 4))`).
+
+Example:
+
+```bash
+MDEXPLORE_BASE64_IMAGE_THREADS=24 /path/to/mdexplore/mdexplore.sh
+```
+
+- BASE64 codec path:
+  - `pybase64` (SIMD/native) is used when available.
+  - If unavailable, helpers fall back to Python stdlib `base64`.
 
 ## Debug Logging
 

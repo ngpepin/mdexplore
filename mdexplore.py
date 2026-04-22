@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import fcntl
 import html
 import hashlib
@@ -19,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 import time
 import urllib.parse
 import urllib.request
@@ -127,10 +128,19 @@ from mdexplore_app.icons import (
     load_svg_icon_two_tone as _load_svg_icon_two_tone,
     ui_asset_path as _ui_asset_path,
 )
+from mdexplore_app.fast_base64 import (
+    b64decode_loose as _b64decode_loose,
+    b64encode_ascii as _b64encode_ascii,
+)
 from mdexplore_app.js import (
     preload_js_assets as _preload_js_assets,
     render_js_asset as _render_js_asset,
 )
+
+try:
+    import cmarkgfm as _cmarkgfm
+except Exception:
+    _cmarkgfm = None
 from mdexplore_app.templates import (
     preload_template_assets as _preload_template_assets,
     render_template_asset as _render_template_asset,
@@ -165,6 +175,14 @@ PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE = "markdown_source_v1"
 _PREVIEW_INLINE_DATA_IMAGE_SRC_RE = re.compile(
     r'(<img\b[^>]*?\bsrc=)(["\'])(data:[^"\']+;base64,[^"\']+)\2',
     flags=re.IGNORECASE,
+)
+_CMARK_SOURCEPOS_ATTR_RE = re.compile(
+    r'\sdata-sourcepos="(?P<start>\d+):\d+-(?P<end>\d+):\d+"',
+    flags=re.IGNORECASE,
+)
+_CMARK_CODE_BLOCK_RE = re.compile(
+    r"(?P<pre_open><pre\b[^>]*>)\s*<code\b(?P<code_attrs>[^>]*)>(?P<code>.*?)</code>\s*</pre>",
+    flags=re.IGNORECASE | re.DOTALL,
 )
 _PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES = {
     "image/svg+xml": ".svg",
@@ -257,6 +275,24 @@ class MarkdownRenderer:
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
         self._plantuml_setup_issue = self._plantuml_setup_error()
         self._plantuml_svg_cache: dict[str, str] = {}
+        cmark_mode_raw = os.environ.get("MDEXPLORE_MARKDOWN_ENGINE", "cmark")
+        cmark_mode = str(cmark_mode_raw or "cmark").strip().lower()
+        if cmark_mode not in {"auto", "cmark", "markdown-it"}:
+            cmark_mode = "auto"
+        self._markdown_engine_mode = cmark_mode
+        self._cmark_available = _cmarkgfm is not None
+        if self._cmark_available:
+            try:
+                self._cmark_options = int(
+                    _cmarkgfm.Options.CMARK_OPT_UNSAFE
+                    | _cmarkgfm.Options.CMARK_OPT_SOURCEPOS
+                    | _cmarkgfm.Options.CMARK_OPT_SMART
+                    | _cmarkgfm.Options.CMARK_OPT_STRIKETHROUGH_DOUBLE_TILDE
+                )
+            except Exception:
+                self._cmark_options = 0
+        else:
+            self._cmark_options = 0
         self._md = (
             MarkdownIt(
                 "commonmark",
@@ -297,107 +333,10 @@ class MarkdownRenderer:
                 line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
 
             if info == "mermaid":
-                try:
-                    # All Mermaid flows start by normalizing source and hashing
-                    # it. The hash is the cache key shared by preview, restore,
-                    # and PDF-specific SVG variants.
-                    prepared_source = self._prepare_mermaid_source(code)
-                    mermaid_hash = hashlib.sha1(
-                        prepared_source.encode("utf-8", errors="replace")
-                    ).hexdigest()
-                    mermaid_index = (
-                        int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
-                    )
-                    if isinstance(env, dict):
-                        env["mermaid_index"] = mermaid_index + 1
-                    if self._mermaid_backend == MERMAID_BACKEND_RUST:
-                        # Rust preview and PDF SVGs intentionally fork here:
-                        # preview gets mdexplore's GUI profile, while PDF gets
-                        # a separate vanilla render cached for export only.
-                        svg_markup, error_message = self._render_mermaid_svg_markup(
-                            prepared_source, "preview"
-                        )
-                        if isinstance(env, dict):
-                            pdf_svg_map = env.get("mermaid_pdf_svg_by_hash")
-                            if (
-                                isinstance(pdf_svg_map, dict)
-                                and mermaid_hash not in pdf_svg_map
-                            ):
-                                pdf_svg, _pdf_error = self._render_mermaid_svg_markup(
-                                    prepared_source, "pdf"
-                                )
-                                if pdf_svg:
-                                    pdf_svg_map[mermaid_hash] = pdf_svg
-                        source_attr = html.escape(prepared_source, quote=True)
-                        if svg_markup is not None:
-                            return (
-                                f'<div class="mdexplore-fence"{line_attrs}>'
-                                f'<div class="mermaid mermaid-ready" data-mdexplore-mermaid-backend="rust" '
-                                f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
-                                f'data-mdexplore-mermaid-index="{mermaid_index}" '
-                                f'data-mdexplore-mermaid-source="{source_attr}">\n{svg_markup}\n</div>'
-                                "</div>\n"
-                            )
-                        safe_error_attr = html.escape(
-                            error_message or "Rust Mermaid rendering failed", quote=True
-                        )
-                        return (
-                            f'<div class="mdexplore-fence"{line_attrs}>'
-                            f'<div class="mermaid mermaid-rust-fallback" data-mdexplore-mermaid-backend="rust" '
-                            f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
-                            f'data-mdexplore-mermaid-index="{mermaid_index}" '
-                            f'data-mdexplore-mermaid-source="{source_attr}" '
-                            f'data-mdexplore-rust-error="{safe_error_attr}">'
-                            "Mermaid rendering..."
-                            "</div>"
-                            "</div>\n"
-                        )
-                    return (
-                        f'<div class="mdexplore-fence"{line_attrs}>'
-                        f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}" '
-                        f'data-mdexplore-mermaid-index="{mermaid_index}">\n{html.escape(code)}\n</div>'
-                        "</div>\n"
-                    )
-                except Exception as exc:
-                    safe_error = html.escape(
-                        str(exc) or "unexpected Mermaid rendering error"
-                    )
-                    return (
-                        f'<div class="mdexplore-fence mermaid-error"{line_attrs}>'
-                        f'<div class="mermaid mermaid-error">Mermaid render failed: {safe_error}</div>'
-                        "</div>\n"
-                    )
+                return self._render_mermaid_fence_html(code, line_attrs, env)
 
             if info in {"plantuml", "puml", "uml"}:
-                # PlantUML takes a different path because preview rendering is
-                # progressive and may complete after the rest of the markdown is
-                # already visible.
-                resolver = (
-                    env.get("plantuml_resolver") if isinstance(env, dict) else None
-                )
-                if callable(resolver):
-                    plantuml_index = int(env.get("plantuml_index", 0))
-                    env["plantuml_index"] = plantuml_index + 1
-                    return resolver(code, plantuml_index, line_attrs)
-
-                data_uri, error_message = self._render_plantuml_data_uri(code)
-                if data_uri is not None:
-                    return (
-                        f'<div class="mdexplore-fence"{line_attrs}>'
-                        f'<img class="plantuml" src="{data_uri}" alt="PlantUML diagram"/>'
-                        "</div>\n"
-                    )
-
-                escaped_error = html.escape(
-                    error_message or "PlantUML rendering failed"
-                )
-                escaped_code = html.escape(code)
-                return (
-                    f'<div class="mdexplore-fence plantuml-error"{line_attrs}>'
-                    f'<div class="plantuml-error-message">{escaped_error}</div>'
-                    f'<pre><code class="language-plantuml">{escaped_code}</code></pre>'
-                    "</div>\n"
-                )
+                return self._render_plantuml_fence_html(info, code, line_attrs, env)
 
             return default_fence(tokens, idx, options, env)
 
@@ -419,6 +358,242 @@ class MarkdownRenderer:
         self._md.renderer.rules["math_inline"] = custom_math_inline
         self._md.renderer.rules["math_block"] = custom_math_block
         self._md.renderer.renderToken = custom_render_token
+
+    @staticmethod
+    def _line_attrs_from_sourcepos_match(match: re.Match[str]) -> str:
+        """Convert one cmark `data-sourcepos` span to mdexplore 0-based attrs."""
+        try:
+            start_line = max(1, int(match.group("start")))
+            end_line = max(start_line, int(match.group("end")))
+        except Exception:
+            return match.group(0)
+        return (
+            f' data-md-line-start="{start_line - 1}" '
+            f'data-md-line-end="{end_line}"'
+        )
+
+    def _rewrite_cmark_sourcepos_attrs(self, html_body: str) -> str:
+        """Map cmark source-position attrs to mdexplore line-range attrs."""
+        try:
+            return _CMARK_SOURCEPOS_ATTR_RE.sub(
+                self._line_attrs_from_sourcepos_match, html_body
+            )
+        except Exception:
+            return html_body
+
+    @staticmethod
+    def _extract_code_language_from_attrs(code_attrs: str) -> str:
+        """Extract lower-case language suffix from one code-block class attr."""
+        raw = str(code_attrs or "")
+        class_match = re.search(
+            r'class\s*=\s*(?:"(?P<dq>[^"]*)"|\'(?P<sq>[^\']*)\')',
+            raw,
+            flags=re.IGNORECASE,
+        )
+        class_value = ""
+        if class_match is not None:
+            class_value = class_match.group("dq") or class_match.group("sq") or ""
+        for token in class_value.split():
+            lowered = token.strip().lower()
+            if lowered.startswith("language-") and len(lowered) > len("language-"):
+                return lowered[len("language-") :]
+        return ""
+
+    @staticmethod
+    def _extract_pre_language_from_attrs(pre_open: str) -> str:
+        """Extract lower-case language from cmark `<pre ... lang=...>` attrs."""
+        raw = str(pre_open or "")
+        lang_match = re.search(
+            r'\blang\s*=\s*(?:"(?P<dq>[^"]*)"|\'(?P<sq>[^\']*)\')',
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if lang_match is not None:
+            lang_value = (lang_match.group("dq") or lang_match.group("sq") or "").strip()
+            if lang_value:
+                return lang_value.lower()
+        class_match = re.search(
+            r'class\s*=\s*(?:"(?P<dq>[^"]*)"|\'(?P<sq>[^\']*)\')',
+            raw,
+            flags=re.IGNORECASE,
+        )
+        class_value = ""
+        if class_match is not None:
+            class_value = class_match.group("dq") or class_match.group("sq") or ""
+        for token in class_value.split():
+            lowered = token.strip().lower()
+            if lowered.startswith("language-") and len(lowered) > len("language-"):
+                return lowered[len("language-") :]
+        return ""
+
+    def _rewrite_cmark_special_fences(self, html_body: str, env: dict[str, object]) -> str:
+        """Replace cmark-rendered Mermaid/PlantUML code fences with mdexplore blocks."""
+
+        def _replace(match: re.Match[str]) -> str:
+            pre_open = str(match.group("pre_open") or "")
+            start_match = re.search(
+                r'data-md-line-start="(?P<start>\d+)"', pre_open, flags=re.IGNORECASE
+            )
+            end_match = re.search(
+                r'data-md-line-end="(?P<end>\d+)"', pre_open, flags=re.IGNORECASE
+            )
+            line_attrs = ""
+            if start_match is not None and end_match is not None:
+                line_attrs = (
+                    f' data-md-line-start="{start_match.group("start")}"'
+                    f' data-md-line-end="{end_match.group("end")}"'
+                )
+            language = self._extract_code_language_from_attrs(match.group("code_attrs"))
+            if not language:
+                language = self._extract_pre_language_from_attrs(pre_open)
+            if language == "mermaid":
+                code_text = html.unescape(match.group("code") or "")
+                return self._render_mermaid_fence_html(code_text, line_attrs, env)
+            if language in {"plantuml", "puml", "uml"}:
+                code_text = html.unescape(match.group("code") or "")
+                return self._render_plantuml_fence_html(language, code_text, line_attrs, env)
+            return match.group(0)
+
+        try:
+            return _CMARK_CODE_BLOCK_RE.sub(_replace, html_body)
+        except Exception:
+            return html_body
+
+    def _render_body_with_cmark(
+        self, markdown_text: str, env: dict[str, object]
+    ) -> str | None:
+        """Render markdown via cmark-gfm, preserving mdexplore line metadata."""
+        if not self._cmark_available or _cmarkgfm is None:
+            return None
+        try:
+            body = _cmarkgfm.github_flavored_markdown_to_html(
+                markdown_text, options=int(self._cmark_options)
+            )
+            if not isinstance(body, str):
+                return None
+            body = self._rewrite_cmark_sourcepos_attrs(body)
+            body = self._rewrite_cmark_special_fences(body, env)
+            return body
+        except Exception:
+            return None
+
+    def _should_use_cmark_fast_path(
+        self, markdown_text: str, has_math_hint: bool | None = None
+    ) -> bool:
+        """Return whether cmark fast rendering should be attempted."""
+        if not self._cmark_available:
+            return False
+        mode = self._markdown_engine_mode
+        if mode in {"markdown-it", "auto"}:
+            return False
+        has_math = (
+            bool(has_math_hint)
+            if has_math_hint is not None
+            else (
+                bool(re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", markdown_text))
+                or bool(re.search(r"(?<!\\)\$(?!\s)(.+?)(?<!\\)\$", markdown_text))
+            )
+        )
+        if has_math:
+            return False
+        return mode == "cmark"
+
+    def _render_mermaid_fence_html(
+        self, code: str, line_attrs: str, env: dict[str, object] | None
+    ) -> str:
+        """Render one Mermaid fence to mdexplore preview HTML."""
+        try:
+            prepared_source = self._prepare_mermaid_source(code)
+            mermaid_hash = hashlib.sha1(
+                prepared_source.encode("utf-8", errors="replace")
+            ).hexdigest()
+            mermaid_index = int(env.get("mermaid_index", 0)) if isinstance(env, dict) else 0
+            if isinstance(env, dict):
+                env["mermaid_index"] = mermaid_index + 1
+            if self._mermaid_backend == MERMAID_BACKEND_RUST:
+                svg_markup, error_message = self._render_mermaid_svg_markup(
+                    prepared_source, "preview"
+                )
+                if isinstance(env, dict):
+                    pdf_svg_map = env.get("mermaid_pdf_svg_by_hash")
+                    if isinstance(pdf_svg_map, dict) and mermaid_hash not in pdf_svg_map:
+                        pdf_svg, _pdf_error = self._render_mermaid_svg_markup(
+                            prepared_source, "pdf"
+                        )
+                        if pdf_svg:
+                            pdf_svg_map[mermaid_hash] = pdf_svg
+                source_attr = html.escape(prepared_source, quote=True)
+                if svg_markup is not None:
+                    return (
+                        f'<div class="mdexplore-fence"{line_attrs}>'
+                        f'<div class="mermaid mermaid-ready" data-mdexplore-mermaid-backend="rust" '
+                        f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                        f'data-mdexplore-mermaid-index="{mermaid_index}" '
+                        f'data-mdexplore-mermaid-source="{source_attr}">\n{svg_markup}\n</div>'
+                        "</div>\n"
+                    )
+                safe_error_attr = html.escape(
+                    error_message or "Rust Mermaid rendering failed", quote=True
+                )
+                return (
+                    f'<div class="mdexplore-fence"{line_attrs}>'
+                    f'<div class="mermaid mermaid-rust-fallback" data-mdexplore-mermaid-backend="rust" '
+                    f'data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                    f'data-mdexplore-mermaid-index="{mermaid_index}" '
+                    f'data-mdexplore-mermaid-source="{source_attr}" '
+                    f'data-mdexplore-rust-error="{safe_error_attr}">'
+                    "Mermaid rendering..."
+                    "</div>"
+                    "</div>\n"
+                )
+            return (
+                f'<div class="mdexplore-fence"{line_attrs}>'
+                f'<div class="mermaid" data-mdexplore-mermaid-hash="{mermaid_hash}" '
+                f'data-mdexplore-mermaid-index="{mermaid_index}">\n{html.escape(code)}\n</div>'
+                "</div>\n"
+            )
+        except Exception as exc:
+            safe_error = html.escape(str(exc) or "unexpected Mermaid rendering error")
+            return (
+                f'<div class="mdexplore-fence mermaid-error"{line_attrs}>'
+                f'<div class="mermaid mermaid-error">Mermaid render failed: {safe_error}</div>'
+                "</div>\n"
+            )
+
+    def _render_plantuml_fence_html(
+        self,
+        info: str,
+        code: str,
+        line_attrs: str,
+        env: dict[str, object] | None,
+    ) -> str:
+        """Render one PlantUML fence to mdexplore preview HTML."""
+        resolver = env.get("plantuml_resolver") if isinstance(env, dict) else None
+        if callable(resolver) and isinstance(env, dict):
+            plantuml_index = int(env.get("plantuml_index", 0))
+            env["plantuml_index"] = plantuml_index + 1
+            try:
+                return str(resolver(code, plantuml_index, line_attrs))
+            except Exception:
+                pass
+
+        data_uri, error_message = self._render_plantuml_data_uri(code)
+        if data_uri is not None:
+            return (
+                f'<div class="mdexplore-fence"{line_attrs}>'
+                f'<img class="plantuml" src="{data_uri}" alt="PlantUML diagram"/>'
+                "</div>\n"
+            )
+
+        escaped_error = html.escape(error_message or "PlantUML rendering failed")
+        escaped_code = html.escape(code)
+        language = html.escape(info or "plantuml")
+        return (
+            f'<div class="mdexplore-fence plantuml-error"{line_attrs}>'
+            f'<div class="plantuml-error-message">{escaped_error}</div>'
+            f'<pre><code class="language-{language}">{escaped_code}</code></pre>'
+            "</div>\n"
+        )
 
     @property
     def mermaid_backend(self) -> str:
@@ -973,7 +1148,7 @@ class MarkdownRenderer:
         if "<svg" not in svg_text.casefold():
             return None, "Local PlantUML did not return SVG output"
 
-        encoded_svg = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+        encoded_svg = _b64encode_ascii(svg_text.encode("utf-8"))
         data_uri = f"data:image/svg+xml;base64,{encoded_svg}"
         self._plantuml_svg_cache[cache_key] = data_uri
         return data_uri, None
@@ -1013,16 +1188,22 @@ class MarkdownRenderer:
         title: str,
         total_lines: int | None = None,
         plantuml_resolver=None,
+        has_math_hint: bool | None = None,
     ) -> str:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
-        env = {}
-        env["mermaid_index"] = 0
-        env["mermaid_pdf_svg_by_hash"] = {}
+        env: dict[str, object] = {
+            "mermaid_index": 0,
+            "mermaid_pdf_svg_by_hash": {},
+        }
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
-        body = self._md.render(markdown_text, env)
+        body: str | None = None
+        if self._should_use_cmark_fast_path(markdown_text, has_math_hint=has_math_hint):
+            body = self._render_body_with_cmark(markdown_text, env)
+        if body is None:
+            body = self._md.render(markdown_text, env)
         if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
             self._last_mermaid_pdf_svg_by_hash = dict(
                 env.get("mermaid_pdf_svg_by_hash") or {}
@@ -1128,6 +1309,7 @@ class MdExploreWindow(QMainWindow):
         ("Red", "#ef7d7d"),
     ]
     DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
+    DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(32, (os.cpu_count() or 2) * 4))
     PREVIEW_HTTP_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
     def __init__(
@@ -1273,6 +1455,7 @@ class MdExploreWindow(QMainWindow):
         self._preview_html_temp_files: deque[Path] = deque()
         self._preview_data_image_files_by_hash: dict[str, Path] = {}
         self._preview_data_image_temp_files: set[Path] = set()
+        self._preview_data_image_cache_lock = Lock()
         self._view_line_probe_pending = False
         self._last_view_line_probe_at = 0.0
         self._view_tab_restore_request_id = 0
@@ -1280,6 +1463,16 @@ class MdExploreWindow(QMainWindow):
         self._match_input_text = ""
         self._copy_destination_directory: Path | None = None
         self._copy_base64_image_cache: dict[str, str | None] = {}
+        self._copy_base64_image_cache_lock = Lock()
+        raw_base64_threads = os.environ.get("MDEXPLORE_BASE64_IMAGE_THREADS", "").strip()
+        try:
+            configured_base64_threads = int(raw_base64_threads)
+        except Exception:
+            configured_base64_threads = 0
+        if configured_base64_threads > 0:
+            self._base64_image_worker_threads = configured_base64_threads
+        else:
+            self._base64_image_worker_threads = self.DEFAULT_BASE64_IMAGE_WORKER_THREADS
         self._clipboard_copy_staging_directories: list[Path] = []
         # Search is debounced so filesystem/content scans do not run on every
         # keystroke while the user is still typing an expression.
@@ -3278,6 +3471,7 @@ class MdExploreWindow(QMainWindow):
             resolved.name,
             total_lines=total_lines,
             plantuml_resolver=plantuml_resolver,
+            has_math_hint=has_math,
         )
         metadata: dict[str, object] = {
             "total_lines": total_lines,
@@ -4546,9 +4740,11 @@ class MdExploreWindow(QMainWindow):
             return None
 
         digest = hashlib.sha1(raw_data_uri.encode("utf-8", errors="replace")).hexdigest()
-        cached_path = self._preview_data_image_files_by_hash.get(digest)
+        with self._preview_data_image_cache_lock:
+            cached_path = self._preview_data_image_files_by_hash.get(digest)
         if cached_path is not None and cached_path.exists():
-            self._preview_data_image_temp_files.add(cached_path)
+            with self._preview_data_image_cache_lock:
+                self._preview_data_image_temp_files.add(cached_path)
             return QUrl.fromLocalFile(str(cached_path)).toString()
 
         if "," not in raw_data_uri:
@@ -4565,7 +4761,7 @@ class MdExploreWindow(QMainWindow):
         if not compact_payload:
             return None
         try:
-            raw_bytes = base64.b64decode(compact_payload, validate=False)
+            raw_bytes = _b64decode_loose(compact_payload)
         except Exception:
             return None
         if not raw_bytes:
@@ -4593,8 +4789,9 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             return None
 
-        self._preview_data_image_files_by_hash[digest] = output_path
-        self._preview_data_image_temp_files.add(output_path)
+        with self._preview_data_image_cache_lock:
+            self._preview_data_image_files_by_hash[digest] = output_path
+            self._preview_data_image_temp_files.add(output_path)
         return QUrl.fromLocalFile(str(output_path)).toString()
 
     @staticmethod
@@ -4649,8 +4846,39 @@ class MdExploreWindow(QMainWindow):
         if "data:" not in str(html_doc or "").lower():
             return html_doc
 
+        matches = list(_PREVIEW_INLINE_DATA_IMAGE_SRC_RE.finditer(html_doc))
+        if not matches:
+            return html_doc
+        unique_data_uris = {str(match.group(3) or "") for match in matches if match.group(3)}
+        resolved_urls: dict[str, str | None] = {}
+        if unique_data_uris:
+            worker_count = max(
+                1, min(int(self._base64_image_worker_threads), len(unique_data_uris))
+            )
+            if worker_count > 1 and len(unique_data_uris) > 1:
+                try:
+                    with ThreadPoolExecutor(
+                        max_workers=worker_count,
+                        thread_name_prefix="mdx-data-image",
+                    ) as executor:
+                        future_map = {
+                            executor.submit(self._preview_data_image_file_url, uri): uri
+                            for uri in unique_data_uris
+                        }
+                        for future, uri in future_map.items():
+                            try:
+                                resolved_urls[uri] = future.result()
+                            except Exception:
+                                resolved_urls[uri] = None
+                except Exception:
+                    for uri in unique_data_uris:
+                        resolved_urls[uri] = self._preview_data_image_file_url(uri)
+            else:
+                for uri in unique_data_uris:
+                    resolved_urls[uri] = self._preview_data_image_file_url(uri)
+
         def _replace(match: re.Match[str]) -> str:
-            local_file_url = self._preview_data_image_file_url(match.group(3))
+            local_file_url = resolved_urls.get(str(match.group(3) or ""))
             if not local_file_url:
                 return match.group(0)
             prefix = match.group(1)
@@ -4664,9 +4892,10 @@ class MdExploreWindow(QMainWindow):
 
     def _cleanup_preview_data_image_temp_files(self) -> None:
         """Delete temporary files created from inline preview data-image sources."""
-        stale_paths = tuple(self._preview_data_image_temp_files)
-        self._preview_data_image_temp_files.clear()
-        self._preview_data_image_files_by_hash.clear()
+        with self._preview_data_image_cache_lock:
+            stale_paths = tuple(self._preview_data_image_temp_files)
+            self._preview_data_image_temp_files.clear()
+            self._preview_data_image_files_by_hash.clear()
         for path in stale_paths:
             try:
                 path.unlink(missing_ok=True)
@@ -8112,7 +8341,8 @@ class MdExploreWindow(QMainWindow):
     def _toggle_copy_base64_images_enabled(self) -> None:
         """Toggle optional BASE64 image embedding for copied markdown files."""
         self._copy_base64_images_enabled = not self._copy_base64_images_enabled
-        self._copy_base64_image_cache.clear()
+        with self._copy_base64_image_cache_lock:
+            self._copy_base64_image_cache.clear()
         self._update_copy_base64_button_state()
         self._persist_effective_root()
 
@@ -8181,7 +8411,7 @@ class MdExploreWindow(QMainWindow):
             declared_mime_type = header[5:].split(";", 1)[0].strip().lower()
             compact_payload = re.sub(r"\s+", "", payload or "")
             if compact_payload:
-                raw_bytes = base64.b64decode(compact_payload, validate=False)
+                raw_bytes = _b64decode_loose(compact_payload)
                 mime_type = self._preview_data_image_mime_type_from_bytes(
                     raw_bytes, declared_mime_type
                 )
@@ -8314,6 +8544,98 @@ class MdExploreWindow(QMainWindow):
         )
         return final_updated
 
+    def _copy_base64_cache_get(self, cache_key: str | None) -> tuple[bool, str | None]:
+        """Thread-safe read from copy-time image data-URI cache."""
+        if not cache_key:
+            return False, None
+        with self._copy_base64_image_cache_lock:
+            if cache_key in self._copy_base64_image_cache:
+                return True, self._copy_base64_image_cache.get(cache_key)
+        return False, None
+
+    def _copy_base64_cache_set(self, cache_key: str | None, value: str | None) -> None:
+        """Thread-safe write to copy-time image data-URI cache."""
+        if not cache_key:
+            return
+        with self._copy_base64_image_cache_lock:
+            self._copy_base64_image_cache[cache_key] = value
+
+    def _collect_copy_image_link_targets(self, markdown_text: str) -> list[str]:
+        """Collect unique markdown image targets eligible for BASE64 conversion."""
+        targets: list[str] = []
+        seen: set[str] = set()
+
+        def _add_target(raw_target: str | None) -> None:
+            normalized = self._strip_markdown_link_wrappers(raw_target or "")
+            if not normalized:
+                return
+            lowered = normalized.lower()
+            if lowered.startswith("data:"):
+                return
+            if normalized in seen:
+                return
+            seen.add(normalized)
+            targets.append(normalized)
+
+        for match in self.INLINE_IMAGE_LINK_RE.finditer(markdown_text):
+            _add_target(match.group("dest"))
+        for match in self.LINKED_IMAGE_LINK_RE.finditer(markdown_text):
+            _add_target(match.group("img_dest"))
+            _add_target(match.group("link_dest"))
+
+        referenced_labels: set[str] = set()
+        for match in self.IMAGE_REFERENCE_USAGE_RE.finditer(markdown_text):
+            label = str(match.group("label") or "").strip()
+            alt = str(match.group("alt") or "").strip()
+            resolved_label = label if label else alt
+            if resolved_label:
+                referenced_labels.add(
+                    self._normalize_markdown_reference_label(resolved_label)
+                )
+        for match in self.IMAGE_SHORT_REFERENCE_USAGE_RE.finditer(markdown_text):
+            alt = str(match.group("alt") or "").strip()
+            if alt:
+                referenced_labels.add(self._normalize_markdown_reference_label(alt))
+        if referenced_labels:
+            for match in self.REFERENCE_DEFINITION_RE.finditer(markdown_text):
+                label = str(match.group("label") or "")
+                normalized_label = self._normalize_markdown_reference_label(label)
+                if normalized_label not in referenced_labels:
+                    continue
+                _add_target(match.group("dest"))
+
+        return targets
+
+    def _prefetch_markdown_image_links_to_data_uri(
+        self, markdown_text: str, source_path: Path
+    ) -> None:
+        """Warm copy-time image conversion cache in parallel for one markdown file."""
+        targets = self._collect_copy_image_link_targets(markdown_text)
+        if not targets:
+            return
+        worker_count = max(1, min(int(self._base64_image_worker_threads), len(targets)))
+        if worker_count <= 1 or len(targets) <= 1:
+            for target in targets:
+                self._image_link_to_data_uri(target, source_path)
+            return
+        try:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="mdx-copy-image",
+            ) as executor:
+                futures = [
+                    executor.submit(self._image_link_to_data_uri, target, source_path)
+                    for target in targets
+                ]
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
+        except Exception:
+            for target in targets:
+                self._image_link_to_data_uri(target, source_path)
+
     def _image_link_to_data_uri(self, link_target: str, source_path: Path) -> str | None:
         """Resolve one markdown image link target into a BASE64 data URI."""
         target = self._strip_markdown_link_wrappers(link_target)
@@ -8327,8 +8649,9 @@ class MdExploreWindow(QMainWindow):
 
         if parsed.scheme in {"http", "https"}:
             cache_key = f"url::{target}"
-            if cache_key in self._copy_base64_image_cache:
-                return self._copy_base64_image_cache[cache_key]
+            found, cached = self._copy_base64_cache_get(cache_key)
+            if found:
+                return cached
             try:
                 request = urllib.request.Request(
                     target,
@@ -8340,7 +8663,7 @@ class MdExploreWindow(QMainWindow):
                     if content_type:
                         mime_type = content_type.split(";", 1)[0].strip().lower()
             except Exception:
-                self._copy_base64_image_cache[cache_key] = None
+                self._copy_base64_cache_set(cache_key, None)
                 return None
         else:
             local_path: Path | None = None
@@ -8363,12 +8686,13 @@ class MdExploreWindow(QMainWindow):
             if not resolved_local.is_file():
                 return None
             cache_key = f"file::{self._path_key(resolved_local)}"
-            if cache_key in self._copy_base64_image_cache:
-                return self._copy_base64_image_cache[cache_key]
+            found, cached = self._copy_base64_cache_get(cache_key)
+            if found:
+                return cached
             try:
                 raw_bytes = resolved_local.read_bytes()
             except Exception:
-                self._copy_base64_image_cache[cache_key] = None
+                self._copy_base64_cache_set(cache_key, None)
                 return None
             guessed_mime, _encoding = mimetypes.guess_type(str(resolved_local))
             if guessed_mime:
@@ -8376,7 +8700,7 @@ class MdExploreWindow(QMainWindow):
 
         if not raw_bytes:
             if cache_key is not None:
-                self._copy_base64_image_cache[cache_key] = None
+                self._copy_base64_cache_set(cache_key, None)
             return None
         if not mime_type:
             guessed_mime, _encoding = mimetypes.guess_type(parsed.path or target)
@@ -8386,10 +8710,10 @@ class MdExploreWindow(QMainWindow):
                 else "application/octet-stream"
             )
 
-        encoded = base64.b64encode(raw_bytes).decode("ascii")
+        encoded = _b64encode_ascii(raw_bytes)
         data_uri = f"data:{mime_type};base64,{encoded}"
         if cache_key is not None:
-            self._copy_base64_image_cache[cache_key] = data_uri
+            self._copy_base64_cache_set(cache_key, data_uri)
         return data_uri
 
     def _rewrite_inline_image_links_to_data_uri(
@@ -8497,6 +8821,7 @@ class MdExploreWindow(QMainWindow):
         self, markdown_text: str, source_path: Path
     ) -> tuple[str, int]:
         """Convert retrievable markdown image links to BASE64 data URIs."""
+        self._prefetch_markdown_image_links_to_data_uri(markdown_text, source_path)
         linked_updated, linked_count = self._rewrite_linked_image_links_to_data_uri(
             markdown_text, source_path
         )
@@ -8832,17 +9157,48 @@ class MdExploreWindow(QMainWindow):
         # Any selection transition means the user is leaving the previous
         # document/scope, so immediately clear restore UI state.
         self._stop_restore_overlay_monitor()
+        if not current.isValid():
+            self._update_window_title()
+            return
         path = Path(self.model.filePath(current))
+        scope_changed = False
+        scope_candidate: Path | None = None
+        if path.is_dir():
+            scope_candidate = path
+        elif path.is_file() and path.suffix.lower() == ".md":
+            scope_candidate = path.parent
+
+        if scope_candidate is not None and scope_candidate.is_dir():
+            try:
+                resolved_scope = scope_candidate.resolve()
+            except Exception:
+                resolved_scope = scope_candidate
+            previous_scope = self.last_directory_selection
+            try:
+                previous_scope_key = (
+                    str(previous_scope.resolve())
+                    if isinstance(previous_scope, Path)
+                    else None
+                )
+            except Exception:
+                previous_scope_key = (
+                    str(previous_scope)
+                    if isinstance(previous_scope, Path)
+                    else None
+                )
+            current_scope_key = str(resolved_scope)
+            scope_changed = previous_scope_key != current_scope_key
+            self.last_directory_selection = resolved_scope
+
         self._update_window_title()
         if path.is_dir():
-            try:
-                self.last_directory_selection = path.resolve()
-            except Exception:
-                self.last_directory_selection = path
+            # Keep existing behavior for explicit directory selections.
             self._rerun_active_search_for_scope()
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
+        if scope_changed:
+            self._rerun_active_search_for_scope()
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
 

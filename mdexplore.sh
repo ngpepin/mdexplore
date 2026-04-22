@@ -331,9 +331,11 @@ runtime_import_check() {
 import importlib
 
 required = [
+    "cmarkgfm",
     "markdown_it",
     "mdit_py_plugins.dollarmath",
     "linkify_it",
+    "pybase64",
     "PySide6.QtWebEngineWidgets",
     "pypdf",
     "reportlab.pdfgen.canvas",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from collections import OrderedDict
 import json
 import os
@@ -13,6 +12,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from .fast_base64 import b64encode_ascii
 from .pdf import extract_plantuml_error_details, stamp_pdf_page_numbers
 from . import search as search_query
 
@@ -216,7 +216,7 @@ class PlantUmlRenderWorker(QRunnable):
             )
             return
 
-        encoded_svg = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+        encoded_svg = b64encode_ascii(svg_text.encode("utf-8"))
         data_uri = f"data:image/svg+xml;base64,{encoded_svg}"
         self.signals.finished.emit(self.hash_key, "done", data_uri)
 

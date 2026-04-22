@@ -83,6 +83,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore_app/tree.py`: extracted tree/model classes (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: extracted custom tab-bar class (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF export.
+- `mdexplore_app/fast_base64.py`: shared BASE64 encode/decode helpers with
+  `pybase64` fast path and stdlib fallback.
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `setup-mdexplore.sh`: full bootstrap helper for local setup (venv, vendored assets, Rust Mermaid renderer).
 - `requirements.txt`: Python runtime dependencies.
@@ -119,6 +121,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Linux desktop with GUI support.
 - `PySide6` and `QtWebEngine` available via pip dependencies.
 - `pypdf` and `reportlab` available for PDF page-number stamping.
+- `cmarkgfm` is preferred for fast markdown rendering and should be present in
+  runtime dependencies.
+- `pybase64` is preferred for BASE64 throughput; stdlib fallback should remain
+  functional when unavailable.
 - Mermaid should prefer a local bundle when available and only use CDN fallback.
 - Rust Mermaid backend is optional and uses `mmdr` when `--mermaid-backend rust` is selected.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
@@ -137,9 +143,10 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore.py` remains the direct Python entrypoint. `main()` parses `PATH`,
   `--mermaid-backend`, and `--debug`, resolves the effective root, creates
   `QApplication`, probes GPU availability, and constructs `MdExploreWindow`.
-- `MarkdownRenderer` in `mdexplore.py` owns markdown-it configuration, fenced
-  syntax handling, MathJax/Mermaid source selection, PlantUML integration, and
-  the Rust Mermaid preview-vs-PDF SVG fork.
+- `MarkdownRenderer` in `mdexplore.py` owns markdown engine selection
+  (`cmarkgfm` fast path with markdown-it fallback), fenced syntax handling,
+  MathJax/Mermaid source selection, PlantUML integration, and the Rust Mermaid
+  preview-vs-PDF SVG fork.
 - `MdExploreWindow` in `mdexplore.py` is the main orchestration boundary and
   highest-blast-radius edit surface.
 - Before changing preview/render/PDF flow, inspect these methods in
@@ -890,7 +897,13 @@ R.PRIME.01 :: [always] => O(preserve correctness and responsiveness without cros
 
 ## Rendering Rules
 
-- Markdown parser is `markdown-it-py`.
+- Markdown rendering defaults to `cmarkgfm` fast path when available and the
+  document is compatible with the fast renderer.
+- `markdown-it-py` remains the compatibility fallback and can be forced.
+- `MDEXPLORE_MARKDOWN_ENGINE` controls parser selection:
+  - `cmark` (default): prefer cmark fast path and fall back when needed.
+  - `markdown-it`: force markdown-it rendering.
+  - `auto`: permit automatic branch selection.
 - Mermaid and MathJax are rendered client-side in web view.
 - Mermaid backend is switchable via CLI:
   - `--mermaid-backend js` (default)
@@ -919,6 +932,12 @@ R.PRIME.01 :: [always] => O(preserve correctness and responsiveness without cros
 - PlantUML failures should render inline as:
   `PlantUML render failed with error ...`, including detailed stderr context
   (line numbers when available).
+- Inline preview BASE64 data-image materialization should stay parallelized and
+  deduplicated by payload hash.
+- Copy-time markdown image-link BASE64 conversion should keep parallel prefetch
+  behavior so large copy/export operations do not regress.
+- `MDEXPLORE_BASE64_IMAGE_THREADS` can be used to tune BASE64 worker-pool size
+  for both preview materialization and copy-time prefetch.
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
 - Debug logging to project-root `mdexplore.log` must remain disabled unless the
@@ -1527,7 +1546,8 @@ across all navigation sequences.
 - Non-interactive launcher runs should log to
   `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
   Log retention is capped to the most recent 1000 lines.
-- Launcher should verify key runtime imports (`markdown_it`, `linkify_it`,
+- Launcher should verify key runtime imports (`cmarkgfm`, `markdown_it`,
+  `mdit_py_plugins.dollarmath`, `linkify_it`, `pybase64`,
   `PySide6.QtWebEngineWidgets`, `pypdf`, `reportlab.pdfgen.canvas`) and
   self-heal by reinstalling requirements if the environment is incomplete.
 - `--help` should stay lightweight and not require venv activation.

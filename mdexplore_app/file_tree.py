@@ -48,6 +48,7 @@ class ColorizedExtensionModel(QFileSystemModel):
     _SEARCH_COUNT_OVERSAMPLE = 8
     _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
     SEARCH_FILENAME_MATCH_COLOR = "#f7e27a"
+    EFFECTIVE_SCOPE_DIRECTORY_COLOR = "#9be8a3"
     OUT_OF_SCOPE_FILENAME_BG = "#9ca3af"
     OUT_OF_SCOPE_FILENAME_BG_ALPHA = 46
 
@@ -60,6 +61,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._multi_view_paths: set[str] = set()
         self._highlighted_preview_paths: set[str] = set()
         self._effective_scope_root_key: str | None = None
+        self._out_of_scope_background_enabled = False
         self._primary_icon = self._load_primary_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
@@ -109,6 +111,12 @@ class ColorizedExtensionModel(QFileSystemModel):
                 )
         if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
+            if info.isDir():
+                scope_key = self._effective_scope_root_key
+                if scope_key and self._path_key(Path(info.filePath())) == scope_key:
+                    color = QColor(self.EFFECTIVE_SCOPE_DIRECTORY_COLOR)
+                    if color.isValid():
+                        return QBrush(color)
             if self.matches_file_info(info):
                 path_key = self._path_key(Path(info.filePath()))
                 color_name = self._color_for_file(Path(info.filePath()))
@@ -333,8 +341,18 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._effective_scope_root_key = next_key
         return True
 
+    def set_out_of_scope_background_enabled(self, enabled: bool) -> bool:
+        """Toggle faint out-of-scope file backgrounds for non-effective-root rows."""
+        next_value = bool(enabled)
+        if next_value == self._out_of_scope_background_enabled:
+            return False
+        self._out_of_scope_background_enabled = next_value
+        return True
+
     def out_of_scope_background_for_path(self, path: Path) -> QColor | None:
         """Return faint background color for visible files outside active scope."""
+        if not self._out_of_scope_background_enabled:
+            return None
         scope_key = self._effective_scope_root_key
         if not scope_key:
             return None
@@ -616,7 +634,49 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         # custom background rows do not render duplicated glyphs.
         base_opt = QStyleOptionViewItem(opt)
         base_opt.text = ""
+        # Some Qt styles skip decorations when display text is suppressed.
+        # Clear decoration in the style pass and paint it explicitly below.
+        base_opt.icon = QIcon()
+        base_opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, base_opt, painter, widget)
+
+        if not opt.icon.isNull():
+            decoration_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget
+            )
+            if decoration_rect.isValid() and decoration_rect.width() > 0:
+                icon_mode = (
+                    QIcon.Mode.Disabled
+                    if not (opt.state & QStyle.StateFlag.State_Enabled)
+                    else (
+                        QIcon.Mode.Selected
+                        if (opt.state & QStyle.StateFlag.State_Selected)
+                        else QIcon.Mode.Normal
+                    )
+                )
+                icon_state = (
+                    QIcon.State.On
+                    if (opt.state & QStyle.StateFlag.State_Open)
+                    else QIcon.State.Off
+                )
+                pixmap_size = (
+                    opt.decorationSize
+                    if opt.decorationSize.isValid()
+                    else QSize(16, 16)
+                )
+                decoration_pixmap = opt.icon.pixmap(
+                    pixmap_size,
+                    icon_mode,
+                    icon_state,
+                )
+                if not decoration_pixmap.isNull():
+                    draw_x = decoration_rect.x() + max(
+                        0, (decoration_rect.width() - decoration_pixmap.width()) // 2
+                    )
+                    draw_y = decoration_rect.y() + max(
+                        0, (decoration_rect.height() - decoration_pixmap.height()) // 2
+                    )
+                    painter.drawPixmap(draw_x, draw_y, decoration_pixmap)
 
         text_rect = style.subElementRect(
             QStyle.SubElement.SE_ItemViewItemText, opt, widget

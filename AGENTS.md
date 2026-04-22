@@ -46,3 +46,10 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
   - Tooltip when enabled: `Turn BASE64 image encoding off`.
   - Applies only to copied outputs (clipboard staging and directory copy), never mutates source markdown files.
   - Retrievable image links (`file:`/relative paths/HTTP(S)) are embedded as BASE64 data URIs; unresolved links remain unchanged.
+
+## Rendering and Performance Rules
+
+- Markdown rendering should default to `cmarkgfm` fast path with automatic fallback to `markdown-it-py` for compatibility cases.
+- `MDEXPLORE_MARKDOWN_ENGINE` should continue to support `cmark` (default), `markdown-it`, and `auto`.
+- Shared BASE64 encode/decode helpers should remain in `mdexplore_app/fast_base64.py`, preferring `pybase64` when available and stdlib fallback otherwise.
+- `MDEXPLORE_BASE64_IMAGE_THREADS` controls worker-pool size used for both preview inline data-image materialization and copy-time image-link prefetch.
