@@ -2,6 +2,10 @@
 
 Fast Markdown explorer for Ubuntu/Linux desktop: browse `.md` files in a directory tree and preview fully rendered output instantly.
 
+## User Guide
+
+For a use-case/tutorial walkthrough, start with [USER-GUIDE.md](/home/npepin/Projects/mdexplore/USER-GUIDE.md).
+
 ## Code Layout
 
 The application still uses `mdexplore.py` as the main entrypoint and primary UI
