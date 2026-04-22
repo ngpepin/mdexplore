@@ -60,7 +60,11 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygon,
 )
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtWebEngineCore import (
+    QWebEnginePage,
+    QWebEngineProfile,
+    QWebEngineSettings,
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -1124,6 +1128,7 @@ class MdExploreWindow(QMainWindow):
         ("Red", "#ef7d7d"),
     ]
     DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
+    PREVIEW_HTTP_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
     def __init__(
         self,
@@ -1375,7 +1380,8 @@ class MdExploreWindow(QMainWindow):
         self.tree.collapsed.connect(self._on_tree_directory_collapsed)
 
         self.preview = QWebEngineView()
-        self._preview_page = PreviewPage(self.preview)
+        self._preview_profile = self._build_preview_web_profile()
+        self._preview_page = PreviewPage(self._preview_profile, self.preview)
         self.preview.setPage(self._preview_page)
         # Preview pages are loaded as local HTML. Allow remote JS/CSS so CDN
         # assets (MathJax/Mermaid) can load and render as expected.
@@ -4482,6 +4488,35 @@ class MdExploreWindow(QMainWindow):
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+    @staticmethod
+    def _preview_webengine_cache_dir() -> Path:
+        """Return disk path used for preview HTTP cache."""
+        return Path.home() / ".cache" / "mdexplore" / "webengine"
+
+    @staticmethod
+    def _preview_webengine_storage_dir() -> Path:
+        """Return disk path used for preview profile persistent storage."""
+        return Path.home() / ".local" / "share" / "mdexplore" / "webengine"
+
+    def _build_preview_web_profile(self) -> QWebEngineProfile:
+        """Create a persistent WebEngine profile so remote images are disk-cached."""
+        profile = QWebEngineProfile("mdexplore-preview", self)
+        try:
+            cache_dir = self._preview_webengine_cache_dir()
+            storage_dir = self._preview_webengine_storage_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            profile.setCachePath(str(cache_dir))
+            profile.setPersistentStoragePath(str(storage_dir))
+        except Exception:
+            pass
+        try:
+            profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+            profile.setHttpCacheMaximumSize(int(self.PREVIEW_HTTP_CACHE_MAX_BYTES))
+        except Exception:
+            pass
+        return profile
 
     @staticmethod
     def _preview_data_image_extension_for_mime_type(mime_type: str) -> str:
@@ -8898,6 +8933,10 @@ class MdExploreWindow(QMainWindow):
                 if isinstance(render_metadata.get("pdf_mermaid_by_hash"), dict)
                 else None
             )
+            # Materialize inline base64 preview images once and cache the
+            # transformed HTML. This avoids repeatedly re-scanning/rehashing
+            # oversized data URIs when revisiting cached previews.
+            html_doc = self._materialize_preview_inline_data_images(html_doc)
             self.cache[path_key] = (mtime_ns, size, html_doc)
             self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
             self.statusBar().showMessage(f"Preview rendered: {self.current_file.name}")
