@@ -50,7 +50,7 @@ gradually decomposed.
   - `PDF` exports the current preview to `<filename>.pdf` with centered page numbering (`N of M`).
     During export, retrievable image sources are inlined as BASE64 data URIs so images render in the PDF instead of relying on external links; broken links are left unchanged.
   - `Add View` creates another tabbed view of the same document at the current top visible line.
-  - `Edit` opens the selected file in VS Code (`code` CLI).
+  - `Edit` opens the selected file in MarkText (`/usr/bin/marktext`).
 - Window title shows the current effective root path.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
@@ -130,7 +130,7 @@ gradually decomposed.
 - Internet access for MathJax only when no local MathJax bundle is available.
 - Java runtime (`java` in `PATH`) for local PlantUML rendering.
 - `plantuml.jar` available (vendored path by default, or set `PLANTUML_JAR`).
-- Optional: VS Code `code` command in `PATH` for `Edit`.
+- Optional: MarkText installed at `/usr/bin/marktext` for `Edit`.
 - Optional: `mmdr` in `PATH` (or `MDEXPLORE_MERMAID_RS_BIN`) for Rust Mermaid backend.
 
 ## Quick Start
@@ -808,8 +808,8 @@ If you see `ModuleNotFoundError: No module named 'PySide6.QtWebEngineWidgets'`:
 
 If `Edit` does nothing:
 
-- Ensure VS Code is installed.
-- Run `code --version` and confirm it is available in your `PATH`.
+- Ensure MarkText is installed.
+- Verify `/usr/bin/marktext` exists and is executable.
 
 If the dock/menu still shows an old app icon:
 

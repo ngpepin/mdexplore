@@ -129,7 +129,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Rust Mermaid backend is optional and uses `mmdr` when `--mermaid-backend rust` is selected.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
 - Java runtime is expected for local PlantUML rendering.
-- VS Code `code` command may or may not be installed; app should fail gracefully when missing.
+- MarkText at `/usr/bin/marktext` may or may not be installed; app should fail
+  gracefully when missing.
 - The direct Python entrypoint and the shell launcher do not currently default
   to the same Mermaid backend:
   - `mdexplore.py` defaults `--mermaid-backend` to `js`.
@@ -202,7 +203,7 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Linux desktop identity should remain `mdexplore` so launcher icon matching
   works (`QApplication.setDesktopFileName("mdexplore")` + desktop
   `StartupWMClass=mdexplore`).
-- `Edit` opens currently selected file with `code`.
+- `Edit` opens currently selected file with `/usr/bin/marktext`.
 - `Add View` creates another tabbed view of the same current document, starting
   from the current top-visible line/scroll position.
 - View tabs default to top-visible source line numbers, are closeable, and are
@@ -760,8 +761,8 @@ R.CLIP.05 :: [copy mode = Directory and files copied] => O(merge copied-file met
 R.CLIP.06 :: [preview text selection and Copy Rendered Text] => O(copy plain rendered text)
 R.CLIP.07 :: [preview text selection and Copy Source Markdown] => O(map selection to source lines if possible)
 R.CLIP.08 :: [direct source mapping fails] => P(fallback to text match, then fuzzy lines, then full file)
-R.CLIP.09 :: [Edit clicked] => O(invoke code on current file)
-R.CLIP.10 :: [code missing] => O(fail gracefully with user-visible error)
+R.CLIP.09 :: [Edit clicked] => O(invoke /usr/bin/marktext on current file)
+R.CLIP.10 :: [/usr/bin/marktext missing] => O(fail gracefully with user-visible error)
 ```
 
 #### 10.2 PDF export law
@@ -1566,7 +1567,8 @@ across all navigation sequences.
 - If `cargo` is missing, the setup script may install a minimal Rust toolchain
   through `rustup` so bootstrap can complete non-interactively.
 - The setup script should not silently apt-install arbitrary system packages.
-  Missing optional system runtime pieces (for example Java or `code`) should
+  Missing optional system runtime pieces (for example Java or
+  `/usr/bin/marktext`) should
   produce clear warnings instead.
 
 ## Quality Gates Before Finishing
@@ -1583,7 +1585,7 @@ If behavior changes, also run manual smoke tests:
 1. Launch with no path.
 2. Launch with explicit path.
 3. Open `.md` file and verify render.
-4. Verify `Edit` behavior with and without `code` in `PATH`.
+4. Verify `Edit` behavior with and without `/usr/bin/marktext` present.
 
 If preview search, named views, or preview marker behavior changes, also run:
 

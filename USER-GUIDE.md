@@ -56,7 +56,7 @@ Use case: you are exploring an unfamiliar notes tree.
 Tips:
 
 - `F5` is the same as `Refresh`.
-- `Edit` opens the selected file in VS Code (`code` must be in `PATH`).
+- `Edit` opens the selected file in MarkText (`/usr/bin/marktext`).
 
 ## Tutorial 2: Find the Right File with Search
 
@@ -237,7 +237,7 @@ If app does not appear:
 
 If `Edit` does nothing:
 
-- Ensure `code --version` works in your shell.
+- Ensure `/usr/bin/marktext` exists and is executable.
 
 If preview feels stale:
 

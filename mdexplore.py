@@ -10287,19 +10287,19 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported PDF: {output_path_text}", 5000)
 
     def _edit_current_file(self) -> None:
-        """Open the selected markdown file in VS Code."""
+        """Open the selected markdown file in MarkText."""
         if self.current_file is None:
             QMessageBox.information(
                 self, "No file selected", "Select a markdown file before using Edit."
             )
             return
         try:
-            subprocess.Popen(["code", str(self.current_file)])
+            subprocess.Popen(["/usr/bin/marktext", str(self.current_file)])
         except FileNotFoundError:
             QMessageBox.critical(
                 self,
-                "VS Code not found",
-                "Could not find 'code' in PATH. Install VS Code or add the 'code' launcher command.",
+                "MarkText not found",
+                "Could not find '/usr/bin/marktext'. Install MarkText or update the Edit command path.",
             )
 
 
