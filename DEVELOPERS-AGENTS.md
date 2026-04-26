@@ -84,7 +84,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `mdexplore_app/tabs.py`: extracted custom tab-bar class (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF export.
 - `mdexplore_app/fast_base64.py`: shared BASE64 encode/decode helpers with
-  `pybase64` fast path and stdlib fallback.
+  adaptive routing between vendored `fastbase64` and `pybase64`, plus stdlib
+  fallback.
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `setup-mdexplore.sh`: full bootstrap helper for local setup (venv, vendored assets, Rust Mermaid renderer).
 - `requirements.txt`: Python runtime dependencies.
@@ -123,8 +124,12 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `pypdf` and `reportlab` available for PDF page-number stamping.
 - `cmarkgfm` is preferred for fast markdown rendering and should be present in
   runtime dependencies.
-- `pybase64` is preferred for BASE64 throughput; stdlib fallback should remain
-  functional when unavailable.
+- BASE64 decode path should prefer `pybase64`, opportunistically route to
+  vendored `fastbase64` for tuned payload-size sweet spots, and keep stdlib
+  fallback functional when accelerated backends are unavailable.
+- BASE64 encode path should validate vendored `fastbase64` output before use
+  (length/padding/alphabet sanity) and fall back to `pybase64`/stdlib when
+  vendor output is malformed.
 - Mermaid should prefer a local bundle when available and only use CDN fallback.
 - Rust Mermaid backend is optional and uses `mmdr` when `--mermaid-backend rust` is selected.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
@@ -199,6 +204,11 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - User-adjusted splitter width between tree and preview should persist across
   root changes for the current application run.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
+- Effective-root directory row in the tree should stay bold and use:
+  - aqua-blue text (`#7fdfe8`) when no active-search hits are under the
+    effective scope,
+  - yellow text plus an appended hit-count pill when active search has hits
+    under the effective scope (`1..99`, then `++`).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.
 - Linux desktop identity should remain `mdexplore` so launcher icon matching
   works (`QApplication.setDesktopFileName("mdexplore")` + desktop
@@ -290,8 +300,9 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - `AND(...)`, `OR(...)`, and `NEAR(...)` should accept comma-delimited,
   space-delimited, or mixed argument lists.
 - `AND(...)` and `OR(...)` should be variadic (2+ arguments).
-- If search is active and directory scope changes, search should rerun against
-  the new directory scope.
+- If search is active and visible-tree scope changes (expand/collapse, selected
+  scope change, or root change), search should rerun against the newly visible
+  markdown set.
 - File highlight colors are assigned from tree context menu and persisted per directory.
 - File-highlight palette includes Yellow, Green, Blue, Orange, Purple, Light Gray,
   Medium Gray, and Red.
@@ -571,12 +582,12 @@ R.TREE.05 :: [color highlight exists] => O(paint filename background without bre
 ```text
 copy_scope := first(selected_directory, last_selected_or_expanded_directory, current_root)
 copy_destination_default := first(last_directory_copy_target, current_effective_root)
-search_scope := highlighted_scope_directory()
+search_scope := visible_markdown_files_in_tree()
 ```
 
 ```text
 R.SCOPE.01 :: [copy-by-color scan or highlight-clear action] => O(resolve scope by selected dir > last dir > root)
-R.SCOPE.02 :: [search active and directory scope changes] => O(re-run search in new scope)
+R.SCOPE.02 :: [search active and visible-tree markdown set changes] => O(re-run search in new visible scope)
 R.SCOPE.03 :: [tree root changes] => O(preserve session splitter width for the app run)
 R.SCOPE.04 :: [directory copy mode folder chooser opened] => O(default chooser path to last destination folder, else current effective root)
 ```
@@ -683,18 +694,20 @@ near(term) occurrence := distinct_from(other_near_terms) and (word_bounded(term)
 
 ```text
 R.SEARCH.01 :: [search text empty] => O(clear active match styling immediately)
-R.SEARCH.02 :: [typing search text] => O(debounce before running search)
+R.SEARCH.02 :: [typing search text] => O(debounce before running search (currently 3000ms))
 R.SEARCH.03 :: [Enter pressed in search] => O(run search immediately)
 R.SEARCH.04 :: [query contains NEAR(...)] => O(require all terms within SEARCH_CLOSE_WORD_GAP content words)
 R.SEARCH.04a :: [query contains CLOSE(...)] => O(treat as backward-compatible alias of NEAR(...))
 R.SEARCH.05 :: [query contains AND(...) or OR(...)] => O(accept comma-delimited, space-delimited, or mixed arguments)
 R.SEARCH.06 :: [query active and file opened from matches] => O(highlight preview hits and scroll to first match)
-R.SEARCH.07 :: [tree row is a match] => O(show hit-count pill in gutter)
+R.SEARCH.07 :: [tree row is a match] => O(show hit-count pill in gutter and render filename bold+italic)
 R.SEARCH.08 :: [term begins with quote q] => O(treat only q as the closing delimiter)
 R.SEARCH.09 :: [single quote appears inside double-quoted term or double quote appears inside single-quoted term] => O(treat inner quote as literal content)
 R.SEARCH.10 :: [query contains NEAR(t1..tn)] => O(require distinct qualifying occurrences for t1..tn)
 R.SEARCH.11 :: [single-word term appears inside NEAR(...)] => O(evaluate proximity using word-bounded matches)
 R.SEARCH.12 :: [query contains NEAR(...)] => O(count file hit pills by qualifying NEAR windows, not by individual term spans)
+R.SEARCH.13 :: [tree row has filename-term hit] => O(render filename text yellow)
+R.SEARCH.14 :: [active search has hits under effective scope directory] => O(render effective-scope directory label yellow with aggregated hit-count pill)
 ```
 
 #### 8.2 Persistent highlights and markers
@@ -939,6 +952,12 @@ R.PRIME.01 :: [always] => O(preserve correctness and responsiveness without cros
   behavior so large copy/export operations do not regress.
 - `MDEXPLORE_BASE64_IMAGE_THREADS` can be used to tune BASE64 worker-pool size
   for both preview materialization and copy-time prefetch.
+- BASE64 helper routing should keep adaptive vendored `fastbase64` vs
+  `pybase64` selection with persisted tuning state (`fastbase64-adaptive.json`);
+  benchmark logging must remain optional and non-disruptive.
+- BASE64 encode helper behavior must preserve data-URI safety for diagram/image
+  consumers (notably PlantUML): reject malformed vendor-encoded payloads and
+  auto-fallback instead of propagating broken BASE64.
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
 - Debug logging to project-root `mdexplore.log` must remain disabled unless the
@@ -1614,6 +1633,9 @@ The `tests/` directory currently contains these suites:
   `_current_search_terms`, `_current_near_term_groups`,
   `_compile_match_predicate`, `_compile_match_hit_counter`,
   `_best_near_focus_window`) stay aligned with the extracted module behavior.
+- `tests/test_fast_base64.py`: BASE64 helper regressions for canonical encoded
+  length/round-trip correctness across varied payload sizes and tolerant decode
+  handling (whitespace/missing padding) via `b64decode_loose()`.
 - `tests/test_js_assets.py`: startup registry/template tests for all externalized
   JavaScript assets under `assets/js/preview/` and `assets/js/pdf/`, including
   preload coverage and placeholder-substitution validation for preview search,

@@ -1280,7 +1280,8 @@ class PreviewPage(QWebEnginePage):
 
 class MdExploreWindow(QMainWindow):
     MAX_DOCUMENT_VIEWS = 8
-    MAX_RECENT_ROOT_DIRECTORIES = 20
+    MAX_RECENT_ROOT_DIRECTORIES = 35
+    RECENT_ROOT_MENU_MRU_COUNT = 10
     MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
     CONFIG_LOCK_STALE_SECONDS = 120.0
     VIEWS_FILE_NAME = ".mdexplore-views.json"
@@ -1679,7 +1680,7 @@ class MdExploreWindow(QMainWindow):
         # scope; the right side hosts clipboard/search operations.
         self.recent_btn = QPushButton("Recent")
         self.recent_btn.setToolTip(
-            "Open one of the 20 most recently navigated root directories"
+            "Open one of the 35 retained recent root directories"
         )
         self.recent_menu = QMenu(self.recent_btn)
         self.recent_menu.aboutToShow.connect(
@@ -5917,7 +5918,20 @@ class MdExploreWindow(QMainWindow):
             return
 
         current_key = self._path_key(self.root) if isinstance(self.root, Path) else ""
-        for directory in self._recent_root_directories:
+        mru_count = max(
+            0,
+            min(
+                int(self.RECENT_ROOT_MENU_MRU_COUNT),
+                len(self._recent_root_directories),
+            ),
+        )
+        recent_directories = self._recent_root_directories[:mru_count]
+        remaining_directories = sorted(
+            self._recent_root_directories[mru_count:],
+            key=lambda path: str(path).casefold(),
+        )
+
+        def _add_recent_action(directory: Path) -> None:
             label = str(directory)
             if current_key and self._path_key(directory) == current_key:
                 label = f"{label} (current)"
@@ -5927,6 +5941,15 @@ class MdExploreWindow(QMainWindow):
                     target
                 )
             )
+
+        for directory in recent_directories:
+            _add_recent_action(directory)
+
+        if recent_directories and remaining_directories:
+            menu.addSeparator()
+
+        for directory in remaining_directories:
+            _add_recent_action(directory)
 
     def _reload_recent_root_directories_before_menu_open(self) -> None:
         """Refresh recent roots from disk every time the Recent menu opens."""

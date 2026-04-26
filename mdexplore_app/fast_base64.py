@@ -55,6 +55,9 @@ _VENDOR_FASTBASE64_ADAPTIVE_STATE_LOADED = False
 _VENDOR_FASTBASE64_ADAPTIVE_STATE: dict[str, object] = {}
 _VENDOR_FASTBASE64_ADAPTIVE_UNSAVED_SAMPLES = 0
 _VENDOR_FASTBASE64_ROUTING_CALL_COUNT = 0
+_BASE64_ASCII_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+)
 
 _ADAPTIVE_BUCKET_LIMITS: tuple[int, ...] = (
     0,
@@ -613,6 +616,29 @@ def _decode_with_vendor_backend(
         return None
 
 
+def _expected_base64_ascii_length(raw_length: int) -> int:
+    """Return canonical BASE64 output length (with padding) for raw byte length."""
+    normalized = max(0, int(raw_length))
+    return ((normalized + 2) // 3) * 4
+
+
+def _vendor_base64_encode_output_is_sane(encoded: str, raw_length: int) -> bool:
+    """Return whether vendor-encoded BASE64 output is structurally valid."""
+    if not isinstance(encoded, str):
+        return False
+    expected_len = _expected_base64_ascii_length(raw_length)
+    if len(encoded) != expected_len:
+        return False
+    if encoded and any(ch not in _BASE64_ASCII_ALPHABET for ch in encoded):
+        return False
+    remainder = max(0, int(raw_length)) % 3
+    if remainder == 0:
+        return not encoded.endswith("=")
+    if remainder == 1:
+        return encoded.endswith("==")
+    return encoded.endswith("=") and not encoded.endswith("==")
+
+
 def _log_vendor_benchmark_result(
     *,
     payload_chars: int,
@@ -665,7 +691,11 @@ def b64encode_ascii(raw_bytes: bytes) -> str:
     if vendor_backend is not None:
         try:
             encoded = vendor_backend.encode_ascii(raw_bytes)
-            if encoded is not None:
+            # Guard against malformed vendor output. Some builds can produce
+            # off-by-one/truncated payloads which break data-URI consumers.
+            if encoded is not None and _vendor_base64_encode_output_is_sane(
+                encoded, len(raw_bytes)
+            ):
                 return encoded
         except Exception:
             pass

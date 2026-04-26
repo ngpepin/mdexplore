@@ -21,7 +21,7 @@ module, but low-risk support code is now split into `mdexplore_app/`:
 - `mdexplore_app/tree.py`: markdown tree model and delegate (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: custom multi-view tab bar (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF write/stamp steps.
-- `mdexplore_app/fast_base64.py`: shared BASE64 helpers with SIMD/native fast path fallback.
+- `mdexplore_app/fast_base64.py`: shared BASE64 helpers with vendor `fastbase64` + `pybase64` acceleration and stdlib fallback.
 
 This is intentionally a first-stage modularization. Most behavior and call flow
 still lives in `mdexplore.py` so feature risk stays low while the file is
@@ -42,7 +42,8 @@ gradually decomposed.
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
-  - `Recent` opens a dropdown of the 20 most recently navigated root directories (most recent first).
+  - `Recent` opens a dropdown of up to 35 retained root directories:
+    first 10 shown most-recent-first, then a separator, then up to 25 remaining entries sorted alphabetically.
     The list refreshes from disk each time the menu is opened so multiple running instances stay in sync.
     A root is added only after it has been active for at least 30 seconds and then you navigate to another root.
   - `^` moves root up one directory level.
@@ -52,6 +53,9 @@ gradually decomposed.
   - `Add View` creates another tabbed view of the same document at the current top visible line.
   - `Edit` opens the selected file in MarkText (`/usr/bin/marktext`).
 - Window title shows the current effective root path.
+- Effective-root directory row is always bold:
+  - aqua-blue (`#7fdfe8`) when no active search hits are under that scope,
+  - yellow with an appended hit-count pill when active search has hits under that scope (`1..99`, then `++`).
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
 - Copy-time BASE64 image conversion warms image targets in parallel before rewrite for faster large-file copy/export workflows.
@@ -83,7 +87,7 @@ gradually decomposed.
   actions prompt for confirmation before clearing.
 - Top-right copy controls are labeled `Copy to: () Clipboard () Directory`,
   with `Clipboard` selected by default.
-- A BASE64 image toggle button sits beside the copy color buttons:
+- A BASE64 image toggle button sits immediately to the left of `Copy to:`:
   - `off` tooltip: `Turn BASE64 image encoding on`
   - `on` tooltip: `Turn BASE64 image encoding off`
   - toggle state persists in `~/.mdexplore.cfg` across restarts (`copy_base64_images_enabled`).
@@ -96,8 +100,13 @@ gradually decomposed.
 - Directory copy also writes merged metadata entries for copied files into the
   target folder sidecars: `.mdexplore-colors.json`,
   `.mdexplore-views.json`, and `.mdexplore-highlighting.json`.
-- Search box includes an explicit `X` clear control that clears the query and removes bolded match markers.
+- Search box includes an explicit `X` clear control that clears the query and removes match styling.
+- Active search evaluates the markdown files currently visible in the tree
+  (root + expanded branches), and reruns automatically when tree visibility
+  changes (expand/collapse/root/scope navigation).
 - Search-hit files in the tree show a yellow hit-count pill in the left gutter.
+- Matching filenames are styled bold+italic, and filename-term matches are
+  rendered in yellow text.
 - When search is active and a matched file is opened, preview matches are highlighted in yellow and the view scrolls to the first match.
 - While dragging the preview scrollbar, mdexplore shows an approximate
   `current line / total lines` indicator beside the scrollbar handle.
@@ -114,7 +123,8 @@ gradually decomposed.
 - Last effective root plus recent-root history are persisted to `~/.mdexplore.cfg` on root navigation and on exit.
   - Payload format is JSON with keys `default_root`, `recent_roots`, and `copy_base64_images_enabled`
     (legacy plain-text config is still accepted on read).
-  - Recent roots are capped at 20 entries, ordered newest first.
+  - Recent roots are capped at 35 entries in rolling newest-first storage.
+    Menu presentation is split: 10 most-recent-first, separator, then remaining entries alphabetically.
   - Config writes use a lock file (`~/.mdexplore.cfg.lock`) with non-blocking, momentary locking.
   - If another instance holds the lock during a save attempt, that save is skipped silently.
   - Lock files older than 2 minutes are cleaned up automatically (silently).
@@ -219,6 +229,8 @@ Notes:
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
 - `NEAR(...)` is strict in both `mdexplore` and `hfind`: a hit is only produced when all NEAR terms occur within the configured 50-word window.
+- For content search, inline `data:image/...;base64,...` payloads are ignored in
+  both `mdexplore` and `hfind` to avoid false positives from embedded image data.
 - In verbose `NEAR(...)` output, numbering reflects match semantics:
   - lines that independently satisfy `NEAR(...)` are each numbered,
   - lines shown only as contiguous context for a cross-line NEAR window are grouped and only the first line is numbered.
@@ -228,7 +240,7 @@ Notes:
   - Exception: this boundary rule applies only to a single leading/trailing space. Terms like `'  Nico'` or `'Nico  '` require those two literal spaces.
 - Short flags are stackable in any order (for example `-cr`, `-rc`).
 - If `-q` / `--query` is omitted, the first positional string is treated as the query.
-- Filename-only mode checks filename stem only (no extension, no path).
+- Filename-only mode checks the full filename (including extension, no path).
 
 Examples:
 
@@ -236,7 +248,7 @@ Examples:
 ./hfind.sh --query "OR(fred, paul)" --content --recursive *.txt
 ```
 
-Recursively searches from current directory for readable `.txt` files whose filename stem or content contains (case-insensitive) `fred` or `paul`.
+Recursively searches from current directory for readable `.txt` files whose filename or content contains (case-insensitive) `fred` or `paul`.
 
 ```bash
 ./hfind.sh -q "OR(fred, paul)" -cr *.txt
@@ -251,13 +263,13 @@ All above are valid shorthand forms.
 ./hfind.sh --query "OR(fred, paul)" *.txt
 ```
 
-Searches filename stems only (current directory, non-recursive).
+Searches filenames only (current directory, non-recursive).
 
 ```bash
 ./hfind.sh -q "AND('Fred',paul)" /path/to/directory/*.md
 ```
 
-Searches markdown filename stems in `/path/to/directory/` (non-recursive) where query requires case-sensitive `Fred` and case-insensitive `paul`.
+Searches markdown filenames in `/path/to/directory/` (non-recursive) where query requires case-sensitive `Fred` and case-insensitive `paul`.
 
 ```bash
 ./hfind.sh -rc "NEAR(\"Fred is my friend\", \"is a nice guy\")" "/path/to my/directory/*.md"
@@ -549,12 +561,17 @@ Example:
 
 ### Search and Match Highlighting
 
-- Use `Search and highlight:` for non-recursive matching in the current effective scope.
-- Matching files are shown in bold in the tree.
+- Use `Search and highlight:` to match markdown files currently visible in the
+  tree (root + expanded directories).
+- While search is active, expand/collapse and directory/root scope changes
+  automatically rerun the search against the newly visible set.
+- Matching files are shown bold+italic in the tree.
+- If filename terms match, filename text is rendered in yellow.
+- The effective-root directory label is bold aqua when idle, and becomes yellow
+  with an appended hit-count pill when active search has hits under that scope.
 - Press `Enter` in the search field to run search immediately (skip debounce).
-- Clicking the `X` in the search field clears search text and removes bolding.
-- If search is active and you navigate to a different directory scope, search
-  reruns automatically for that directory.
+- Clicking the `X` in the search field clears search text and removes match
+  styling.
 - Opening a matched file while search is active highlights matching text in yellow
   in the preview and scrolls to the first highlighted match.
 - Preview scrollbar markers show where highlighted hits occur within the
@@ -656,6 +673,9 @@ Behavior details:
 - Markdown preview loads immediately with `PlantUML rendering...` placeholders.
 - Each diagram is replaced automatically as soon as it completes.
 - Diagram replacements are applied in-place so scroll position is preserved.
+- PlantUML SVG `data:` URIs are BASE64-encoded through guarded helpers; if
+  vendored `fastbase64` encode output is malformed, mdexplore automatically
+  falls back to `pybase64`/stdlib encode so diagrams still render.
 - Failed diagrams show `PlantUML render failed with error ...` plus detailed
   stderr context (including line number when PlantUML provides one).
 - Diagram progress continues while you browse other files; returning shows completed progress.
@@ -730,7 +750,7 @@ MDEXPLORE_MARKDOWN_ENGINE=markdown-it /path/to/mdexplore/mdexplore.sh
 
 - BASE64 image worker threads (preview data-URI materialization + copy-time prefetch):
   - `MDEXPLORE_BASE64_IMAGE_THREADS=<N>`
-  - Default is CPU-based (`max(4, min(64, cpu_count * 6))`).
+  - Default is CPU-based (`max(2, min(24, cpu_count * 2))`).
 
 Example:
 
@@ -739,8 +759,17 @@ MDEXPLORE_BASE64_IMAGE_THREADS=24 /path/to/mdexplore/mdexplore.sh
 ```
 
 - BASE64 codec path:
-  - `pybase64` (SIMD/native) is used when available.
-  - If unavailable, helpers fall back to Python stdlib `base64`.
+  - Decode path prefers `pybase64`, with adaptive routing to vendored
+    `vendor/fastbase64` for payload-size sweet spots.
+  - Encode path may use vendored `fastbase64`, but output is validated
+    (length/padding/alphabet). Invalid vendor output is discarded and
+    mdexplore falls back to `pybase64`/stdlib automatically.
+  - Adaptive benchmark state persists in `fastbase64-adaptive.json`.
+  - Optional vendor-vs-fallback benchmark telemetry is written to
+    `fastbase64-benchmark.log` when the debug dual-path switch is enabled in
+    `mdexplore_app/fast_base64.py`.
+  - If accelerated backends are unavailable, helpers fall back to Python stdlib
+    `base64`.
 
 ## Debug Logging
 

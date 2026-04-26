@@ -47,7 +47,7 @@ node "Ubuntu Desktop Session" as Desktop {
   component "QWebEngineView\nPreview Pane" as WebView
   component "ColorizedMarkdownModel\n(QFileSystemModel)" as Model
   component "MarkdownTreeItemDelegate\n(tree row painter)" as TreeDelegate
-  component "MarkdownRenderer\n(markdown-it + HTML template)" as Renderer
+  component "MarkdownRenderer\n(cmarkgfm/markdown-it + HTML template)" as Renderer
   component "ViewTabBar\n(multi-view tabs)" as ViewTabs
   component "PreviewRenderWorker\n(QThreadPool: render)" as PreviewWorker
   component "TreeMarkerScanWorker\n(QThreadPool: sidecar scan)" as MarkerWorker
@@ -66,7 +66,7 @@ file "<dir>/.mdexplore-views.json" as ViewCfg
 file "<dir>/.mdexplore-highlighting.json" as HighlightCfg
 folder "User-selected copy target directory" as CopyTargetDir
 database "System Clipboard\nURLs + GNOME copied-files MIME" as Clipboard
-component "VS Code CLI\ncode" as Vscode
+component "MarkText\n/usr/bin/marktext" as MarkText
 file "vendor/plantuml/plantuml.jar" as PlantJar
 node "Java Runtime" as Java
 file "vendor/mathjax + vendor/mermaid" as LocalAssets
@@ -109,7 +109,7 @@ Window --> HighlightCfg : merge copied-file highlight metadata (directory mode)
 MarkerWorker --> ViewCfg : scan persisted view state
 MarkerWorker --> HighlightCfg : scan persisted preview highlights
 Window --> Clipboard : copy files/text/source markdown
-Window --> Vscode : Edit action
+Window --> MarkText : Edit action
 Renderer --> MermaidRs : local Rust Mermaid render request
 Renderer --> PlantJar : direct PlantUML render when no async resolver
 Renderer --> TemplateSupport : render preview/document.html
@@ -458,9 +458,9 @@ Overlay -> Web : jump to nearest target block/line
 @startuml
 actor User
 participant "Search QLineEdit" as Search
-participant "QTimer(1s debounce)" as Debounce
+participant "QTimer(3s debounce)" as Debounce
 participant "MdExploreWindow" as Win
-participant "Filesystem Scope" as Scope
+participant "Visible Tree Scope" as Scope
 participant "ColorizedMarkdownModel" as Model
 participant "QTreeView" as Tree
 participant "QWebEngineView" as Web
@@ -477,13 +477,13 @@ end
 
 Debounce -> Win : timeout -> _run_match_search()
 Win -> Win : compile predicate\n(Boolean + implicit AND + single/double quotes + NEAR)
-Win -> Scope : list direct *.md files (non-recursive)
+Win -> Scope : list currently visible *.md files in tree
 loop each file
   Win -> Scope : read file name + content
   Win -> Win : predicate(name, content)
 end
 Win -> Model : set_search_match_counts(match_counts)
-Model --> Tree : hit-count pill + bold/italic matched rows
+Model --> Tree : hit-count pill + bold/italic matched rows\n+ yellow filename text for filename-term hits
 Win -> Web : highlight matches in preview (if open file matched)
 
 alt user clicks a color button next to Search
@@ -653,6 +653,10 @@ MultiView --> [*] : window close (persist effective root)
 - Named-view gutter markers now route back through the same saved-view restore
   path as tab selection, so marker navigation and tab selection land on the
   same saved location.
+- Effective-root directory styling is stateful in the tree:
+  - bold aqua-blue when no active-search hits are under effective scope,
+  - bold yellow with appended hit-count pill when active-search hits exist
+    under effective scope.
 - Top-right copy controls now include destination mode (`Clipboard` vs `Directory`);
   directory mode copies files into a chosen folder and merges copied-file metadata
   into destination `.mdexplore-*` sidecars.
