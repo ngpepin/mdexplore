@@ -138,6 +138,77 @@ class PreviewRenderWorker(QRunnable):
             self.signals.finished.emit(self.request_id, str(self.path), "", 0, 0, str(exc))
 
 
+class InlineDataImageMaterializeWorkerSignals(QObject):
+    """Signals emitted by background inline data-image materialization workers."""
+
+    finished = Signal(int, str, str, object, object, object, str)
+
+
+class InlineDataImageMaterializeWorker(QRunnable):
+    """Materialize preview inline data-image sources in background."""
+
+    def __init__(
+        self,
+        request_id: int,
+        path_key: str,
+        html_doc: str,
+        mtime_ns: int,
+        size: int,
+        materialize_callback: Callable[[str], tuple[str, dict[str, str]] | str],
+    ):
+        super().__init__()
+        self.request_id = int(request_id)
+        self.path_key = str(path_key)
+        self.html_doc = str(html_doc or "")
+        self.mtime_ns = int(mtime_ns)
+        self.size = int(size)
+        self.materialize_callback = materialize_callback
+        self.signals = InlineDataImageMaterializeWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            callback_result = self.materialize_callback(self.html_doc)
+            resolved_urls_by_digest: dict[str, str] = {}
+            if (
+                isinstance(callback_result, tuple)
+                and len(callback_result) == 2
+                and isinstance(callback_result[0], str)
+                and isinstance(callback_result[1], dict)
+            ):
+                materialized_html = callback_result[0]
+                resolved_urls_by_digest = {
+                    str(raw_digest): str(raw_url)
+                    for raw_digest, raw_url in callback_result[1].items()
+                    if isinstance(raw_digest, str)
+                    and isinstance(raw_url, str)
+                    and raw_digest
+                    and raw_url
+                }
+            else:
+                materialized_html = callback_result
+            if not isinstance(materialized_html, str):
+                materialized_html = self.html_doc
+            self.signals.finished.emit(
+                self.request_id,
+                self.path_key,
+                materialized_html,
+                self.mtime_ns,
+                self.size,
+                resolved_urls_by_digest,
+                "",
+            )
+        except Exception as exc:
+            self.signals.finished.emit(
+                self.request_id,
+                self.path_key,
+                self.html_doc,
+                self.mtime_ns,
+                self.size,
+                {},
+                str(exc),
+            )
+
+
 class PlantUmlRenderWorkerSignals(QObject):
     """Signals emitted by background PlantUML render workers."""
 

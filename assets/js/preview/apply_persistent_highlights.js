@@ -279,6 +279,58 @@
     return countableLength(node.nodeValue) <= 0;
   }
 
+  function isPersistentHighlightSpan(node) {
+    return (
+      node instanceof Element &&
+      node.tagName === "SPAN" &&
+      node.getAttribute("data-mdexplore-persistent-highlight") === "1"
+    );
+  }
+
+  function canMergePersistentHighlightRuns(leftNode, rightNode) {
+    if (!isPersistentHighlightSpan(leftNode) || !isPersistentHighlightSpan(rightNode)) {
+      return false;
+    }
+    const leftId = String(
+      leftNode.getAttribute("data-mdexplore-persistent-highlight-id") || ""
+    );
+    const rightId = String(
+      rightNode.getAttribute("data-mdexplore-persistent-highlight-id") || ""
+    );
+    if (leftId !== rightId) return false;
+    const leftKind = String(
+      leftNode.getAttribute("data-mdexplore-persistent-highlight-kind") || ""
+    );
+    const rightKind = String(
+      rightNode.getAttribute("data-mdexplore-persistent-highlight-kind") || ""
+    );
+    return leftKind === rightKind;
+  }
+
+  function mergeAdjacentPersistentHighlightRuns(container) {
+    if (!(container instanceof Node)) return 0;
+    let merged = 0;
+    let node = container.firstChild;
+    while (node) {
+      if (!isPersistentHighlightSpan(node)) {
+        node = node.nextSibling;
+        continue;
+      }
+      let next = node.nextSibling;
+      while (canMergePersistentHighlightRuns(node, next)) {
+        node.textContent = `${node.textContent || ""}${next.textContent || ""}`;
+        const toRemove = next;
+        next = next.nextSibling;
+        if (toRemove && toRemove.parentNode === container) {
+          container.removeChild(toRemove);
+          merged += 1;
+        }
+      }
+      node = next;
+    }
+    return merged;
+  }
+
   for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]'))) {
     const parent = mark.parentNode;
     if (!parent) continue;
@@ -513,6 +565,7 @@
   }
 
   let applied = 0;
+  let mergedSpans = 0;
   let countableSegmentCount = 0;
   for (const record of nodeRecords) {
     const fragment = document.createDocumentFragment();
@@ -584,6 +637,7 @@
     const parent = record.node.parentNode;
     if (nodeChanged && parent) {
       parent.replaceChild(fragment, record.node);
+      mergedSpans += mergeAdjacentPersistentHighlightRuns(parent);
     }
   }
 
@@ -592,6 +646,7 @@
   }
   return {
     applied,
+    mergedSpans,
     entries: resolvedEntries.length,
     segments: countableSegmentCount,
     totalLength,

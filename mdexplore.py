@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import html
 import hashlib
@@ -18,8 +19,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from threading import Event, Lock
 import time
 import urllib.parse
 import urllib.request
@@ -162,6 +163,7 @@ from mdexplore_app.runtime import (
 from mdexplore_app.tabs import ViewTabBar
 from mdexplore_app.tree import ColorizedMarkdownModel, MarkdownTreeItemDelegate
 from mdexplore_app.workers import (
+    InlineDataImageMaterializeWorker,
     PdfExportWorker,
     PlantUmlRenderWorker,
     PreviewRenderWorker,
@@ -188,6 +190,9 @@ _PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES = {
     "image/svg+xml": ".svg",
     "image/jpeg": ".jpg",
 }
+_PREVIEW_INLINE_IMAGE_PLACEHOLDER_DATA_URI = (
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+)
 
 
 class _PreviewLogicalTextExtractor(HTMLParser):
@@ -1309,8 +1314,9 @@ class MdExploreWindow(QMainWindow):
         ("Red", "#ef7d7d"),
     ]
     DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
-    DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(32, (os.cpu_count() or 2) * 4))
-    PREVIEW_HTTP_CACHE_MAX_BYTES = 512 * 1024 * 1024
+    # Keep BASE64 work parallel, but avoid saturating all cores by default.
+    DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(24, (os.cpu_count() or 2) * 2))
+    PREVIEW_HTTP_CACHE_MAX_BYTES = 1536 * 1024 * 1024
 
     def __init__(
         self,
@@ -1352,9 +1358,46 @@ class MdExploreWindow(QMainWindow):
         self._pending_preview_search_terms: list[tuple[str, bool]] = []
         self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
         self._render_pool = QThreadPool(self)
-        self._render_pool.setMaxThreadCount(1)
+        raw_preview_render_threads = os.environ.get(
+            "MDEXPLORE_PREVIEW_RENDER_THREADS", ""
+        ).strip()
+        try:
+            configured_preview_render_threads = int(raw_preview_render_threads)
+        except Exception:
+            configured_preview_render_threads = 0
+        max_preview_render_threads = max(2, min(4, os.cpu_count() or 2))
+        default_preview_render_threads = max_preview_render_threads
+        if configured_preview_render_threads > 0:
+            preview_render_threads = configured_preview_render_threads
+        else:
+            preview_render_threads = default_preview_render_threads
+        preview_render_threads = max(
+            1, min(int(preview_render_threads), int(max_preview_render_threads))
+        )
+        self._render_pool.setMaxThreadCount(preview_render_threads)
         self._render_request_id = 0
         self._active_render_workers: set[PreviewRenderWorker] = set()
+        self._inline_data_image_pool = QThreadPool(self)
+        self._inline_data_image_pool.setMaxThreadCount(1)
+        self._inline_data_image_request_id = 0
+        self._active_inline_data_image_workers: set[InlineDataImageMaterializeWorker] = (
+            set()
+        )
+        self._inline_data_image_worker_queue: deque[InlineDataImageMaterializeWorker] = (
+            deque()
+        )
+        self._inline_data_image_max_active_workers = 1
+        self._inline_data_image_request_by_path_key: dict[str, int] = {}
+        self._inline_data_image_abort_events_by_request_id: dict[int, Event] = {}
+        self._inline_data_image_pending_sources_by_path_key: dict[
+            str, dict[str, str]
+        ] = {}
+        self._inline_data_image_precomputed_placeholders_by_path_key: dict[
+            str, tuple[int, int, str, dict[str, str]]
+        ] = {}
+        self._inline_data_image_pending_apply_urls_by_path_key: dict[
+            str, dict[str, str]
+        ] = {}
         self._tree_marker_scan_pool = QThreadPool(self)
         self._tree_marker_scan_pool.setMaxThreadCount(1)
         self._tree_marker_scan_request_id = 0
@@ -1408,6 +1451,7 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_signature_key: str | None = None
         self._current_preview_signature: tuple[int, int] | None = None
         self._preview_capture_enabled = False
+        self._last_preview_scroll_capture_monotonic = 0.0
         self._scroll_restore_block_until = 0.0
         self._view_line_probe_block_until = 0.0
         self._view_states: dict[int, dict[str, float | int]] = {}
@@ -1501,7 +1545,7 @@ class MdExploreWindow(QMainWindow):
             self._on_diagram_state_capture_tick
         )
         self._preview_action_poll_timer = QTimer(self)
-        self._preview_action_poll_timer.setInterval(120)
+        self._preview_action_poll_timer.setInterval(220)
         self._preview_action_poll_timer.timeout.connect(self._poll_preview_actions)
         self._preview_action_poll_timer.start()
         self._diagram_state_capture_timer.start()
@@ -2383,6 +2427,32 @@ class MdExploreWindow(QMainWindow):
         slot = start
         self._next_tab_color_index = (slot + 1) % palette_size
         return slot
+
+    def _used_view_ids(self) -> set[int]:
+        """Collect internal view ids currently present in tab/session state."""
+        used: set[int] = set()
+        for raw_view_id in self._view_states:
+            try:
+                used.add(int(raw_view_id))
+            except Exception:
+                continue
+        for index in range(self.view_tabs.count()):
+            view_id = self._tab_view_id(index)
+            if view_id is not None:
+                used.add(int(view_id))
+        return used
+
+    def _allocate_next_view_id(self) -> int:
+        """Return the next unused positive view id and advance allocator cursor."""
+        used = self._used_view_ids()
+        try:
+            candidate = max(1, int(self._next_view_id))
+        except Exception:
+            candidate = 1
+        while candidate in used:
+            candidate += 1
+        self._next_view_id = candidate + 1
+        return candidate
 
     def _current_view_state(self) -> dict[str, float | int] | None:
         """Return active view state dictionary when available."""
@@ -3392,12 +3462,18 @@ class MdExploreWindow(QMainWindow):
         if not path_key:
             return
 
+        self._save_document_view_session(path_key, capture_current=capture_current)
+        self._persist_document_view_session_snapshot(path_key)
+
+    def _persist_document_view_session_snapshot(self, path_key: str | None) -> None:
+        """Persist an already-captured in-memory view session for one path key."""
+        if not path_key:
+            return
         resolved = self._path_directory_and_name(path_key)
         if resolved is None:
             return
         directory, file_name = resolved
 
-        self._save_document_view_session(path_key, capture_current=capture_current)
         sessions = self._directory_view_sessions(directory)
         session = self._document_view_sessions.get(path_key)
         if self._should_persist_document_view_session(session):
@@ -3485,6 +3561,9 @@ class MdExploreWindow(QMainWindow):
             plantuml_resolver=plantuml_resolver,
             has_math_hint=has_math,
         )
+        progressive_display_html, progressive_pending_sources = (
+            self._prepare_inline_data_image_placeholders(html_doc)
+        )
         metadata: dict[str, object] = {
             "total_lines": total_lines,
             "has_math": has_math,
@@ -3493,6 +3572,8 @@ class MdExploreWindow(QMainWindow):
             "placeholders_by_hash": placeholders_by_hash,
             "prepared_plantuml_sources_by_hash": prepared_plantuml_sources_by_hash,
             "pdf_mermaid_by_hash": worker_renderer.take_last_mermaid_pdf_svg_by_hash(),
+            "progressive_display_html": progressive_display_html,
+            "progressive_pending_sources": progressive_pending_sources,
         }
         return html_doc, int(stat.st_mtime_ns), int(stat.st_size), metadata
 
@@ -4065,8 +4146,7 @@ class MdExploreWindow(QMainWindow):
         self, scroll_y: float, top_line: int, *, make_current: bool
     ) -> int:
         """Create a new view tab/state entry and optionally activate it."""
-        view_id = self._next_view_id
-        self._next_view_id += 1
+        view_id = self._allocate_next_view_id()
         sequence = self._next_view_sequence
         self._next_view_sequence += 1
         color_slot = self._allocate_next_tab_color_slot()
@@ -4139,7 +4219,7 @@ class MdExploreWindow(QMainWindow):
             )
             return
 
-        self._capture_current_preview_scroll(force=True)
+        self._capture_current_preview_scroll(force=True, update_line_probe=False)
         current_state = self._current_view_state() or {"scroll_y": 0.0, "top_line": 1}
         scroll_y = float(current_state.get("scroll_y", 0.0))
         top_line = int(current_state.get("top_line", 1))
@@ -4354,6 +4434,10 @@ class MdExploreWindow(QMainWindow):
     def _poll_preview_actions(self) -> None:
         """Poll one-shot preview actions requested by injected marker scripts."""
         if self.current_file is None or self._preview_load_in_progress:
+            return
+        # Skip the JS poll loop unless the active document actually exposes
+        # named view markers that can trigger preview-side requests.
+        if not self._has_named_view_markers_for_key(self._current_preview_path_key()):
             return
         if self._preview_action_poll_inflight:
             return
@@ -4745,8 +4829,46 @@ class MdExploreWindow(QMainWindow):
         """Return temp directory used for extracted inline preview images."""
         return Path(tempfile.gettempdir()) / "mdexplore-preview-data-images"
 
-    def _preview_data_image_file_url(self, data_uri: str) -> str | None:
+    @staticmethod
+    def _decode_base64_payload_interruptible(
+        compact_payload: str,
+        *,
+        abort_event: Event | None = None,
+    ) -> bytes | None:
+        """Decode BASE64 payload in chunks so cancellation can preempt long runs."""
+        source = str(compact_payload or "")
+        if not source:
+            return b""
+        if abort_event is None:
+            return _b64decode_loose(source)
+        if abort_event.is_set():
+            return None
+
+        chunk_chars = 256 * 1024
+        carry = ""
+        output = bytearray()
+        for offset in range(0, len(source), chunk_chars):
+            if abort_event.is_set():
+                return None
+            part = carry + source[offset : offset + chunk_chars]
+            usable_len = (len(part) // 4) * 4
+            if usable_len > 0:
+                output.extend(base64.b64decode(part[:usable_len], validate=False))
+            carry = part[usable_len:]
+
+        if abort_event.is_set():
+            return None
+        if carry:
+            padded = carry + ("=" * ((4 - (len(carry) % 4)) % 4))
+            output.extend(base64.b64decode(padded, validate=False))
+        return bytes(output)
+
+    def _preview_data_image_file_url(
+        self, data_uri: str, *, abort_event: Event | None = None
+    ) -> str | None:
         """Persist one inline base64 data URI to a temp file and return a file URL."""
+        if abort_event is not None and abort_event.is_set():
+            return None
         raw_data_uri = str(data_uri or "").strip()
         if not raw_data_uri:
             return None
@@ -4773,8 +4895,13 @@ class MdExploreWindow(QMainWindow):
         if not compact_payload:
             return None
         try:
-            raw_bytes = _b64decode_loose(compact_payload)
+            raw_bytes = self._decode_base64_payload_interruptible(
+                compact_payload,
+                abort_event=abort_event,
+            )
         except Exception:
+            return None
+        if raw_bytes is None:
             return None
         if not raw_bytes:
             return None
@@ -4793,6 +4920,8 @@ class MdExploreWindow(QMainWindow):
         suffix = self._preview_data_image_extension_for_mime_type(mime_type)
         output_path = temp_dir / f"{digest}{suffix}"
         try:
+            if abort_event is not None and abort_event.is_set():
+                return None
             if (
                 not output_path.exists()
                 or output_path.stat().st_size != len(raw_bytes)
@@ -4853,41 +4982,134 @@ class MdExploreWindow(QMainWindow):
             return "image/svg+xml"
         return None
 
-    def _materialize_preview_inline_data_images(self, html_doc: str) -> str:
+    def _materialize_preview_inline_data_images(
+        self,
+        html_doc: str,
+        *,
+        resolved_url_by_digest: dict[str, str] | None = None,
+        abort_event: Event | None = None,
+    ) -> str:
         """Replace inline base64 data-image URLs in preview HTML with temp file URLs."""
+        if abort_event is not None and abort_event.is_set():
+            return html_doc
         if "data:" not in str(html_doc or "").lower():
             return html_doc
 
         matches = list(_PREVIEW_INLINE_DATA_IMAGE_SRC_RE.finditer(html_doc))
         if not matches:
             return html_doc
-        unique_data_uris = {str(match.group(3) or "") for match in matches if match.group(3)}
+        unique_data_uris = [str(match.group(3) or "") for match in matches if match.group(3)]
+        if not unique_data_uris:
+            return html_doc
+        # Keep stable ordering while deduplicating to make cancellation behavior
+        # deterministic across runs.
+        unique_data_uris = list(dict.fromkeys(unique_data_uris))
         resolved_urls: dict[str, str | None] = {}
         if unique_data_uris:
+            cpu_count = max(1, int(os.cpu_count() or 2))
+            max_preview_materialize_threads = max(
+                2,
+                min(8, max(2, cpu_count - 2)),
+            )
             worker_count = max(
-                1, min(int(self._base64_image_worker_threads), len(unique_data_uris))
+                1,
+                min(
+                    int(self._base64_image_worker_threads),
+                    len(unique_data_uris),
+                    max_preview_materialize_threads,
+                ),
             )
             if worker_count > 1 and len(unique_data_uris) > 1:
                 try:
-                    with ThreadPoolExecutor(
+                    executor = ThreadPoolExecutor(
                         max_workers=worker_count,
                         thread_name_prefix="mdx-data-image",
-                    ) as executor:
-                        future_map = {
-                            executor.submit(self._preview_data_image_file_url, uri): uri
-                            for uri in unique_data_uris
-                        }
-                        for future, uri in future_map.items():
-                            try:
-                                resolved_urls[uri] = future.result()
-                            except Exception:
-                                resolved_urls[uri] = None
+                    )
+                    aborted = False
+                    try:
+                        pending_futures: dict[object, str] = {}
+                        next_index = 0
+
+                        def _submit_next() -> bool:
+                            nonlocal next_index
+                            if next_index >= len(unique_data_uris):
+                                return False
+                            uri = unique_data_uris[next_index]
+                            next_index += 1
+                            future = executor.submit(
+                                self._preview_data_image_file_url,
+                                uri,
+                                abort_event=abort_event,
+                            )
+                            pending_futures[future] = uri
+                            return True
+
+                        while (
+                            len(pending_futures) < worker_count and _submit_next()
+                        ):
+                            pass
+
+                        while pending_futures:
+                            if abort_event is not None and abort_event.is_set():
+                                aborted = True
+                                for future in tuple(pending_futures.keys()):
+                                    try:
+                                        future.cancel()
+                                    except Exception:
+                                        pass
+                                pending_futures.clear()
+                                break
+                            done, _pending = wait(
+                                tuple(pending_futures.keys()),
+                                timeout=0.08,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            if not done:
+                                continue
+                            for future in done:
+                                uri = pending_futures.pop(future, None)
+                                if not uri:
+                                    continue
+                                try:
+                                    resolved_urls[uri] = future.result()
+                                except Exception:
+                                    resolved_urls[uri] = None
+                                if abort_event is not None and abort_event.is_set():
+                                    aborted = True
+                                    continue
+                                _submit_next()
+                    finally:
+                        try:
+                            executor.shutdown(wait=not aborted, cancel_futures=aborted)
+                        except Exception:
+                            pass
+                    if aborted:
+                        return html_doc
                 except Exception:
                     for uri in unique_data_uris:
-                        resolved_urls[uri] = self._preview_data_image_file_url(uri)
+                        if abort_event is not None and abort_event.is_set():
+                            break
+                        resolved_urls[uri] = self._preview_data_image_file_url(
+                            uri,
+                            abort_event=abort_event,
+                        )
             else:
                 for uri in unique_data_uris:
-                    resolved_urls[uri] = self._preview_data_image_file_url(uri)
+                    if abort_event is not None and abort_event.is_set():
+                        break
+                    resolved_urls[uri] = self._preview_data_image_file_url(
+                        uri,
+                        abort_event=abort_event,
+                    )
+
+        if resolved_url_by_digest is not None:
+            for raw_uri, raw_url in resolved_urls.items():
+                if not isinstance(raw_uri, str) or not isinstance(raw_url, str) or not raw_url:
+                    continue
+                digest = hashlib.sha1(
+                    raw_uri.encode("utf-8", errors="replace")
+                ).hexdigest()
+                resolved_url_by_digest[digest] = raw_url
 
         def _replace(match: re.Match[str]) -> str:
             local_file_url = resolved_urls.get(str(match.group(3) or ""))
@@ -4901,6 +5123,273 @@ class MdExploreWindow(QMainWindow):
             return _PREVIEW_INLINE_DATA_IMAGE_SRC_RE.sub(_replace, html_doc)
         except Exception:
             return html_doc
+
+    def _materialize_preview_inline_data_images_with_digest_map(
+        self, html_doc: str, *, abort_event: Event | None = None
+    ) -> tuple[str, dict[str, str]]:
+        """Materialize inline data-image sources and return digest->file URL map."""
+        resolved_url_by_digest: dict[str, str] = {}
+        materialized_html = self._materialize_preview_inline_data_images(
+            html_doc,
+            resolved_url_by_digest=resolved_url_by_digest,
+            abort_event=abort_event,
+        )
+        return materialized_html, resolved_url_by_digest
+
+    @staticmethod
+    def _has_preview_inline_data_images(html_doc: str) -> bool:
+        """Return whether HTML still contains inline BASE64 image `<img src>` values."""
+        source = str(html_doc or "")
+        if "data:" not in source.lower():
+            return False
+        return _PREVIEW_INLINE_DATA_IMAGE_SRC_RE.search(source) is not None
+
+    def _prepare_inline_data_image_placeholders(
+        self, html_doc: str
+    ) -> tuple[str, dict[str, str]]:
+        """Replace inline BASE64 image `src` attributes with lightweight placeholders."""
+        source = str(html_doc or "")
+        if not self._has_preview_inline_data_images(source):
+            return source, {}
+
+        pending_sources: dict[str, str] = {}
+
+        def _replace(match: re.Match[str]) -> str:
+            raw_data_uri = str(match.group(3) or "")
+            if not raw_data_uri:
+                return match.group(0)
+            digest = hashlib.sha1(
+                raw_data_uri.encode("utf-8", errors="replace")
+            ).hexdigest()
+            pending_sources[digest] = raw_data_uri
+            prefix = str(match.group(1) or "")
+            quote = str(match.group(2) or '"')
+            prefix_without_src = prefix[:-4] if prefix.lower().endswith("src=") else prefix
+            return (
+                f'{prefix_without_src} data-mdexplore-inline-image-digest="{digest}" '
+                f'data-mdexplore-inline-image-pending="1" '
+                f"src={quote}{_PREVIEW_INLINE_IMAGE_PLACEHOLDER_DATA_URI}{quote}"
+            )
+
+        try:
+            placeholder_html = _PREVIEW_INLINE_DATA_IMAGE_SRC_RE.sub(_replace, source)
+        except Exception:
+            return source, {}
+        return placeholder_html, pending_sources
+
+    def _apply_inline_data_image_urls_to_preview(
+        self,
+        expected_key: str,
+        url_by_digest: dict[str, str],
+    ) -> None:
+        """Patch placeholder `<img>` nodes in-place without reloading preview HTML."""
+        if self._current_preview_path_key() != expected_key:
+            return
+        payload = {
+            str(digest): str(url)
+            for digest, url in (url_by_digest or {}).items()
+            if isinstance(digest, str) and isinstance(url, str) and digest and url
+        }
+        if not payload:
+            return
+        js = _render_js_asset(
+            "preview/apply_inline_image_sources.js",
+            {"__INLINE_IMAGE_URLS_JSON__": json.dumps(payload, ensure_ascii=False)},
+        )
+        self.preview.page().runJavaScript(js)
+
+    def _queue_pending_inline_data_image_urls(
+        self, path_key: str, url_by_digest: dict[str, str]
+    ) -> None:
+        """Accumulate resolved inline-image URLs to patch once preview is ready."""
+        if not path_key:
+            return
+        payload = {
+            str(raw_digest): str(raw_url)
+            for raw_digest, raw_url in (url_by_digest or {}).items()
+            if isinstance(raw_digest, str)
+            and isinstance(raw_url, str)
+            and raw_digest
+            and raw_url
+        }
+        if not payload:
+            return
+        existing = self._inline_data_image_pending_apply_urls_by_path_key.get(path_key)
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update(payload)
+        self._inline_data_image_pending_apply_urls_by_path_key[path_key] = existing
+
+    def _flush_pending_inline_data_image_urls_for_current_preview(self) -> None:
+        """Apply any queued inline-image URL patches for the active preview page."""
+        current_key = self._current_preview_path_key()
+        if not current_key:
+            return
+        payload = self._inline_data_image_pending_apply_urls_by_path_key.pop(
+            current_key, {}
+        )
+        if not isinstance(payload, dict) or not payload:
+            return
+        self._apply_inline_data_image_urls_to_preview(current_key, payload)
+
+    def _prepare_progressive_inline_data_image_display_html(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+        html_doc: str,
+    ) -> str:
+        """Return immediate display HTML and schedule background inline-image hydration."""
+        source = str(html_doc or "")
+        self._inline_data_image_pending_sources_by_path_key.pop(path_key, None)
+        if not self._has_preview_inline_data_images(source):
+            self._inline_data_image_request_by_path_key.pop(path_key, None)
+            return source
+
+        placeholder_html, pending_sources = self._prepare_inline_data_image_placeholders(
+            source
+        )
+        if not pending_sources:
+            return source
+        self._inline_data_image_pending_sources_by_path_key[path_key] = pending_sources
+        self._queue_inline_data_image_materialization(
+            path_key=path_key,
+            mtime_ns=int(mtime_ns),
+            size=int(size),
+            html_doc=source,
+            prioritize=True,
+        )
+        return placeholder_html
+
+    def _queue_inline_data_image_materialization(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+        html_doc: str,
+        *,
+        prioritize: bool = False,
+    ) -> None:
+        """Materialize inline preview image payloads in background when needed."""
+        if not path_key:
+            return
+        if not self._has_preview_inline_data_images(html_doc):
+            self._inline_data_image_request_by_path_key.pop(path_key, None)
+            return
+
+        self._inline_data_image_request_id += 1
+        request_id = self._inline_data_image_request_id
+        self._inline_data_image_request_by_path_key[path_key] = request_id
+        abort_event = Event()
+        self._inline_data_image_abort_events_by_request_id[request_id] = abort_event
+        worker = InlineDataImageMaterializeWorker(
+            request_id=request_id,
+            path_key=path_key,
+            html_doc=html_doc,
+            mtime_ns=int(mtime_ns),
+            size=int(size),
+            materialize_callback=(
+                lambda source_html, cancel_event=abort_event: self._materialize_preview_inline_data_images_with_digest_map(
+                    source_html, abort_event=cancel_event
+                )
+            ),
+        )
+        worker.signals.finished.connect(self._on_inline_data_image_materialization_finished)
+        if self._inline_data_image_worker_queue:
+            self._inline_data_image_worker_queue = deque(
+                queued_worker
+                for queued_worker in self._inline_data_image_worker_queue
+                if getattr(queued_worker, "path_key", "") != path_key
+            )
+        if prioritize:
+            self._inline_data_image_worker_queue.appendleft(worker)
+        else:
+            self._inline_data_image_worker_queue.append(worker)
+        self._drain_inline_data_image_worker_queue()
+
+    def _drain_inline_data_image_worker_queue(self) -> None:
+        """Start queued inline-image jobs while worker slots are available."""
+        while (
+            len(self._active_inline_data_image_workers)
+            < int(self._inline_data_image_max_active_workers)
+            and self._inline_data_image_worker_queue
+        ):
+            worker = self._inline_data_image_worker_queue.popleft()
+            self._active_inline_data_image_workers.add(worker)
+            self._inline_data_image_pool.start(worker)
+
+    def _on_inline_data_image_materialization_finished(
+        self,
+        request_id: int,
+        path_key: str,
+        html_doc: str,
+        mtime_ns: int,
+        size: int,
+        resolved_url_by_digest,
+        error_text: str,
+    ) -> None:
+        """Apply background inline data-image materialization results."""
+        self._inline_data_image_abort_events_by_request_id.pop(int(request_id), None)
+        worker_to_remove = None
+        for worker in self._active_inline_data_image_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_inline_data_image_workers.remove(worker_to_remove)
+        self._drain_inline_data_image_worker_queue()
+
+        expected_request_id = self._inline_data_image_request_by_path_key.get(path_key)
+        if expected_request_id != request_id:
+            return
+        self._inline_data_image_request_by_path_key.pop(path_key, None)
+
+        cached = self.cache.get(path_key)
+        if cached is None:
+            return
+        if int(cached[0]) != int(mtime_ns) or int(cached[1]) != int(size):
+            return
+
+        if error_text:
+            self.statusBar().showMessage(
+                "Inline image optimization failed: "
+                f"{self._truncate_error_text(error_text, 220)}",
+                3000,
+            )
+            self._inline_data_image_pending_sources_by_path_key.pop(path_key, None)
+            return
+
+        materialized_html = html_doc if isinstance(html_doc, str) else cached[2]
+        if not isinstance(materialized_html, str):
+            self._inline_data_image_pending_sources_by_path_key.pop(path_key, None)
+            return
+
+        self._inline_data_image_pending_sources_by_path_key.pop(path_key, None)
+        if not isinstance(resolved_url_by_digest, dict):
+            resolved_url_by_digest = {}
+        normalized_resolved_url_by_digest = {
+            str(raw_digest): str(raw_url)
+            for raw_digest, raw_url in resolved_url_by_digest.items()
+            if isinstance(raw_digest, str)
+            and isinstance(raw_url, str)
+            and raw_digest
+            and raw_url
+        }
+
+        if materialized_html != cached[2]:
+            self.cache[path_key] = (int(mtime_ns), int(size), materialized_html)
+        self._inline_data_image_precomputed_placeholders_by_path_key.pop(path_key, None)
+
+        current_path_key = self._current_preview_path_key()
+        if normalized_resolved_url_by_digest:
+            self._queue_pending_inline_data_image_urls(
+                path_key, normalized_resolved_url_by_digest
+            )
+        if current_path_key != path_key or self.current_file is None:
+            return
+        if self._preview_load_in_progress:
+            return
+        self._flush_pending_inline_data_image_urls_for_current_preview()
 
     def _cleanup_preview_data_image_temp_files(self) -> None:
         """Delete temporary files created from inline preview data-image sources."""
@@ -4934,7 +5423,7 @@ class MdExploreWindow(QMainWindow):
         # named-view marker push to repopulate the overlay after loadFinished.
         self._last_named_view_marker_payload_key = None
         self._last_named_view_marker_payload_json = None
-        prepared_html_doc = self._materialize_preview_inline_data_images(html_doc)
+        prepared_html_doc = html_doc
         try:
             encoded_size = len(prepared_html_doc.encode("utf-8", errors="replace"))
         except Exception:
@@ -5531,6 +6020,7 @@ class MdExploreWindow(QMainWindow):
             self._stop_pdf_diagram_readiness_monitor()
             self._update_pdf_button_state()
             return
+        self._flush_pending_inline_data_image_urls_for_current_preview()
         has_math, has_mermaid, has_plantuml = self._preview_feature_flags_for_key(
             current_key
         )
@@ -5860,6 +6350,26 @@ class MdExploreWindow(QMainWindow):
         """Drop queued preview render jobs and invalidate running results."""
         self._render_request_id += 1
         self._render_pool.clear()
+
+    def _cancel_pending_inline_data_image_materialization(
+        self, *, preserve_precomputed: bool = False
+    ) -> None:
+        """Drop queued inline-image materialization jobs and ignore stale results."""
+        for abort_event in tuple(self._inline_data_image_abort_events_by_request_id.values()):
+            try:
+                abort_event.set()
+            except Exception:
+                pass
+        self._inline_data_image_abort_events_by_request_id.clear()
+        self._inline_data_image_request_id += 1
+        self._inline_data_image_pool.clear()
+        self._inline_data_image_worker_queue.clear()
+        self._active_inline_data_image_workers.clear()
+        self._inline_data_image_request_by_path_key.clear()
+        self._inline_data_image_pending_sources_by_path_key.clear()
+        if not preserve_precomputed:
+            self._inline_data_image_precomputed_placeholders_by_path_key.clear()
+        self._inline_data_image_pending_apply_urls_by_path_key.clear()
 
     def _cancel_pending_tree_marker_scan(self) -> None:
         """Drop queued tree-sidecar scans and invalidate stale worker results."""
@@ -6467,6 +6977,25 @@ class MdExploreWindow(QMainWindow):
         )
         # Mutates preview DOM by inserting mark spans (and optional scroll).
         self.preview.page().runJavaScript(js)
+
+    def _reapply_active_preview_search_highlights_if_needed(
+        self, expected_key: str
+    ) -> None:
+        """Restore active search marks after DOM-rewriting preview mutations."""
+        if not expected_key or self._current_preview_path_key() != expected_key:
+            return
+        query = self.match_input.text().strip()
+        if not query:
+            return
+        if self.current_file is None or not self._is_path_in_current_matches(
+            self.current_file
+        ):
+            return
+        self._highlight_preview_search_terms(
+            self._current_search_terms(),
+            scroll_to_first=False,
+            close_term_groups=self._current_close_term_groups(),
+        )
 
     def _list_markdown_files_non_recursive(self, directory: Path) -> list[Path]:
         """Return direct child markdown files from a directory (non-recursive)."""
@@ -7297,18 +7826,21 @@ class MdExploreWindow(QMainWindow):
                     )
             return normalized
 
-        if completion is None:
-            self.preview.page().runJavaScript(
-                js,
-                lambda result: self._debug_log(
+        def _after_apply(result) -> None:
+            normalized = _finalize_apply_result(result)
+            self._reapply_active_preview_search_highlights_if_needed(current_key)
+            if completion is None:
+                self._debug_log(
                     "highlight-apply-no-completion "
-                    f"result={_finalize_apply_result(result)}"
-                ),
-            )
+                    f"result={normalized}"
+                )
+                return
+            completion(normalized)
+
+        if completion is None:
+            self.preview.page().runJavaScript(js, _after_apply)
             return
-        self.preview.page().runJavaScript(
-            js, lambda result: completion(_finalize_apply_result(result))
-        )
+        self.preview.page().runJavaScript(js, _after_apply)
 
     def _add_persistent_preview_highlight(
         self,
@@ -8337,6 +8869,7 @@ class MdExploreWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_restore_overlay_monitor()
+        self._cancel_pending_inline_data_image_materialization()
         self._persist_document_view_session()
         self._persist_effective_root()
         self._cleanup_clipboard_copy_staging_directories()
@@ -9312,10 +9845,12 @@ class MdExploreWindow(QMainWindow):
             return
         if not path.is_file() or path.suffix.lower() != ".md":
             return
-        if scope_changed:
-            self._rerun_active_search_for_scope()
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
+        if scope_changed:
+            # Keep preview navigation responsive: defer expensive tree-search
+            # scope refresh until after the new preview load is queued.
+            QTimer.singleShot(0, self._rerun_active_search_for_scope)
 
     def _on_preview_render_finished(
         self,
@@ -9349,10 +9884,16 @@ class MdExploreWindow(QMainWindow):
         if current_key != path_key:
             return
 
+        display_html = html_doc
         if error_text:
             self.statusBar().showMessage(f"Preview render failed: {error_text}", 5000)
             html_doc = self._placeholder_html(
                 f"Could not render preview for {self.current_file.name}: {error_text}"
+            )
+            display_html = html_doc
+            self._inline_data_image_pending_sources_by_path_key.pop(path_key, None)
+            self._inline_data_image_precomputed_placeholders_by_path_key.pop(
+                path_key, None
             )
             self._set_preview_feature_flags(
                 path_key,
@@ -9404,20 +9945,66 @@ class MdExploreWindow(QMainWindow):
                 if isinstance(render_metadata.get("pdf_mermaid_by_hash"), dict)
                 else None
             )
-            # Materialize inline base64 preview images once and cache the
-            # transformed HTML. This avoids repeatedly re-scanning/rehashing
-            # oversized data URIs when revisiting cached previews.
-            html_doc = self._materialize_preview_inline_data_images(html_doc)
+            # Progressive path: show preview immediately, then materialize
+            # inline BASE64 image sources in background and update cache/page.
             self.cache[path_key] = (mtime_ns, size, html_doc)
             self._set_current_preview_signature(path_key, int(mtime_ns), int(size))
             self.statusBar().showMessage(f"Preview rendered: {self.current_file.name}")
+            raw_progressive_display_html = render_metadata.get("progressive_display_html")
+            raw_progressive_pending_sources = render_metadata.get(
+                "progressive_pending_sources"
+            )
+            if isinstance(raw_progressive_display_html, str) and isinstance(
+                raw_progressive_pending_sources, dict
+            ):
+                normalized_progressive_pending_sources = {
+                    str(raw_digest): str(raw_source)
+                    for raw_digest, raw_source in raw_progressive_pending_sources.items()
+                    if isinstance(raw_digest, str)
+                    and isinstance(raw_source, str)
+                    and raw_digest
+                    and raw_source
+                }
+                display_html = raw_progressive_display_html
+                self._inline_data_image_precomputed_placeholders_by_path_key[path_key] = (
+                    int(mtime_ns),
+                    int(size),
+                    display_html,
+                    dict(normalized_progressive_pending_sources),
+                )
+                if normalized_progressive_pending_sources:
+                    self._inline_data_image_pending_sources_by_path_key[path_key] = (
+                        dict(normalized_progressive_pending_sources)
+                    )
+                    self._queue_inline_data_image_materialization(
+                        path_key=path_key,
+                        mtime_ns=int(mtime_ns),
+                        size=int(size),
+                        html_doc=html_doc,
+                        prioritize=True,
+                    )
+                else:
+                    self._inline_data_image_pending_sources_by_path_key.pop(
+                        path_key, None
+                    )
+                    self._inline_data_image_request_by_path_key.pop(path_key, None)
+            else:
+                self._inline_data_image_precomputed_placeholders_by_path_key.pop(
+                    path_key, None
+                )
+                display_html = self._prepare_progressive_inline_data_image_display_html(
+                    path_key=path_key,
+                    mtime_ns=int(mtime_ns),
+                    size=int(size),
+                    html_doc=html_doc,
+                )
 
         try:
             base_url = QUrl.fromLocalFile(f"{self.current_file.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
         self._set_preview_html(
-            self._inject_mermaid_cache_seed(html_doc, path_key), base_url
+            self._inject_mermaid_cache_seed(display_html, path_key), base_url
         )
         self._update_pdf_button_state()
 
@@ -9504,7 +10091,9 @@ class MdExploreWindow(QMainWindow):
         path_key = self._current_preview_path_key()
         return bool(path_key and path_key in self._preview_scroll_positions)
 
-    def _capture_current_preview_scroll(self, force: bool = False) -> None:
+    def _capture_current_preview_scroll(
+        self, force: bool = False, *, update_line_probe: bool = True
+    ) -> None:
         """Capture current preview scroll position for the selected file."""
         scroll_key = self._current_preview_scroll_key()
         if scroll_key is None:
@@ -9523,10 +10112,33 @@ class MdExploreWindow(QMainWindow):
             return
         if math.isfinite(y):
             self._preview_scroll_positions[scroll_key] = y
+            self._last_preview_scroll_capture_monotonic = time.monotonic()
             state = self._current_view_state()
             if state is not None:
                 state["scroll_y"] = y
-            self._request_active_view_top_line_update(force=force)
+            if update_line_probe:
+                self._request_active_view_top_line_update(force=force)
+
+    def _capture_current_preview_scroll_before_navigation(
+        self, previous_path_key: str | None
+    ) -> None:
+        """Preserve scroll on file switch without redundant forced capture calls."""
+        if not previous_path_key:
+            return
+        current_key = self._current_preview_path_key()
+        if current_key != previous_path_key:
+            return
+        scroll_key = self._current_preview_scroll_key()
+        if not scroll_key:
+            return
+        now = time.monotonic()
+        has_recent_capture = (
+            (now - float(getattr(self, "_last_preview_scroll_capture_monotonic", 0.0)))
+            <= 0.35
+        )
+        if has_recent_capture and scroll_key in self._preview_scroll_positions:
+            return
+        self._capture_current_preview_scroll(force=True)
 
     def _enable_preview_scroll_capture_for(self, expected_key: str) -> None:
         """Re-enable periodic scroll capture for the currently displayed file."""
@@ -9932,15 +10544,29 @@ class MdExploreWindow(QMainWindow):
         self._stop_restore_overlay_monitor()
         previous_path_key = self._current_preview_path_key()
         next_path_key = self._path_key(path)
-        self._capture_current_preview_scroll(force=True)
+        if previous_path_key != next_path_key:
+            # Abort stale inline image hydration work immediately so a new
+            # document can reach first paint with placeholders without waiting
+            # for the old decode queue to drain.
+            self._cancel_pending_inline_data_image_materialization(
+                preserve_precomputed=True
+            )
+        # Preserve scroll/view position behavior across file switches.
+        self._capture_current_preview_scroll_before_navigation(previous_path_key)
         if previous_path_key is not None and previous_path_key != next_path_key:
-            # Best-effort capture only: file switching should stay responsive
-            # even if the embedded page is busy finishing diagram work.
+            # Avoid synchronous preview-process round-trips during navigation.
+            # Keep session capture best-effort and non-blocking.
             if self._has_diagram_features_for_key(previous_path_key):
-                self._capture_current_diagram_view_state_blocking(
-                    previous_path_key, timeout_ms=90
-                )
-            self._persist_document_view_session(previous_path_key)
+                self._capture_current_diagram_view_state(previous_path_key)
+            # Capture previous document session immediately before any tab/view
+            # state is reinitialized for the next document.
+            self._save_document_view_session(previous_path_key, capture_current=False)
+            QTimer.singleShot(
+                0,
+                lambda key=previous_path_key: self._persist_document_view_session_snapshot(
+                    key
+                ),
+            )
         self._cancel_pending_preview_render()
         self._preview_capture_enabled = False
         self._scroll_restore_block_until = 0.0
@@ -10001,12 +10627,25 @@ class MdExploreWindow(QMainWindow):
             )
             cached = self.cache.get(cache_key)
             if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-                has_math, has_mermaid, has_plantuml = (
-                    self._detect_special_features_for_path(
-                        resolved,
-                        cached_html=cached[2],
+                cached_mtime_ns = int(cached[0])
+                cached_size = int(cached[1])
+                cached_html = cached[2]
+                cached_flags = self._preview_feature_flags_by_key.get(cache_key)
+                if (
+                    isinstance(cached_flags, tuple)
+                    and len(cached_flags) == 3
+                ):
+                    has_math, has_mermaid, has_plantuml = (
+                        bool(cached_flags[0]),
+                        bool(cached_flags[1]),
+                        bool(cached_flags[2]),
                     )
-                )
+                else:
+                    # Avoid synchronous markdown file reads on navigation for
+                    # large BASE64-heavy documents.
+                    has_math, has_mermaid, has_plantuml = (
+                        self._detect_special_features_from_html(cached_html)
+                    )
                 self._set_preview_feature_flags(
                     cache_key,
                     has_math=has_math,
@@ -10023,8 +10662,51 @@ class MdExploreWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Using cached preview: {resolved.name}..."
                 )
+                precomputed_placeholder = (
+                    self._inline_data_image_precomputed_placeholders_by_path_key.get(
+                        cache_key
+                    )
+                )
+                if (
+                    isinstance(precomputed_placeholder, tuple)
+                    and len(precomputed_placeholder) == 4
+                    and int(precomputed_placeholder[0]) == cached_mtime_ns
+                    and int(precomputed_placeholder[1]) == cached_size
+                    and isinstance(precomputed_placeholder[2], str)
+                    and isinstance(precomputed_placeholder[3], dict)
+                ):
+                    display_cached_html = precomputed_placeholder[2]
+                    normalized_progressive_pending_sources = {
+                        str(raw_digest): str(raw_source)
+                        for raw_digest, raw_source in precomputed_placeholder[3].items()
+                        if isinstance(raw_digest, str)
+                        and isinstance(raw_source, str)
+                        and raw_digest
+                        and raw_source
+                    }
+                    if normalized_progressive_pending_sources:
+                        self._inline_data_image_pending_sources_by_path_key[cache_key] = (
+                            dict(normalized_progressive_pending_sources)
+                        )
+                        self._queue_inline_data_image_materialization(
+                            path_key=cache_key,
+                            mtime_ns=cached_mtime_ns,
+                            size=cached_size,
+                            html_doc=cached_html,
+                            prioritize=True,
+                        )
+                else:
+                    display_cached_html = (
+                        self._prepare_progressive_inline_data_image_display_html(
+                            path_key=cache_key,
+                            mtime_ns=cached_mtime_ns,
+                            size=cached_size,
+                            html_doc=cached_html,
+                        )
+                    )
                 self._set_preview_html(
-                    self._inject_mermaid_cache_seed(cached[2], cache_key), base_url
+                    self._inject_mermaid_cache_seed(display_cached_html, cache_key),
+                    base_url,
                 )
                 return
 
@@ -10061,6 +10743,7 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             cache_key = str(self.current_file)
         self.cache.pop(cache_key, None)
+        self._inline_data_image_precomputed_placeholders_by_path_key.pop(cache_key, None)
         self.statusBar().showMessage(f"Refreshing preview: {self.current_file.name}...")
         self._load_preview(self.current_file)
         if reason:

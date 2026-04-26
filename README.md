@@ -730,7 +730,7 @@ MDEXPLORE_MARKDOWN_ENGINE=markdown-it /path/to/mdexplore/mdexplore.sh
 
 - BASE64 image worker threads (preview data-URI materialization + copy-time prefetch):
   - `MDEXPLORE_BASE64_IMAGE_THREADS=<N>`
-  - Default is CPU-based (`max(2, min(32, cpu_count * 4))`).
+  - Default is CPU-based (`max(4, min(64, cpu_count * 6))`).
 
 Example:
 

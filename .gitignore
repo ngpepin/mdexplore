@@ -56,3 +56,8 @@ mermaid-rs-renderer
 LOC.sh
 pdfexplore/vendor/pdfjs
 vendor/marktext/marktext-linux-0.18.8.deb
+
+vendor/fastbase64/images
+vendor/fastbase64/benchmarks
+vendor/fastbase64/results
+vendor/fastbase64/tests

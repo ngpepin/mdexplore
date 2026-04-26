@@ -48,7 +48,8 @@ class ColorizedExtensionModel(QFileSystemModel):
     _SEARCH_COUNT_OVERSAMPLE = 8
     _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
     SEARCH_FILENAME_MATCH_COLOR = "#f7e27a"
-    EFFECTIVE_SCOPE_DIRECTORY_COLOR = "#9be8a3"
+    EFFECTIVE_SCOPE_DIRECTORY_COLOR = "#7fdfe8"
+    EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR = SEARCH_FILENAME_MATCH_COLOR
     OUT_OF_SCOPE_FILENAME_BG = "#9ca3af"
     OUT_OF_SCOPE_FILENAME_BG_ALPHA = 46
 
@@ -113,8 +114,17 @@ class ColorizedExtensionModel(QFileSystemModel):
             info = self.fileInfo(index)
             if info.isDir():
                 scope_key = self._effective_scope_root_key
-                if scope_key and self._path_key(Path(info.filePath())) == scope_key:
-                    color = QColor(self.EFFECTIVE_SCOPE_DIRECTORY_COLOR)
+                dir_path = Path(info.filePath())
+                if scope_key and self._path_key(dir_path) == scope_key:
+                    hit_count = self.effective_scope_search_hit_count_for_directory(
+                        dir_path
+                    )
+                    color_name = (
+                        self.EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR
+                        if hit_count > 0
+                        else self.EFFECTIVE_SCOPE_DIRECTORY_COLOR
+                    )
+                    color = QColor(color_name)
                     if color.isValid():
                         return QBrush(color)
             if self.matches_file_info(info):
@@ -340,6 +350,32 @@ class ColorizedExtensionModel(QFileSystemModel):
             return False
         self._effective_scope_root_key = next_key
         return True
+
+    def effective_scope_search_hit_count_for_directory(self, directory: Path) -> int:
+        """Return aggregated search-hit count for the effective scope directory row."""
+        scope_key = self._effective_scope_root_key
+        if not scope_key:
+            return 0
+        if self._path_key(directory) != scope_key:
+            return 0
+        if not self._search_match_counts:
+            return 0
+        scope_prefix = scope_key + os.sep
+        total_hits = 0
+        for raw_path_key, raw_count in self._search_match_counts.items():
+            if not isinstance(raw_path_key, str):
+                continue
+            if not (
+                raw_path_key == scope_key or raw_path_key.startswith(scope_prefix)
+            ):
+                continue
+            try:
+                count = int(raw_count)
+            except Exception:
+                continue
+            if count > 0:
+                total_hits += count
+        return max(0, int(total_hits))
 
     def set_out_of_scope_background_enabled(self, enabled: bool) -> bool:
         """Toggle faint out-of-scope file backgrounds for non-effective-root rows."""
@@ -607,6 +643,10 @@ class ColorizedExtensionModel(QFileSystemModel):
 class ExtensionTreeItemDelegate(QStyledItemDelegate):
     """Paint filename-only highlight backgrounds for target-extension rows."""
 
+    _DIR_SEARCH_PILL_BG = "#f7e27a"
+    _DIR_SEARCH_PILL_FG = "#111111"
+    _DIR_SEARCH_PILL_GAP = 8
+
     def paint(self, painter: QPainter, option, index) -> None:
         model = index.model()
         if not isinstance(model, ColorizedExtensionModel):
@@ -614,6 +654,21 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
             return
 
         info = model.fileInfo(index)
+        if info.isDir():
+            directory_path = Path(info.filePath())
+            directory_hit_count = model.effective_scope_search_hit_count_for_directory(
+                directory_path
+            )
+            if directory_hit_count > 0:
+                self._paint_effective_scope_directory_with_search_count(
+                    painter,
+                    option,
+                    index,
+                    model,
+                    directory_hit_count,
+                )
+                return
+
         if not model.matches_file_info(info):
             super().paint(painter, option, index)
             return
@@ -706,4 +761,127 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         )
         alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
         painter.drawText(text_rect, alignment, elided_text)
+        painter.restore()
+
+    @staticmethod
+    def _draw_item_decoration(
+        painter: QPainter,
+        opt: QStyleOptionViewItem,
+        style: QStyle,
+        widget,
+    ) -> None:
+        """Draw item icon/decoration after a text-suppressed style pass."""
+        if opt.icon.isNull():
+            return
+        decoration_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget
+        )
+        if not decoration_rect.isValid() or decoration_rect.width() <= 0:
+            return
+        icon_mode = (
+            QIcon.Mode.Disabled
+            if not (opt.state & QStyle.StateFlag.State_Enabled)
+            else (
+                QIcon.Mode.Selected
+                if (opt.state & QStyle.StateFlag.State_Selected)
+                else QIcon.Mode.Normal
+            )
+        )
+        icon_state = (
+            QIcon.State.On if (opt.state & QStyle.StateFlag.State_Open) else QIcon.State.Off
+        )
+        pixmap_size = opt.decorationSize if opt.decorationSize.isValid() else QSize(16, 16)
+        decoration_pixmap = opt.icon.pixmap(pixmap_size, icon_mode, icon_state)
+        if decoration_pixmap.isNull():
+            return
+        draw_x = decoration_rect.x() + max(
+            0, (decoration_rect.width() - decoration_pixmap.width()) // 2
+        )
+        draw_y = decoration_rect.y() + max(
+            0, (decoration_rect.height() - decoration_pixmap.height()) // 2
+        )
+        painter.drawPixmap(draw_x, draw_y, decoration_pixmap)
+
+    def _paint_effective_scope_directory_with_search_count(
+        self,
+        painter: QPainter,
+        option,
+        index,
+        model: ColorizedExtensionModel,
+        directory_hit_count: int,
+    ) -> None:
+        """Paint effective-root directory row with appended search-count pill."""
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+
+        base_opt = QStyleOptionViewItem(opt)
+        base_opt.text = ""
+        base_opt.icon = QIcon()
+        base_opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, base_opt, painter, widget)
+        self._draw_item_decoration(painter, opt, style, widget)
+
+        text_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget
+        )
+        if not text_rect.isValid() or text_rect.width() <= 2:
+            return
+
+        count_text = model._search_count_display_text(int(directory_hit_count))
+        if not count_text:
+            count_text = "1"
+
+        pill_font = QFont(opt.font)
+        pill_font.setFamily(search_hit_count_font_family())
+        pill_font.setBold(False)
+        pill_metrics = QFontMetrics(pill_font)
+        pill_text_width = pill_metrics.horizontalAdvance(count_text)
+        pill_height = max(14, min(text_rect.height() - 2, pill_metrics.height() + 4))
+        pill_padding_x = max(6, int(pill_height * 0.42))
+        pill_width = pill_text_width + (2 * pill_padding_x)
+        pill_top = text_rect.y() + max(0, (text_rect.height() - pill_height) // 2)
+        pill_left = text_rect.right() - pill_width
+        if pill_left < text_rect.left():
+            pill_left = text_rect.left()
+        pill_rect = QRect(pill_left, pill_top, min(pill_width, text_rect.width()), pill_height)
+
+        label_right = max(text_rect.left(), pill_rect.left() - self._DIR_SEARCH_PILL_GAP)
+        label_rect = QRect(
+            text_rect.left(),
+            text_rect.y(),
+            max(0, label_right - text_rect.left()),
+            text_rect.height(),
+        )
+
+        foreground_data = model.data(index, Qt.ItemDataRole.ForegroundRole)
+        if isinstance(foreground_data, QBrush):
+            label_color = foreground_data.color()
+        else:
+            label_color = (
+                opt.palette.color(QPalette.ColorRole.HighlightedText)
+                if (opt.state & QStyle.StateFlag.State_Selected)
+                else opt.palette.color(QPalette.ColorRole.Text)
+            )
+
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(label_color)
+        label_text = opt.fontMetrics.elidedText(
+            opt.text, opt.textElideMode, max(0, label_rect.width())
+        )
+        alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(label_rect, alignment, label_text)
+        painter.restore()
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._DIR_SEARCH_PILL_BG))
+        radius = max(4, int(pill_rect.height() * 0.28))
+        painter.drawRoundedRect(pill_rect, radius, radius)
+        painter.setPen(QColor(self._DIR_SEARCH_PILL_FG))
+        painter.setFont(pill_font)
+        painter.drawText(pill_rect, int(Qt.AlignmentFlag.AlignCenter), count_text)
         painter.restore()
