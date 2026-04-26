@@ -61,3 +61,4 @@ vendor/fastbase64/images
 vendor/fastbase64/benchmarks
 vendor/fastbase64/results
 vendor/fastbase64/tests
+vendor/fastbase64/benchmarkscript.sh
