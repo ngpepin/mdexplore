@@ -725,6 +725,17 @@ def compile_match_predicate(
             return node
         raise QueryParseError(f"Unexpected token: {token_type}")
 
+    term_pattern_cache: dict[tuple[str, bool], re.Pattern[str]] = {}
+    for token_type, token_value, is_case_sensitive in tokens:
+        if token_type != "TERM" or not token_value:
+            continue
+        cache_key = (token_value, bool(is_case_sensitive))
+        if cache_key in term_pattern_cache:
+            continue
+        term_pattern_cache[cache_key] = compile_term_pattern(
+            token_value, bool(is_case_sensitive)
+        )
+
     def term_matches(
         term: str,
         is_case_sensitive: bool,
@@ -735,7 +746,9 @@ def compile_match_predicate(
     ) -> bool:
         if not term:
             return False
-        pattern = compile_term_pattern(term, is_case_sensitive)
+        pattern = term_pattern_cache.get((term, bool(is_case_sensitive)))
+        if pattern is None:
+            pattern = compile_term_pattern(term, bool(is_case_sensitive))
         return bool(pattern.search(file_name) or pattern.search(file_content))
 
     def near_terms_match(terms: list[SearchTerm], file_content: str) -> bool:

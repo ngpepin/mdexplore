@@ -1347,6 +1347,8 @@ class MdExploreWindow(QMainWindow):
         self._search_scan_match_counts: dict[str, int] = {}
         self._search_scan_filename_match_paths: set[str] = set()
         self._search_scan_error_count = 0
+        self._visible_tree_markdown_cache: list[Path] = []
+        self._visible_tree_markdown_cache_dirty = True
         self._pending_preview_search_terms: list[tuple[str, bool]] = []
         self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
         self._render_pool = QThreadPool(self)
@@ -1480,6 +1482,12 @@ class MdExploreWindow(QMainWindow):
         self.match_timer.setSingleShot(True)
         self.match_timer.setInterval(3000)
         self.match_timer.timeout.connect(self._run_match_search)
+        self._tree_search_refresh_timer = QTimer(self)
+        self._tree_search_refresh_timer.setSingleShot(True)
+        self._tree_search_refresh_timer.setInterval(180)
+        self._tree_search_refresh_timer.timeout.connect(
+            self._rerun_active_search_for_scope
+        )
         self._scroll_capture_timer = QTimer(self)
         self._scroll_capture_timer.setInterval(200)
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
@@ -1549,6 +1557,10 @@ class MdExploreWindow(QMainWindow):
         self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
         self.model.setNameFilters(["*.md"])
         self.model.setNameFilterDisables(False)
+        self.model.directoryLoaded.connect(self._on_tree_model_structure_changed)
+        self.model.rowsInserted.connect(self._on_tree_model_structure_changed)
+        self.model.rowsRemoved.connect(self._on_tree_model_structure_changed)
+        self.model.modelReset.connect(self._on_tree_model_structure_changed)
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
@@ -5484,6 +5496,7 @@ class MdExploreWindow(QMainWindow):
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
+        self._invalidate_visible_tree_markdown_cache()
         self.path_label.setText("Select a markdown file")
         self.path_label.setToolTip("Select a markdown file")
         self._set_preview_html(
@@ -5696,6 +5709,25 @@ class MdExploreWindow(QMainWindow):
         finally:
             self._suspend_directory_open_on_expand = False
 
+    def _invalidate_visible_tree_markdown_cache(self) -> None:
+        """Mark visible markdown-file cache stale until next search scan."""
+        self._visible_tree_markdown_cache_dirty = True
+
+    def _schedule_active_search_refresh_for_tree_change(self) -> None:
+        """Coalesce tree-structure updates before rerunning active search."""
+        match_input = getattr(self, "match_input", None)
+        if match_input is None:
+            return
+        if not match_input.text().strip():
+            self._tree_search_refresh_timer.stop()
+            return
+        self._tree_search_refresh_timer.start()
+
+    def _on_tree_model_structure_changed(self, *_args) -> None:
+        """Invalidate visible-file cache when QFileSystemModel structure changes."""
+        self._invalidate_visible_tree_markdown_cache()
+        self._schedule_active_search_refresh_for_tree_change()
+
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         """Refresh tree contents to detect newly created/deleted markdown files."""
         self._stop_restore_overlay_monitor()
@@ -5714,6 +5746,7 @@ class MdExploreWindow(QMainWindow):
         self.model.setRootPath("")
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
+        self._invalidate_visible_tree_markdown_cache()
         self._refresh_tree_multi_view_markers(full_scan=True)
 
         if expanded_paths:
@@ -5806,6 +5839,7 @@ class MdExploreWindow(QMainWindow):
         self._cancel_pending_search_scan()
         if not text.strip():
             self.match_timer.stop()
+            self._tree_search_refresh_timer.stop()
             self._clear_match_results()
             return
         self.match_timer.start()
@@ -5813,6 +5847,7 @@ class MdExploreWindow(QMainWindow):
     def _clear_match_input(self) -> None:
         """Clear search text and immediately remove any active match styling."""
         self.match_timer.stop()
+        self._tree_search_refresh_timer.stop()
         self.match_input.clear()
         self._clear_match_results()
 
@@ -5976,6 +6011,7 @@ class MdExploreWindow(QMainWindow):
 
     def _clear_match_results(self) -> None:
         """Clear bolded search matches without affecting persisted highlights."""
+        self._tree_search_refresh_timer.stop()
         self._cancel_pending_search_scan()
         self.current_match_files = []
         self.model.clear_search_match_paths()
@@ -6011,6 +6047,29 @@ class MdExploreWindow(QMainWindow):
             self._reset_search_scan_state()
             return
 
+        try:
+            predicate = self._compile_match_predicate(
+                query,
+                strip_inline_image_data=False,
+            )
+            hit_counter = self._compile_match_hit_counter(
+                query,
+                strip_inline_image_data=False,
+            )
+            filename_terms = _search_query.extract_search_terms(query)
+            filename_patterns = [
+                _search_query.compile_term_pattern(term_text, bool(is_case_sensitive))
+                for term_text, is_case_sensitive in filename_terms
+                if term_text
+            ]
+        except Exception as exc:
+            self.statusBar().showMessage(
+                f"Search query preparation failed: {self._truncate_error_text(str(exc), 220)}",
+                4000,
+            )
+            self._clear_match_results()
+            return
+
         worker_limit = max(
             1,
             min(self._search_scan_pool.maxThreadCount(), len(candidates)),
@@ -6024,7 +6083,13 @@ class MdExploreWindow(QMainWindow):
             chunk = candidates[start : start + chunk_size]
             if not chunk:
                 continue
-            worker = SearchScanWorker(request_id, query, chunk)
+            worker = SearchScanWorker(
+                request_id,
+                chunk,
+                predicate,
+                hit_counter,
+                filename_patterns,
+            )
             self._active_search_scan_workers.add(worker)
             worker.signals.finished.connect(self._on_search_scan_finished)
             self._search_scan_pool.start(worker)
@@ -6425,9 +6490,17 @@ class MdExploreWindow(QMainWindow):
 
     def _list_visible_markdown_files_in_tree(self) -> list[Path]:
         """Return markdown files that are currently visible in the tree UI."""
+        if not self._visible_tree_markdown_cache_dirty:
+            return list(self._visible_tree_markdown_cache)
+
         root_index = self.tree.rootIndex()
         if not root_index.isValid():
-            return self._list_markdown_files_non_recursive(self._highlight_scope_directory())
+            files = self._list_markdown_files_non_recursive(
+                self._highlight_scope_directory()
+            )
+            self._visible_tree_markdown_cache = list(files)
+            self._visible_tree_markdown_cache_dirty = False
+            return list(files)
 
         files: list[Path] = []
         seen: set[str] = set()
@@ -6469,7 +6542,9 @@ class MdExploreWindow(QMainWindow):
                     _walk_visible_children(index)
 
         _walk_visible_children(root_index)
-        return files
+        self._visible_tree_markdown_cache = list(files)
+        self._visible_tree_markdown_cache_dirty = False
+        return list(files)
 
     def _compile_match_hit_counter(
         self, query: str, *, strip_inline_image_data: bool = True
@@ -6575,6 +6650,7 @@ class MdExploreWindow(QMainWindow):
 
     def _on_tree_directory_expanded(self, index) -> None:
         """Treat expanded directories as active scope for quit persistence/title."""
+        self._invalidate_visible_tree_markdown_cache()
         if self._suspend_directory_open_on_expand:
             return
         if not index.isValid():
@@ -6594,6 +6670,7 @@ class MdExploreWindow(QMainWindow):
 
     def _on_tree_directory_collapsed(self, index) -> None:
         """When active scope collapses, move scope to parent and rerun search."""
+        self._invalidate_visible_tree_markdown_cache()
         if not index.isValid():
             return
         collapsed_path = Path(self.model.filePath(index))
@@ -6629,17 +6706,24 @@ class MdExploreWindow(QMainWindow):
 
     def _show_preview_context_menu(self, pos) -> None:
         """Extend the preview context menu with a markdown copy action."""
+        # Build the native menu immediately while QtWebEngine still has the
+        # active context-request payload (media URL, image metadata, etc.).
+        # If menu display is delayed by async JS probing, image actions like
+        # Copy/Save can lose their target context.
+        standard_menu = self.preview.createStandardContextMenu()
         request = self.preview.lastContextMenuRequest()
         selected_text_hint = request.selectedText() if request is not None else ""
         click_x = int(pos.x())
         click_y = int(pos.y())
-        self._request_preview_context_menu_selection_info(
-            click_x,
-            click_y,
+        # Show the menu immediately. For custom actions, run an async probe
+        # after the user picks the action so native image actions remain intact.
+        self._show_preview_context_menu_with_cached_selection(
+            pos,
+            {},
             selected_text_hint,
-            lambda result: self._show_preview_context_menu_with_cached_selection(
-                pos, result, selected_text_hint
-            ),
+            standard_menu,
+            click_x=click_x,
+            click_y=click_y,
         )
 
     def _request_preview_context_menu_selection_info(
@@ -6693,10 +6777,18 @@ class MdExploreWindow(QMainWindow):
         self.preview.page().runJavaScript(js, _on_result)
 
     def _show_preview_context_menu_with_cached_selection(
-        self, pos, selection_info, selected_text_hint: str
+        self,
+        pos,
+        selection_info,
+        selected_text_hint: str,
+        standard_menu: QMenu | None = None,
+        *,
+        click_x: int | None = None,
+        click_y: int | None = None,
     ) -> None:
         """Build preview menu and use cached selection metadata for copy action."""
-        standard_menu = self.preview.createStandardContextMenu()
+        if standard_menu is None:
+            standard_menu = self.preview.createStandardContextMenu()
         menu = QMenu(self.preview)
         has_selection = bool(selected_text_hint.strip() or self.preview.selectedText().strip())
         if isinstance(selection_info, dict):
@@ -6770,13 +6862,28 @@ class MdExploreWindow(QMainWindow):
         for action in standard_menu.actions():
             menu.addAction(action)
 
+        def _run_with_fresh_context_info(handler: Callable[[dict], None]) -> None:
+            if click_x is None or click_y is None:
+                handler(selection_info if isinstance(selection_info, dict) else {})
+                return
+            self._request_preview_context_menu_selection_info(
+                int(click_x),
+                int(click_y),
+                selected_text_hint,
+                lambda live_info: handler(
+                    live_info if isinstance(live_info, dict) else {}
+                ),
+            )
+
         chosen = menu.exec(self.preview.mapToGlobal(pos))
         if highlight_action is not None and chosen == highlight_action:
             self._debug_log("preview-menu action=Highlight")
-            self._add_persistent_preview_highlight(
-                selection_info,
-                selected_text_hint,
-                kind=PREVIEW_HIGHLIGHT_KIND_NORMAL,
+            _run_with_fresh_context_info(
+                lambda info: self._add_persistent_preview_highlight(
+                    info,
+                    selected_text_hint,
+                    kind=PREVIEW_HIGHLIGHT_KIND_NORMAL,
+                )
             )
             standard_menu.deleteLater()
             menu.deleteLater()
@@ -6786,32 +6893,40 @@ class MdExploreWindow(QMainWindow):
             and chosen == highlight_important_action
         ):
             self._debug_log("preview-menu action=Highlight Important")
-            self._add_persistent_preview_highlight(
-                selection_info,
-                selected_text_hint,
-                kind=PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+            _run_with_fresh_context_info(
+                lambda info: self._add_persistent_preview_highlight(
+                    info,
+                    selected_text_hint,
+                    kind=PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+                )
             )
             standard_menu.deleteLater()
             menu.deleteLater()
             return
         if remove_highlight_action is not None and chosen == remove_highlight_action:
             self._debug_log("preview-menu action=Remove Highlight")
-            self._remove_persistent_preview_highlight(
-                selection_info, selected_text_hint
+            _run_with_fresh_context_info(
+                lambda info: self._remove_persistent_preview_highlight(
+                    info, selected_text_hint
+                )
             )
             standard_menu.deleteLater()
             menu.deleteLater()
             return
         if copy_rendered_action is not None and chosen == copy_rendered_action:
-            self._copy_preview_selection_as_rendered_text(
-                selection_info, selected_text_hint
+            _run_with_fresh_context_info(
+                lambda info: self._copy_preview_selection_as_rendered_text(
+                    info, selected_text_hint
+                )
             )
             standard_menu.deleteLater()
             menu.deleteLater()
             return
         if copy_source_action is not None and chosen == copy_source_action:
-            self._copy_preview_selection_as_source_markdown(
-                selection_info, selected_text_hint
+            _run_with_fresh_context_info(
+                lambda info: self._copy_preview_selection_as_source_markdown(
+                    info, selected_text_hint
+                )
             )
         standard_menu.deleteLater()
         menu.deleteLater()

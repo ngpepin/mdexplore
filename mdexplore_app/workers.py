@@ -406,30 +406,24 @@ class SearchScanWorkerSignals(QObject):
 class SearchScanWorker(QRunnable):
     """Scan a markdown-file chunk for query matches in background."""
 
-    def __init__(self, request_id: int, query: str, paths: list[Path]) -> None:
+    def __init__(
+        self,
+        request_id: int,
+        paths: list[Path],
+        predicate: Callable[[str, str], bool],
+        hit_counter: Callable[[str, str], int],
+        filename_patterns: list,
+    ) -> None:
         super().__init__()
         self.request_id = request_id
-        self.query = query
         self.paths = list(paths)
+        self.predicate = predicate
+        self.hit_counter = hit_counter
+        self.filename_patterns = list(filename_patterns)
         self.signals = SearchScanWorkerSignals()
 
     def run(self) -> None:
         try:
-            predicate = search_query.compile_match_predicate(
-                self.query,
-                strip_inline_image_data=False,
-            )
-            hit_counter = search_query.compile_match_hit_counter(
-                self.query,
-                strip_inline_image_data=False,
-            )
-            filename_terms = search_query.extract_search_terms(self.query)
-            filename_patterns = [
-                search_query.compile_term_pattern(term_text, bool(is_case_sensitive))
-                for term_text, is_case_sensitive in filename_terms
-                if term_text
-            ]
-
             matched_paths: list[str] = []
             match_counts: dict[str, int] = {}
             filename_match_paths: list[str] = []
@@ -437,16 +431,16 @@ class SearchScanWorker(QRunnable):
             for path in self.paths:
                 try:
                     path_key, searchable_content = _load_searchable_markdown_content(path)
-                    if not predicate(path.name, searchable_content):
+                    if not self.predicate(path.name, searchable_content):
                         continue
                 except Exception:
                     continue
 
                 matched_paths.append(path_key)
-                if any(pattern.search(path.name) for pattern in filename_patterns):
+                if any(pattern.search(path.name) for pattern in self.filename_patterns):
                     filename_match_paths.append(path_key)
                 try:
-                    count = hit_counter(path.name, searchable_content)
+                    count = self.hit_counter(path.name, searchable_content)
                 except Exception:
                     count = 1
                 match_counts[path_key] = count if count > 0 else 1
