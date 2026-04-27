@@ -68,6 +68,12 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
 
 - Markdown rendering should default to `cmarkgfm` fast path with automatic fallback to `markdown-it-py` for compatibility cases.
 - `MDEXPLORE_MARKDOWN_ENGINE` should continue to support `cmark` (default), `markdown-it`, and `auto`.
+- Startup-generated icon assets (app icon normalization and two-tone icon recolors)
+  should persist under `~/.cache/mdexplore/icon-cache` and be reused on later
+  launches unless source asset identity/render parameters change.
+- Launcher runtime import verification should use and refresh
+  `.venv/.runtime-import-check.sha256` (requirements-hash stamp) so the full
+  import probe is not rerun on every launch.
 - Shared BASE64 encode/decode helpers should remain in `mdexplore_app/fast_base64.py`, using adaptive routing between vendored `fastbase64` and `pybase64`, with stdlib fallback.
 - Vendor `fastbase64` encode output must be validated before use; on malformed
   output, helpers should silently fall back to `pybase64`/stdlib so PlantUML

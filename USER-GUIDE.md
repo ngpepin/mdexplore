@@ -33,6 +33,7 @@ What to expect:
 - Left pane: directory tree (`.md` files + folders).
 - Right pane: rendered preview.
 - Top controls: `Recent`, `^`, `Refresh`, `PDF`, `Add View`, `Edit`, copy controls, search box.
+- First launch on a fresh cache may be slower while startup icon assets are generated; later launches reuse `~/.cache/mdexplore/icon-cache`.
 
 Screen mockup:
 
@@ -256,9 +257,18 @@ Common patterns:
 ./hfind.sh --query "OR(fred, paul)" --content --recursive *.txt
 ./hfind.sh -q "AND('Fred',paul)" /path/to/dir/*.md
 ./hfind.sh -cv "'Nico '" "./**/*.md"
+./hfind.sh -rs "conflicted" "./**/*"
+./hfind.sh -rS "conflicted" "./**/*"
 ```
 
 Use `hfind` when you do not need GUI preview/navigation.
+
+Sorting modes:
+
+- `-s` / `--sort`: wait, then sort matches case-insensitively.
+- `-S` / `--sort-case-sensitive`: wait, then sort matches case-sensitively.
+- With either mode, `hfind` prints:
+  `One moment please... finding all matches to sort them`
 
 ## Keyboard Shortcuts
 

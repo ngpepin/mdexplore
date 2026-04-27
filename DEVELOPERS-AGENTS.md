@@ -108,6 +108,8 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   and tab-bar layout.
 - `LICENSE`: MIT license text.
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
+- Runtime startup icon cache: `~/.cache/mdexplore/icon-cache` (persisted generated
+  app icon normalization and two-tone icon recolor results).
 - Runtime color sidecars: per-directory `.mdexplore-colors.json` files for
   persisted tree highlight colors where writable.
 - Runtime view sidecars: per-directory `.mdexplore-views.json` files for
@@ -1566,10 +1568,19 @@ across all navigation sequences.
 - Non-interactive launcher runs should log to
   `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
   Log retention is capped to the most recent 1000 lines.
-- Launcher should verify key runtime imports (`cmarkgfm`, `markdown_it`,
-  `mdit_py_plugins.dollarmath`, `linkify_it`, `pybase64`,
-  `PySide6.QtWebEngineWidgets`, `pypdf`, `reportlab.pdfgen.canvas`) and
-  self-heal by reinstalling requirements if the environment is incomplete.
+- Launcher should maintain a runtime import-check stamp at
+  `.venv/.runtime-import-check.sha256`.
+  - Trigger full runtime import verification only when `.venv` is newly
+    created, `requirements.txt` hash changes, or stamp/hash mismatch occurs.
+  - Runtime import set remains:
+    `cmarkgfm`, `markdown_it`, `mdit_py_plugins.dollarmath`, `linkify_it`,
+    `pybase64`, `PySide6.QtWebEngineWidgets`, `pypdf`,
+    `reportlab.pdfgen.canvas`.
+  - If verification fails, launcher should self-heal by reinstalling
+    requirements and then refresh the stamp.
+- Startup icon generation in `mdexplore_app/icons.py` should persist generated
+  outputs in `~/.cache/mdexplore/icon-cache`, keyed by source-asset identity
+  and render parameters, so expensive per-pixel transforms are paid once.
 - `--help` should stay lightweight and not require venv activation.
 
 ## Setup Script Rules

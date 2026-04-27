@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import sys
+import tempfile
 from collections import deque
 from pathlib import Path
 
@@ -17,6 +20,8 @@ from .constants import (
     UI_ASSET_DIR,
 )
 
+_ICON_CACHE_SCHEMA_VERSION = "v1"
+
 
 def ui_asset_path(filename: str) -> Path:
     """Resolve a UI asset from the canonical asset directory."""
@@ -24,6 +29,121 @@ def ui_asset_path(filename: str) -> Path:
     if asset_path.is_file():
         return asset_path
     return PROJECT_ROOT / filename
+
+
+def _icon_cache_root() -> Path:
+    """Return per-user icon cache directory used for generated icon assets."""
+    xdg_cache_home = str(os.environ.get("XDG_CACHE_HOME", "") or "").strip()
+    base_dir = (
+        Path(xdg_cache_home).expanduser()
+        if xdg_cache_home
+        else (Path.home() / ".cache")
+    )
+    return base_dir / "mdexplore" / "icon-cache"
+
+
+def _build_icon_cache_key(*parts: object) -> str:
+    """Return stable SHA1 cache key from arbitrary icon-generation inputs."""
+    joined = "\n".join(str(part) for part in parts)
+    return hashlib.sha1(joined.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _source_identity(path: Path) -> tuple[str, int, int]:
+    """Return `(resolved_path, mtime_ns, size)` for cache keying."""
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    try:
+        stat = resolved.stat()
+        return str(resolved), int(stat.st_mtime_ns), int(stat.st_size)
+    except Exception:
+        return str(resolved), 0, 0
+
+
+def _icon_cache_file_path(cache_key: str) -> Path | None:
+    """Return cache path for one icon key, creating directory as needed."""
+    try:
+        cache_root = _icon_cache_root()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        return cache_root / f"{cache_key}.png"
+    except Exception:
+        return None
+
+
+def _load_cached_icon(cache_key: str) -> QIcon | None:
+    """Load one generated icon from disk cache when present and valid."""
+    cache_path = _icon_cache_file_path(cache_key)
+    if cache_path is None or not cache_path.is_file():
+        return None
+    try:
+        pixmap = QPixmap(str(cache_path))
+    except Exception:
+        return None
+    if pixmap.isNull():
+        return None
+    return QIcon(pixmap)
+
+
+def _persist_generated_icon(cache_key: str, pixmap: QPixmap) -> None:
+    """Persist generated icon pixmap atomically for future launches."""
+    if pixmap.isNull():
+        return
+    cache_path = _icon_cache_file_path(cache_key)
+    if cache_path is None:
+        return
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=str(cache_path.parent),
+            prefix=f".{cache_path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+        if not pixmap.save(str(tmp_path), "PNG"):
+            return
+        tmp_path.replace(cache_path)
+    except Exception:
+        pass
+    finally:
+        if tmp_path is not None:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def _color_signature(color: QColor) -> str:
+    """Return stable RGBA signature for cache key generation."""
+    c = QColor(color)
+    return f"{c.red()}:{c.green()}:{c.blue()}:{c.alpha()}"
+
+
+def _two_tone_icon_cache_key(
+    *,
+    source_path: Path,
+    render_kind: str,
+    dark_color: QColor,
+    light_color: QColor,
+    size: int,
+) -> str:
+    """Return cache key for one two-tone icon render."""
+    source_id, mtime_ns, byte_size = _source_identity(source_path)
+    return _build_icon_cache_key(
+        "two-tone-icon",
+        _ICON_CACHE_SCHEMA_VERSION,
+        render_kind,
+        source_id,
+        mtime_ns,
+        byte_size,
+        f"size:{int(size)}",
+        f"oversample:{int(SVG_ICON_RENDER_OVERSAMPLE)}",
+        f"alpha-cutoff:{int(SVG_ICON_ALPHA_CUTOFF)}",
+        f"dark:{_color_signature(dark_color)}",
+        f"light:{_color_signature(light_color)}",
+    )
 
 
 def build_markdown_icon() -> QIcon:
@@ -141,11 +261,30 @@ def build_markdown_icon() -> QIcon:
     for icon_name in ("mdexplor-icon.png", "mdexplor-icon.webp", "mdexplore-icon.webp"):
         icon_path = PROJECT_ROOT / icon_name
         if icon_path.exists():
+            source_id, mtime_ns, byte_size = _source_identity(icon_path)
+            cache_key = _build_icon_cache_key(
+                "markdown-app-icon",
+                _ICON_CACHE_SCHEMA_VERSION,
+                source_id,
+                mtime_ns,
+                byte_size,
+                "canvas:256",
+                "inset:2",
+            )
+            cached_icon = _load_cached_icon(cache_key)
+            if cached_icon is not None:
+                print(
+                    f"mdexplore icon source: {icon_path} (cached)",
+                    file=sys.stderr,
+                )
+                return cached_icon
             asset_pixmap = QPixmap(str(icon_path))
             if not asset_pixmap.isNull():
                 cleaned = transparentize_outer_background(asset_pixmap)
+                fitted = fit_icon_canvas(cleaned)
+                _persist_generated_icon(cache_key, fitted)
                 print(f"mdexplore icon source: {icon_path}", file=sys.stderr)
-                return QIcon(fit_icon_canvas(cleaned))
+                return QIcon(fitted)
 
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -249,6 +388,16 @@ def load_svg_icon_two_tone(
     icon_path = ui_asset_path(filename)
     if not icon_path.is_file():
         return QIcon()
+    cache_key = _two_tone_icon_cache_key(
+        source_path=icon_path,
+        render_kind="svg",
+        dark_color=dark_color,
+        light_color=light_color,
+        size=size,
+    )
+    cached_icon = _load_cached_icon(cache_key)
+    if cached_icon is not None:
+        return cached_icon
     renderer = QSvgRenderer(str(icon_path))
     if not renderer.isValid():
         return QIcon()
@@ -278,7 +427,9 @@ def load_svg_icon_two_tone(
                 round((dark.blue() * (1.0 - luminance)) + (light.blue() * luminance))
             )
             image.setPixelColor(x, y, QColor(red, green, blue, alpha))
-    return QIcon(QPixmap.fromImage(image))
+    final_pixmap = QPixmap.fromImage(image)
+    _persist_generated_icon(cache_key, final_pixmap)
+    return QIcon(final_pixmap)
 
 
 def load_png_icon_two_tone(
@@ -291,6 +442,16 @@ def load_png_icon_two_tone(
     icon_path = ui_asset_path(filename)
     if not icon_path.is_file():
         return QIcon()
+    cache_key = _two_tone_icon_cache_key(
+        source_path=icon_path,
+        render_kind="png",
+        dark_color=dark_color,
+        light_color=light_color,
+        size=size,
+    )
+    cached_icon = _load_cached_icon(cache_key)
+    if cached_icon is not None:
+        return cached_icon
 
     source = QImage(str(icon_path)).convertToFormat(QImage.Format.Format_ARGB32)
     if source.isNull():
@@ -351,4 +512,5 @@ def load_png_icon_two_tone(
         Qt.AspectRatioMode.IgnoreAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+    _persist_generated_icon(cache_key, final_pixmap)
     return QIcon(final_pixmap)

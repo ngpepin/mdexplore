@@ -1317,7 +1317,8 @@ class MdExploreWindow(QMainWindow):
     DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
     # Keep BASE64 work parallel, but avoid saturating all cores by default.
     DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(24, (os.cpu_count() or 2) * 2))
-    PREVIEW_HTTP_CACHE_MAX_BYTES = 1536 * 1024 * 1024
+    PREVIEW_HTTP_CACHE_MAX_BYTES = 4096 * 1024 * 1024
+    PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX = (2**31) - 1
 
     def __init__(
         self,
@@ -4804,7 +4805,13 @@ class MdExploreWindow(QMainWindow):
             pass
         try:
             profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
-            profile.setHttpCacheMaximumSize(int(self.PREVIEW_HTTP_CACHE_MAX_BYTES))
+            # Qt WebEngine expects a signed 32-bit int here; clamp to avoid
+            # overflow when configured values exceed the API limit.
+            cache_limit_bytes = min(
+                int(self.PREVIEW_HTTP_CACHE_MAX_BYTES),
+                int(self.PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX),
+            )
+            profile.setHttpCacheMaximumSize(cache_limit_bytes)
         except Exception:
             pass
         return profile

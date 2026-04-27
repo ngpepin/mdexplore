@@ -62,6 +62,10 @@ gradually decomposed.
 - Mermaid SVGs are cached in-memory per app run to avoid re-rendering when returning to previously viewed files.
 - Mermaid keeps separate in-memory cache modes for GUI (`auto`) and PDF (`pdf`) rendering.
 - Navigating back to a cached file still performs a fresh stat check; changed files re-render automatically.
+- Startup-generated icon assets are persisted under `~/.cache/mdexplore/icon-cache`:
+  - app icon normalization output (from `mdexplor-icon.png`/fallback icon files),
+  - two-tone icon recolor outputs used by the tab/tree UI.
+  These are regenerated automatically when source asset identity (path/mtime/size) or render parameters change.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - `Ctrl++` / `Ctrl+-` / `Ctrl+0` zoom only the preview pane content in/out/reset.
 - Preview-only zoom changes briefly show a percentage badge at the top of the preview pane.
@@ -178,7 +182,12 @@ What the launcher does:
 - Creates `.venv` inside the project if missing.
 - Uses `.venv/bin/python` directly (does not alter your current shell session).
 - Installs dependencies when `requirements.txt` changes.
-- Verifies key runtime imports and self-heals by reinstalling dependencies when the venv is incomplete.
+- Stores a runtime import-check stamp in `.venv/.runtime-import-check.sha256`.
+- Runs runtime import verification when one of these is true:
+  - `.venv` is newly created,
+  - `requirements.txt` hash changed,
+  - runtime import-check stamp is missing or does not match requirements hash.
+- If runtime import verification fails, self-heals by reinstalling dependencies.
 - Runs the app.
 
 ## Usage
@@ -213,13 +222,13 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -228,6 +237,11 @@ Notes:
 - `--recursive` / `-r` is optional.
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
+- Default output is progressive: matches print as they are found.
+- `--sort` / `-s` waits for full scan, then prints results sorted case-insensitively.
+- `--sort-case-sensitive` / `-S` waits for full scan, then prints results sorted case-sensitively.
+  - when either sort mode is enabled, `hfind` prints:
+    `One moment please... finding all matches to sort them`
 - `NEAR(...)` is strict in both `mdexplore` and `hfind`: a hit is only produced when all NEAR terms occur within the configured 50-word window.
 - For content search, inline `data:image/...;base64,...` payloads are ignored in
   both `mdexplore` and `hfind` to avoid false positives from embedded image data.
@@ -255,9 +269,20 @@ Recursively searches from current directory for readable `.txt` files whose file
 ./hfind.sh -cr "OR(fred, paul)" *.txt
 ./hfind.sh --recursive -c "OR(fred, paul)" *.txt
 ./hfind.sh -crvp "OR(fred, paul)" *.txt
+./hfind.sh -crvps "OR(fred, paul)" *.txt
+./hfind.sh -crvpS "OR(fred, paul)" *.txt
 ```
 
 All above are valid shorthand forms.
+
+```bash
+./hfind.sh -rs "conflicted" "./**/*"
+./hfind.sh -rS "conflicted" "./**/*"
+```
+
+Shows the two sort modes over recursive filename matches:
+- `-rs` sorts case-insensitively.
+- `-rS` sorts case-sensitively.
 
 ```bash
 ./hfind.sh --query "OR(fred, paul)" *.txt
@@ -829,8 +854,11 @@ python3 -m py_compile mdexplore.py
 
 If you see `ModuleNotFoundError: No module named 'PySide6.QtWebEngineWidgets'`:
 
-- Re-run `mdexplore.sh`; it now performs a runtime import check and auto-reinstalls
-  dependencies when the venv is incomplete.
+- Re-run `mdexplore.sh`; if runtime import verification is triggered and fails, it auto-reinstalls dependencies.
+- If verification was previously stamped but the venv later drifted, force a recheck by removing:
+  - `/path/to/mdexplore/.venv/.runtime-import-check.sha256`
+  then run:
+  - `/path/to/mdexplore/mdexplore.sh`
 - If it still fails, run:
   - `rm -rf /path/to/mdexplore/.venv`
   - `/path/to/mdexplore/mdexplore.sh`

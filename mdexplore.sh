@@ -6,6 +6,7 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
 APP_FILE="${SCRIPT_DIR}/mdexplore.py"
 REQ_HASH_FILE="${VENV_DIR}/.requirements.sha256"
+RUNTIME_CHECK_HASH_FILE="${VENV_DIR}/.runtime-import-check.sha256"
 LOG_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/mdexplore"
 LOG_FILE="${LOG_DIR}/launcher.log"
 MAX_LOG_LINES=1000
@@ -370,11 +371,21 @@ else
   echo "Dependencies already up to date."
 fi
 
-if ! runtime_import_check; then
-  echo "Detected incomplete Python runtime. Reinstalling dependencies..."
-  "${VENV_PYTHON}" -m pip install --disable-pip-version-check --upgrade --force-reinstall -r "${REQUIREMENTS_FILE}"
-  printf '%s\n' "${current_hash}" > "${REQ_HASH_FILE}"
-  runtime_import_check
+runtime_check_hash=""
+if [[ -f "${RUNTIME_CHECK_HASH_FILE}" ]]; then
+  runtime_check_hash="$(cat "${RUNTIME_CHECK_HASH_FILE}" 2>/dev/null || true)"
+fi
+
+if [[ "${needs_install}" -eq 1 || "${current_hash}" != "${stored_hash}" || "${runtime_check_hash}" != "${current_hash}" ]]; then
+  if ! runtime_import_check; then
+    echo "Detected incomplete Python runtime. Reinstalling dependencies..."
+    "${VENV_PYTHON}" -m pip install --disable-pip-version-check --upgrade --force-reinstall -r "${REQUIREMENTS_FILE}"
+    printf '%s\n' "${current_hash}" > "${REQ_HASH_FILE}"
+    runtime_import_check
+  fi
+  printf '%s\n' "${current_hash}" > "${RUNTIME_CHECK_HASH_FILE}"
+else
+  echo "Runtime dependency check cached."
 fi
 
 configure_local_renderer_overrides
