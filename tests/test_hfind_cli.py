@@ -33,6 +33,23 @@ class HfindCliTests(unittest.TestCase):
         lines = [line.strip() for line in stream.getvalue().splitlines() if line.strip()]
         return code, lines
 
+    def _run_main_with_stderr(
+        self, args: list[str]
+    ) -> tuple[int, list[str], list[str]]:
+        stdout_stream = io.StringIO()
+        stderr_stream = io.StringIO()
+        with contextlib.redirect_stdout(stdout_stream), contextlib.redirect_stderr(
+            stderr_stream
+        ):
+            code = hfind.main(args)
+        stdout_lines = [
+            line.strip() for line in stdout_stream.getvalue().splitlines() if line.strip()
+        ]
+        stderr_lines = [
+            line.strip() for line in stderr_stream.getvalue().splitlines() if line.strip()
+        ]
+        return code, stdout_lines, stderr_lines
+
     def test_default_filename_only_search_ignores_content(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-filename-only-") as tmpdir:
             root = Path(tmpdir)
@@ -220,7 +237,10 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             stripped = [self._strip_ansi(line) for line in lines]
-            self.assertEqual(stripped, ["john.md", str(Path("nested") / "john_nested.md")])
+            self.assertCountEqual(
+                stripped,
+                ["john.md", str(Path("nested") / "john_nested.md")],
+            )
 
     def test_verbose_lists_matching_lines_with_highlights(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-verbose-lines-") as tmpdir:
@@ -390,7 +410,7 @@ class HfindCliTests(unittest.TestCase):
             ])
 
             self.assertEqual(code, 0)
-            self.assertEqual(
+            self.assertCountEqual(
                 [self._strip_ansi(line) for line in lines],
                 [str(binary_file), str(text_file)],
             )
@@ -412,6 +432,23 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual([self._strip_ansi(line) for line in lines], [str(text_file)])
+
+    def test_content_mode_still_matches_binary_filename(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-binary-filename-content-") as tmpdir:
+            root = Path(tmpdir)
+            binary_file = root / "conflicted-copy.mdb"
+            binary_file.write_bytes(
+                b"\x00\x01\x02\x03" + bytes(range(255, 200, -1)) * 64
+            )
+
+            code, lines = self._run_main([
+                "-c",
+                "conflicted",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(binary_file)])
 
     def test_pdf_files_are_ignored_without_pdf_flag(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-pdf-no-flag-") as tmpdir:
@@ -476,6 +513,80 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
+
+    def test_sort_flag_waits_then_outputs_sorted_matches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-sort-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "z_conflicted.txt").write_text("x\n", encoding="utf-8")
+            (root / "a_conflicted.txt").write_text("x\n", encoding="utf-8")
+            (root / "m_conflicted.txt").write_text("x\n", encoding="utf-8")
+
+            code, stdout_lines, stderr_lines = self._run_main_with_stderr(
+                [
+                    "-s",
+                    "conflicted",
+                    str(root / "*.txt"),
+                ]
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn(
+                "One moment please... finding all matches to sort them",
+                stderr_lines,
+            )
+            self.assertEqual(
+                [self._strip_ansi(line) for line in stdout_lines],
+                [
+                    str(root / "a_conflicted.txt"),
+                    str(root / "m_conflicted.txt"),
+                    str(root / "z_conflicted.txt"),
+                ],
+            )
+
+    def test_sort_mode_case_sensitivity_switch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-sort-case-mode-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "a_conflicted.txt").write_text("x\n", encoding="utf-8")
+            (root / "B_conflicted.txt").write_text("x\n", encoding="utf-8")
+            (root / "c_conflicted.txt").write_text("x\n", encoding="utf-8")
+
+            code_insensitive, stdout_insensitive, _stderr_insensitive = (
+                self._run_main_with_stderr(
+                    [
+                        "-s",
+                        "conflicted",
+                        str(root / "*.txt"),
+                    ]
+                )
+            )
+            code_sensitive, stdout_sensitive, _stderr_sensitive = (
+                self._run_main_with_stderr(
+                    [
+                        "-S",
+                        "conflicted",
+                        str(root / "*.txt"),
+                    ]
+                )
+            )
+
+            self.assertEqual(code_insensitive, 0)
+            self.assertEqual(code_sensitive, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in stdout_insensitive],
+                [
+                    str(root / "a_conflicted.txt"),
+                    str(root / "B_conflicted.txt"),
+                    str(root / "c_conflicted.txt"),
+                ],
+            )
+            self.assertEqual(
+                [self._strip_ansi(line) for line in stdout_sensitive],
+                [
+                    str(root / "B_conflicted.txt"),
+                    str(root / "a_conflicted.txt"),
+                    str(root / "c_conflicted.txt"),
+                ],
+            )
 
 
 if __name__ == "__main__":

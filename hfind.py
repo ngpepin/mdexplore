@@ -9,7 +9,7 @@ Examples:
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
 import os
 from pathlib import Path
@@ -23,9 +23,9 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] [PATTERN ...]
-    hfind.py -q QUERY [-c] [-r] [-v] [-p] [PATTERN ...]
-    hfind.py -crvp QUERY [PATTERN ...]
+    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-c] [-r] [-v] [-p] [-s|-S] [PATTERN ...]
+    hfind.py -crvps QUERY [PATTERN ...]
 
 Notes:
   - If -q/--query is omitted, the first positional argument is used as QUERY.
@@ -35,6 +35,8 @@ Notes:
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
     - --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
+    - --sort/-s waits for full scan and emits case-insensitively sorted results.
+    - --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
 
 Examples:
     # Filename-only search (default): stem contains fred OR paul
@@ -95,7 +97,9 @@ def _style_filepath(path: Path) -> str:
     )
 
 
-def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]]:
+def _parse_args(
+    argv: list[str],
+) -> tuple[str, bool, bool, bool, bool, bool, bool, list[str]]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
 
@@ -104,6 +108,8 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]
     recursive = False
     verbose = False
     include_pdf = False
+    sort_results = False
+    sort_case_sensitive = False
     positionals: list[str] = []
 
     i = 0
@@ -137,6 +143,16 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]
             include_pdf = True
             i += 1
             continue
+        if arg == "--sort":
+            sort_results = True
+            sort_case_sensitive = False
+            i += 1
+            continue
+        if arg == "--sort-case-sensitive":
+            sort_results = True
+            sort_case_sensitive = True
+            i += 1
+            continue
         if arg.startswith("-") and arg != "-":
             # Allow stacked short flags, e.g. -cr
             consumed_query = False
@@ -152,6 +168,14 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]
                     continue
                 if flag == "p":
                     include_pdf = True
+                    continue
+                if flag == "s":
+                    sort_results = True
+                    sort_case_sensitive = False
+                    continue
+                if flag == "S":
+                    sort_results = True
+                    sort_case_sensitive = True
                     continue
                 if flag == "q":
                     if i + 1 >= len(argv):
@@ -174,7 +198,16 @@ def _parse_args(argv: list[str]) -> tuple[str, bool, bool, bool, bool, list[str]
     if not positionals:
         positionals = ["**/*" if recursive else "*"]
 
-    return query, include_content, recursive, verbose, include_pdf, positionals
+    return (
+        query,
+        include_content,
+        recursive,
+        verbose,
+        include_pdf,
+        sort_results,
+        sort_case_sensitive,
+        positionals,
+    )
 
 
 def _recursive_pattern(pattern: str) -> str:
@@ -196,38 +229,64 @@ def _pdf_pattern_variants(pattern: str) -> list[str]:
     return [pattern, f"{base}.[pP][dD][fF]"]
 
 
-def _expand_patterns(patterns: list[str], recursive: bool) -> list[Path]:
+def _iter_candidate_paths(patterns: list[str], recursive: bool):
+    """Yield candidate files progressively as globbing discovers them."""
     seen: set[str] = set()
-    out: list[Path] = []
 
     for raw in patterns:
         raw_patterns = _pdf_pattern_variants(raw)
-        expanded: list[str] = []
+        matched_any = False
 
-        for raw_pattern in raw_patterns:
-            if recursive:
-                expanded.extend(glob.glob(_recursive_pattern(raw_pattern), recursive=True))
-                if not expanded:
-                    expanded.extend(glob.glob(raw_pattern, recursive=True))
-            else:
-                expanded.extend(glob.glob(raw_pattern, recursive=False))
+        # In recursive mode, prefer a recursive variant first, then fall back
+        # to the original raw pattern if the recursive variant yields nothing.
+        if recursive:
+            for raw_pattern in raw_patterns:
+                recursive_pattern = _recursive_pattern(raw_pattern)
+                for item in glob.iglob(recursive_pattern, recursive=True):
+                    matched_any = True
+                    path = Path(item)
+                    if not path.is_file():
+                        continue
+                    key = str(path.resolve())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield path
+
+            if not matched_any:
+                for raw_pattern in raw_patterns:
+                    for item in glob.iglob(raw_pattern, recursive=True):
+                        matched_any = True
+                        path = Path(item)
+                        if not path.is_file():
+                            continue
+                        key = str(path.resolve())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        yield path
+        else:
+            for raw_pattern in raw_patterns:
+                for item in glob.iglob(raw_pattern, recursive=False):
+                    matched_any = True
+                    path = Path(item)
+                    if not path.is_file():
+                        continue
+                    key = str(path.resolve())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield path
 
         # If shell already expanded the pattern into explicit file args,
         # preserve them as literals too.
-        if not expanded and os.path.exists(raw):
-            expanded = [raw]
-
-        for item in expanded:
-            path = Path(item)
-            if not path.is_file():
-                continue
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(path)
-
-    return sorted(out, key=lambda p: str(p))
+        if not matched_any and os.path.exists(raw):
+            path = Path(raw)
+            if path.is_file():
+                key = str(path.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    yield path
 
 
 def _read_text_if_possible(path: Path) -> str | None:
@@ -443,14 +502,14 @@ def _line_has_self_contained_near_match(
 
 
 def _print_verbose_result(path: Path, content: str, query: str) -> None:
-    print(_style_filepath(path))
+    print(_style_filepath(path), flush=True)
     spans = _line_spans(content)
     hit_lines = _collect_verbose_line_numbers(content, query)
     terms, enforce_near_boundaries = _verbose_terms_for_query(query)
     near_groups = search_query.extract_near_term_groups(query)
     has_near_groups = bool(near_groups)
     if not hit_lines:
-        print("  (filename match only)")
+        print("  (filename match only)", flush=True)
         return
 
     if has_near_groups:
@@ -473,15 +532,15 @@ def _print_verbose_result(path: Path, content: str, query: str) -> None:
             # For contiguous lines that require cross-line context, only
             # the first line in that dependent block is numbered.
             if is_self_contained:
-                print(f"  {line_no}: {rendered}")
+                print(f"  {line_no}: {rendered}", flush=True)
             elif (
                 previous_line_no is None
                 or line_no != previous_line_no + 1
                 or previous_was_self_contained
             ):
-                print(f"  {line_no}: {rendered}")
+                print(f"  {line_no}: {rendered}", flush=True)
             else:
-                print(f"      {rendered}")
+                print(f"      {rendered}", flush=True)
             previous_line_no = line_no
             previous_was_self_contained = is_self_contained
         return
@@ -494,17 +553,16 @@ def _print_verbose_result(path: Path, content: str, query: str) -> None:
             terms,
             enforce_near_boundaries=enforce_near_boundaries,
         )
-        print(f"  {line_no}: {rendered}")
+        print(f"  {line_no}: {rendered}", flush=True)
 
 
 def _scan_candidate_for_query(
-    index: int,
     path: Path,
     predicate,
     *,
     include_content: bool,
     include_pdf: bool,
-) -> tuple[int, Path, str, bool]:
+) -> tuple[Path, str, bool]:
     """Read one candidate and evaluate query match state."""
     is_pdf = path.suffix.lower() == ".pdf"
     file_name = path.name
@@ -517,11 +575,17 @@ def _scan_candidate_for_query(
                 content = text or ""
         else:
             if _is_clearly_binary_file(path):
-                return index, path, "", False
-            text = _read_text_if_possible(path)
-            if text is None:
-                return index, path, "", False
-            content = text
+                # Preserve filename matching in content mode even when the
+                # file body is binary and cannot be meaningfully searched.
+                content = ""
+            else:
+                text = _read_text_if_possible(path)
+                if text is None:
+                    # Keep filename matching active even when content cannot
+                    # be read (permissions/encoding/path race, etc.).
+                    content = ""
+                else:
+                    content = text
 
     searchable_content = search_query.strip_inline_image_data_uris(
         content,
@@ -531,65 +595,124 @@ def _scan_candidate_for_query(
         matched = bool(predicate(file_name, searchable_content))
     except Exception:
         matched = False
-    return index, path, content, matched
+    return path, content, matched
 
 
 def main(argv: list[str]) -> int:
     try:
-        query, include_content, recursive, verbose, include_pdf, patterns = _parse_args(argv)
+        (
+            query,
+            include_content,
+            recursive,
+            verbose,
+            include_pdf,
+            sort_results,
+            sort_case_sensitive,
+            patterns,
+        ) = _parse_args(argv)
         predicate = search_query.compile_match_predicate(
             query, strip_inline_image_data=False
         )
 
         if include_pdf and not include_content:
             print("note: --pdf has no effect unless --content/-c is set", file=sys.stderr)
+        if sort_results:
+            print(
+                "One moment please... finding all matches to sort them",
+                file=sys.stderr,
+                flush=True,
+            )
 
-        candidates = _expand_patterns(patterns, recursive)
         match_count = 0
-        if not candidates:
-            return 1
+        candidate_iter = _iter_candidate_paths(patterns, recursive)
+        saw_candidate = False
+        buffered_matches: list[tuple[Path, str]] = []
 
-        worker_count = max(1, min(_MAX_SEARCH_WORKERS, len(candidates)))
-        results: list[tuple[int, Path, str, bool]] = []
+        def _emit_match(path: Path, content: str) -> None:
+            nonlocal match_count
+            match_count += 1
+            if sort_results:
+                buffered_matches.append((path, content))
+                return
+            if verbose:
+                if include_content:
+                    _print_verbose_result(path, content, query)
+                else:
+                    print(_style_filepath(path), flush=True)
+            else:
+                print(_style_filepath(path), flush=True)
+
+        worker_count = max(1, _MAX_SEARCH_WORKERS)
         if worker_count <= 1:
-            for index, path in enumerate(candidates):
-                results.append(
-                    _scan_candidate_for_query(
-                        index,
-                        path,
-                        predicate,
-                        include_content=include_content,
-                        include_pdf=include_pdf,
-                    )
+            for candidate_path in candidate_iter:
+                saw_candidate = True
+                path, content, matched = _scan_candidate_for_query(
+                    candidate_path,
+                    predicate,
+                    include_content=include_content,
+                    include_pdf=include_pdf,
                 )
+                if not matched:
+                    continue
+                _emit_match(path, content)
         else:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_map = {
-                    executor.submit(
-                        _scan_candidate_for_query,
-                        index,
-                        path,
-                        predicate,
-                        include_content=include_content,
-                        include_pdf=include_pdf,
-                    ): index
-                    for index, path in enumerate(candidates)
-                }
-                for future in as_completed(future_map):
-                    try:
-                        results.append(future.result())
-                    except Exception:
-                        continue
+                pending_futures = set()
+                candidate_exhausted = False
+                max_in_flight = max(4, worker_count * 4)
 
-        results.sort(key=lambda item: item[0])
-        for _index, path, content, matched in results:
-            if not matched:
-                continue
-            match_count += 1
-            if verbose:
-                _print_verbose_result(path, content, query)
+                while True:
+                    while (not candidate_exhausted) and len(pending_futures) < max_in_flight:
+                        try:
+                            path = next(candidate_iter)
+                        except StopIteration:
+                            candidate_exhausted = True
+                            break
+                        saw_candidate = True
+                        pending_futures.add(
+                            executor.submit(
+                                _scan_candidate_for_query,
+                                path,
+                                predicate,
+                                include_content=include_content,
+                                include_pdf=include_pdf,
+                            )
+                        )
+
+                    if not pending_futures:
+                        break
+
+                    done, pending_futures = wait(
+                        pending_futures,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        try:
+                            path, content, matched = future.result()
+                        except Exception:
+                            continue
+                        if not matched:
+                            continue
+                        _emit_match(path, content)
+
+        if not saw_candidate:
+            return 1
+
+        if sort_results and buffered_matches:
+            if sort_case_sensitive:
+                buffered_matches.sort(key=lambda item: str(item[0]))
             else:
-                print(_style_filepath(path))
+                buffered_matches.sort(
+                    key=lambda item: (str(item[0]).casefold(), str(item[0]))
+                )
+            for path, content in buffered_matches:
+                if verbose:
+                    if include_content:
+                        _print_verbose_result(path, content, query)
+                    else:
+                        print(_style_filepath(path), flush=True)
+                else:
+                    print(_style_filepath(path), flush=True)
 
         return 0 if match_count else 1
     except KeyboardInterrupt:
