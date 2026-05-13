@@ -132,6 +132,11 @@ class SearchQuerySyntaxTests(unittest.TestCase):
         self.assertFalse(predicate("example.md", "The quick brown fox"))
         self.assertTrue(predicate("example.md", "The quick brown the fox"))
 
+    def test_near_query_can_match_basename_plus_content(self) -> None:
+        predicate = self.window._compile_match_predicate("""NEAR(hazmat,primitives)""")
+        self.assertTrue(predicate("hazmat-notes.md", "contains primitives token"))
+        self.assertFalse(predicate("hazmat-notes.md", "contains unrelated token"))
+
     def test_legacy_close_alias_matches_like_near(self) -> None:
         predicate = self.window._compile_match_predicate("""CLOSE(alpha,beta)""")
         self.assertTrue(predicate("example.md", "alpha goes with beta"))

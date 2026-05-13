@@ -106,6 +106,20 @@ class SearchQueryModuleTests(unittest.TestCase):
         self.assertTrue(predicate("example.md", "alpha goes with beta"))
         self.assertFalse(predicate("example.md", "alpha only"))
 
+    def test_near_matches_across_filename_and_content_stream(self) -> None:
+        predicate = search_query.compile_match_predicate("""NEAR(hazmat,primitives)""")
+        self.assertTrue(predicate("hazmat-file.md", "contains primitives token"))
+        self.assertTrue(predicate("contains-primitives.md", "hazmat appears nearby"))
+        self.assertFalse(predicate("hazmat-file.md", "no second term"))
+
+    def test_near_hit_counter_counts_filename_plus_content_windows(self) -> None:
+        counter = search_query.compile_match_hit_counter("""NEAR(hazmat,primitives)""")
+        self.assertEqual(counter("hazmat-notes.md", "primitives are present"), 1)
+
+    def test_hit_counter_includes_basename_occurrences(self) -> None:
+        counter = search_query.compile_match_hit_counter("hazmat")
+        self.assertEqual(counter("hazmat-hazmat.md", ""), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

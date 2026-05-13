@@ -498,8 +498,15 @@ def compile_match_hit_counter(
                 normalized_content,
                 preserve_line_structure=False,
             )
+        near_stream = file_name or ""
+        if normalized_content:
+            near_stream = (
+                f"{near_stream}\n{normalized_content}"
+                if near_stream
+                else normalized_content
+            )
         if near_term_groups:
-            return len(collect_near_focus_windows(normalized_content, near_term_groups))
+            return len(collect_near_focus_windows(near_stream, near_term_groups))
         haystack = f"{file_name}\n{normalized_content}"
         total = 0
         for pattern in compiled_patterns:
@@ -751,8 +758,17 @@ def compile_match_predicate(
             pattern = compile_term_pattern(term, bool(is_case_sensitive))
         return bool(pattern.search(file_name) or pattern.search(file_content))
 
-    def near_terms_match(terms: list[SearchTerm], file_content: str) -> bool:
-        return best_near_focus_window(file_content or "", [terms]) is not None
+    def near_terms_match(
+        terms: list[SearchTerm], file_name: str, file_content: str
+    ) -> bool:
+        near_stream = file_name or ""
+        if file_content:
+            near_stream = (
+                f"{near_stream}\n{file_content}"
+                if near_stream
+                else file_content
+            )
+        return best_near_focus_window(near_stream, [terms]) is not None
 
     def evaluate(
         node,
@@ -774,7 +790,7 @@ def compile_match_predicate(
             )
         if node_type == "NEAR":
             _kind, near_terms = node
-            return near_terms_match(near_terms, file_content)
+            return near_terms_match(near_terms, file_name, file_content)
         if node_type == "NOT":
             _kind, operand = node
             return not evaluate(

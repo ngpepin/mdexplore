@@ -127,6 +127,58 @@ class HfindCliTests(unittest.TestCase):
                 [str(Path("project") / "logs" / "inside.txt")],
             )
 
+    def test_near_matches_path_in_default_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-near-path-default-") as tmpdir:
+            root = Path(tmpdir)
+            nested = root / "hazmat" / "primitives"
+            nested.mkdir(parents=True, exist_ok=True)
+            source = nested / "vector.txt"
+            source.write_text("content unrelated\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code, lines = self._run_main([
+                    "-r",
+                    "NEAR(hazmat,primitives)",
+                    "*.txt",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(Path("hazmat") / "primitives" / "vector.txt")],
+            )
+
+    def test_near_base_mode_uses_basename_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-near-base-mode-") as tmpdir:
+            root = Path(tmpdir)
+            nested = root / "hazmat" / "primitives"
+            nested.mkdir(parents=True, exist_ok=True)
+            path_match_only = nested / "vector.txt"
+            path_match_only.write_text("content unrelated\n", encoding="utf-8")
+            basename_match = root / "hazmat-primitives.txt"
+            basename_match.write_text("content unrelated\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code, lines = self._run_main([
+                    "-rb",
+                    "NEAR(hazmat,primitives)",
+                    "*.txt",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(Path("hazmat-primitives.txt"))],
+            )
+
     def test_recursive_content_search_with_stackable_short_flags(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-recursive-content-") as tmpdir:
             root = Path(tmpdir)

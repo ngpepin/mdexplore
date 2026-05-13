@@ -269,6 +269,7 @@ Matching target modes:
 - Default: query matches against each discovered path (directories + filename).
 - `-b` / `--base`: query matches basename only (filename + extension).
 - `-c` / `--content`: also evaluates file contents, while keeping path/base matching active.
+- `NEAR(...)` follows the same target mode stream (path by default, basename with `-b`, path/base plus content with `-c`).
 
 Sorting modes:
 

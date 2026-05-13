@@ -502,16 +502,20 @@ class SearchScanWorker(QRunnable):
             for path in self.paths:
                 try:
                     path_key, searchable_content = _load_searchable_markdown_content(path)
-                    if not self.predicate(path.name, searchable_content):
+                    filename_search_text = path.stem
+                    if not self.predicate(filename_search_text, searchable_content):
                         continue
                 except Exception:
                     continue
 
                 matched_paths.append(path_key)
-                if any(pattern.search(path.name) for pattern in self.filename_patterns):
+                if any(
+                    pattern.search(filename_search_text)
+                    for pattern in self.filename_patterns
+                ):
                     filename_match_paths.append(path_key)
                 try:
-                    count = self.hit_counter(path.name, searchable_content)
+                    count = self.hit_counter(filename_search_text, searchable_content)
                 except Exception:
                     count = 1
                 match_counts[path_key] = count if count > 0 else 1

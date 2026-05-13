@@ -60,6 +60,12 @@ Examples:
 
     # Include PDF text extraction
     hfind.py -rcvp "the" "library/*.pdf"
+
+    NEAR behavior:
+        - NEAR(...) is evaluated against the active search stream.
+        - Default stream includes discovered path text.
+        - With -b/--base, stream uses basename text only.
+        - With -c/--content, file content is appended to the same stream.
 """
 
 

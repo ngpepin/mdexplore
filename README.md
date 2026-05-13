@@ -245,6 +245,7 @@ Notes:
   - when either sort mode is enabled, `hfind` prints:
     `One moment please... finding all matches to sort them`
 - `NEAR(...)` is strict in both `mdexplore` and `hfind`: a hit is only produced when all NEAR terms occur within the configured 50-word window.
+- In `hfind`, `NEAR(...)` uses the active stream: default path text, basename text with `-b`, and path/base plus file content with `-c`.
 - For content search, inline `data:image/...;base64,...` payloads are ignored in
   both `mdexplore` and `hfind` to avoid false positives from embedded image data.
 - In verbose `NEAR(...)` output, numbering reflects match semantics:
