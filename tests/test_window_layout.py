@@ -50,6 +50,23 @@ class WindowLayoutTests(unittest.TestCase):
             "Long document paths should not make the main window effectively unshrinkable",
         )
 
+    def test_safe_path_helpers_swallow_permission_errors(self) -> None:
+        class _DeniedPath:
+            def is_dir(self):
+                raise PermissionError("denied")
+
+            def is_file(self):
+                raise PermissionError("denied")
+
+            def resolve(self):
+                raise PermissionError("denied")
+
+        denied = _DeniedPath()
+
+        self.assertFalse(self.window._safe_is_dir(denied))
+        self.assertFalse(self.window._safe_is_file(denied))
+        self.assertIs(self.window._safe_resolve(denied), denied)
+
 
 if __name__ == "__main__":
     unittest.main()

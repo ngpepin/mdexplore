@@ -98,8 +98,6 @@ def configure_qt_graphics_fallback() -> None:
     """Force software rendering env vars for fallback launch paths."""
     if not os.environ.get("QT_QUICK_BACKEND"):
         os.environ["QT_QUICK_BACKEND"] = "software"
-    if not os.environ.get("QSG_RHI_BACKEND"):
-        os.environ["QSG_RHI_BACKEND"] = "software"
     if not os.environ.get("QT_OPENGL"):
         os.environ["QT_OPENGL"] = "software"
     chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
@@ -112,13 +110,11 @@ def configure_qt_graphics_fallback() -> None:
 def gpu_context_available() -> bool:
     """Return whether a usable GPU OpenGL context can be created."""
     qt_quick_backend = os.environ.get("QT_QUICK_BACKEND", "").strip().lower()
-    qsg_rhi_backend = os.environ.get("QSG_RHI_BACKEND", "").strip().lower()
     qt_opengl = os.environ.get("QT_OPENGL", "").strip().lower()
     chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
 
     if (
         qt_quick_backend == "software"
-        or qsg_rhi_backend == "software"
         or qt_opengl == "software"
     ):
         return False

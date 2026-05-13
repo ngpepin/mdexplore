@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Event, Lock
 import time
@@ -1319,6 +1320,9 @@ class MdExploreWindow(QMainWindow):
     DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(24, (os.cpu_count() or 2) * 2))
     PREVIEW_HTTP_CACHE_MAX_BYTES = 4096 * 1024 * 1024
     PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX = (2**31) - 1
+    PREVIEW_HTTP_CACHE_MIN_BYTES = 64 * 1024 * 1024
+    PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES = 512 * 1024 * 1024
+    PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS = 2 * 24 * 60 * 60
 
     def __init__(
         self,
@@ -1335,12 +1339,15 @@ class MdExploreWindow(QMainWindow):
         # - preview scrolls: per-run only
         # - document view sessions: per-run
         # - persisted view sessions: on-disk per-directory sidecars
-        self.root = root.resolve()
+        self.root = self._safe_resolve(root)
         self.config_path = config_path
         self._recent_root_directories = self._load_recent_root_directories_from_config()
         self._recent_active_root: Path = self.root
         self._recent_root_entered_at = time.monotonic()
         self._copy_base64_images_enabled = self._load_copy_base64_toggle_from_config()
+        self._preview_profile_instance_id: str | None = None
+        self._preview_profile_cache_dir: Path | None = None
+        self._preview_profile_storage_dir: Path | None = None
         self.renderer = MarkdownRenderer(mermaid_backend=mermaid_backend)
         self.current_file: Path | None = None
         self.last_directory_selection: Path | None = self.root
@@ -4782,35 +4789,179 @@ class MdExploreWindow(QMainWindow):
                 pass
 
     @staticmethod
-    def _preview_webengine_cache_dir() -> Path:
-        """Return disk path used for preview HTTP cache."""
-        return Path.home() / ".cache" / "mdexplore" / "webengine"
+    def _preview_webengine_cache_root_dir() -> Path:
+        """Return root path used for per-instance preview HTTP cache."""
+        return Path.home() / ".cache" / "mdexplore" / "webengine" / "instances"
 
     @staticmethod
-    def _preview_webengine_storage_dir() -> Path:
-        """Return disk path used for preview profile persistent storage."""
-        return Path.home() / ".local" / "share" / "mdexplore" / "webengine"
+    def _preview_webengine_storage_root_dir() -> Path:
+        """Return root path used for per-instance preview persistent storage."""
+        return Path.home() / ".local" / "share" / "mdexplore" / "webengine" / "instances"
+
+    @staticmethod
+    def _is_pid_running(pid: int) -> bool:
+        """Return True when a local process id appears to still be alive."""
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Existing process owned by another user.
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def _cleanup_stale_preview_webengine_instance_dirs(
+        cls, root_dir: Path, stale_seconds: int
+    ) -> None:
+        """Delete stale per-instance profile dirs left by crashed instances."""
+        try:
+            root_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        now = time.time()
+        for child in root_dir.iterdir():
+            try:
+                if not child.is_dir():
+                    continue
+                marker_path = child / "instance.json"
+                pid = None
+                started_at = None
+                if marker_path.exists():
+                    try:
+                        marker_payload = json.loads(
+                            marker_path.read_text(encoding="utf-8", errors="replace")
+                        )
+                        pid = int(marker_payload.get("pid", 0) or 0)
+                        started_at = float(marker_payload.get("started_at", 0.0) or 0.0)
+                    except Exception:
+                        pid = None
+                        started_at = None
+                if pid and cls._is_pid_running(pid):
+                    continue
+                try:
+                    age_seconds = now - max(child.stat().st_mtime, 0.0)
+                except Exception:
+                    age_seconds = stale_seconds + 1
+                if started_at:
+                    try:
+                        age_seconds = max(age_seconds, now - max(started_at, 0.0))
+                    except Exception:
+                        pass
+                if age_seconds >= stale_seconds:
+                    shutil.rmtree(child, ignore_errors=True)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _count_live_mdexplore_processes() -> int:
+        """Count currently running mdexplore.py processes visible to this user."""
+        proc_root = Path("/proc")
+        if not proc_root.exists():
+            return 1
+        count = 0
+        for entry in proc_root.iterdir():
+            name = entry.name
+            if not name.isdigit():
+                continue
+            cmdline_path = entry / "cmdline"
+            try:
+                raw = cmdline_path.read_bytes()
+            except Exception:
+                continue
+            if not raw:
+                continue
+            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+            if "mdexplore.py" in cmdline:
+                count += 1
+        return max(1, count)
+
+    def _resolve_preview_http_cache_limit_bytes(self, cache_root: Path) -> int:
+        """Pick cache cap using 4GB target with geometric fallback for extras."""
+        target_bytes = min(
+            int(self.PREVIEW_HTTP_CACHE_MAX_BYTES),
+            int(self.PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX),
+        )
+        if target_bytes <= 0:
+            return 0
+
+        live_instances = self._count_live_mdexplore_processes()
+        if live_instances <= 1:
+            return target_bytes
+
+        try:
+            free_bytes = int(shutil.disk_usage(cache_root).free)
+        except Exception:
+            return target_bytes
+
+        reserve_bytes = max(0, int(self.PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES))
+        minimum_bytes = max(
+            1, min(int(self.PREVIEW_HTTP_CACHE_MIN_BYTES), int(target_bytes))
+        )
+        cache_cap = int(target_bytes)
+        while cache_cap > minimum_bytes and (cache_cap + reserve_bytes) > free_bytes:
+            cache_cap //= 2
+        if cache_cap < minimum_bytes:
+            cache_cap = minimum_bytes
+        if cache_cap < target_bytes:
+            print(
+                "mdexplore: reduced per-instance preview cache to "
+                f"{cache_cap // (1024 * 1024)} MiB "
+                f"(free {free_bytes // (1024 * 1024)} MiB)",
+                file=sys.stderr,
+            )
+        return max(1, min(cache_cap, target_bytes))
 
     def _build_preview_web_profile(self) -> QWebEngineProfile:
-        """Create a persistent WebEngine profile so remote images are disk-cached."""
-        profile = QWebEngineProfile("mdexplore-preview", self)
+        """Create disk-backed per-instance WebEngine profile keyed by UUID."""
+        instance_id = uuid.uuid4().hex
+        cache_root = self._preview_webengine_cache_root_dir()
+        storage_root = self._preview_webengine_storage_root_dir()
+        self._cleanup_stale_preview_webengine_instance_dirs(
+            cache_root,
+            self.PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS,
+        )
+        self._cleanup_stale_preview_webengine_instance_dirs(
+            storage_root,
+            self.PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS,
+        )
+
+        cache_dir = cache_root / instance_id
+        storage_dir = storage_root / instance_id
         try:
-            cache_dir = self._preview_webengine_cache_dir()
-            storage_dir = self._preview_webengine_storage_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
             storage_dir.mkdir(parents=True, exist_ok=True)
+            marker = json.dumps(
+                {
+                    "instance_id": instance_id,
+                    "pid": os.getpid(),
+                    "started_at": time.time(),
+                },
+                separators=(",", ":"),
+            )
+            (cache_dir / "instance.json").write_text(marker, encoding="utf-8")
+            (storage_dir / "instance.json").write_text(marker, encoding="utf-8")
+        except Exception:
+            pass
+
+        self._preview_profile_instance_id = instance_id
+        self._preview_profile_cache_dir = cache_dir
+        self._preview_profile_storage_dir = storage_dir
+
+        profile = QWebEngineProfile(f"mdexplore-preview-{instance_id}", self)
+        try:
             profile.setCachePath(str(cache_dir))
             profile.setPersistentStoragePath(str(storage_dir))
         except Exception:
             pass
         try:
             profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
-            # Qt WebEngine expects a signed 32-bit int here; clamp to avoid
-            # overflow when configured values exceed the API limit.
-            cache_limit_bytes = min(
-                int(self.PREVIEW_HTTP_CACHE_MAX_BYTES),
-                int(self.PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX),
-            )
+            cache_limit_bytes = self._resolve_preview_http_cache_limit_bytes(cache_root)
             profile.setHttpCacheMaximumSize(cache_limit_bytes)
         except Exception:
             pass
@@ -6728,6 +6879,30 @@ class MdExploreWindow(QMainWindow):
         self._reset_search_scan_state()
 
     @staticmethod
+    def _safe_is_dir(path: Path) -> bool:
+        """Return whether path is a directory without raising on access errors."""
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _safe_is_file(path: Path) -> bool:
+        """Return whether path is a file without raising on access errors."""
+        try:
+            return path.is_file()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _safe_resolve(path: Path) -> Path:
+        """Resolve a path best-effort, preserving original path on OS errors."""
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    @staticmethod
     def _path_key(path: Path) -> str:
         try:
             return str(path.resolve())
@@ -7029,7 +7204,7 @@ class MdExploreWindow(QMainWindow):
 
     def _list_markdown_files_non_recursive(self, directory: Path) -> list[Path]:
         """Return direct child markdown files from a directory (non-recursive)."""
-        if not directory.is_dir():
+        if not self._safe_is_dir(directory):
             return []
 
         try:
@@ -7176,7 +7351,7 @@ class MdExploreWindow(QMainWindow):
         clear_action: QAction | None = None
         clear_in_directory_action: QAction | None = None
 
-        if path.is_file() and path.suffix.lower() == ".md":
+        if self._safe_is_file(path) and path.suffix.lower() == ".md":
             for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
                 label = f"Highlight {color_name}" if idx == 0 else f"... {color_name}"
                 action = menu.addAction(label)
@@ -7186,7 +7361,7 @@ class MdExploreWindow(QMainWindow):
             menu.addSeparator()
             clear_action = menu.addAction("Clear Highlight")
 
-        clear_scope = path if path.is_dir() else path.parent
+        clear_scope = path if self._safe_is_dir(path) else path.parent
         clear_in_directory_action = menu.addAction("Clear in Directory")
         clear_all_action = menu.addAction("Clear All")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -7215,7 +7390,7 @@ class MdExploreWindow(QMainWindow):
         if not index.isValid():
             return
         path = Path(self.model.filePath(index))
-        if not path.is_dir():
+        if not self._safe_is_dir(path):
             return
         was_selected = self.tree.currentIndex() == index
         self.tree.setCurrentIndex(index)
@@ -7233,7 +7408,7 @@ class MdExploreWindow(QMainWindow):
         if not index.isValid():
             return
         collapsed_path = Path(self.model.filePath(index))
-        if not collapsed_path.is_dir():
+        if not self._safe_is_dir(collapsed_path):
             return
 
         current_index = self.tree.currentIndex()
@@ -7248,7 +7423,7 @@ class MdExploreWindow(QMainWindow):
         next_scope = self.root
         if parent_index.isValid():
             parent_path = Path(self.model.filePath(parent_index))
-            if parent_path.is_dir():
+            if self._safe_is_dir(parent_path):
                 try:
                     next_scope = parent_path.resolve()
                 except Exception:
@@ -8780,7 +8955,7 @@ class MdExploreWindow(QMainWindow):
         index = self.tree.currentIndex()
         if index.isValid():
             selected = Path(self.model.filePath(index))
-            if selected.is_dir():
+            if self._safe_is_dir(selected):
                 try:
                     resolved = selected.resolve()
                 except Exception:
@@ -8789,7 +8964,7 @@ class MdExploreWindow(QMainWindow):
                 return resolved
         if (
             self.last_directory_selection is not None
-            and self.last_directory_selection.is_dir()
+            and self._safe_is_dir(self.last_directory_selection)
         ):
             return self.last_directory_selection
         return self.root
@@ -8806,14 +8981,14 @@ class MdExploreWindow(QMainWindow):
         index = self.tree.currentIndex()
         if index.isValid():
             selected = Path(self.model.filePath(index))
-            if selected.is_dir():
+            if self._safe_is_dir(selected):
                 try:
                     return selected.resolve()
                 except Exception:
                     return selected
         if (
             self.last_directory_selection is not None
-            and self.last_directory_selection.is_dir()
+            and self._safe_is_dir(self.last_directory_selection)
         ):
             return self.last_directory_selection
         return self.root
@@ -8914,7 +9089,7 @@ class MdExploreWindow(QMainWindow):
         target_scope = (
             scope if isinstance(scope, Path) else self._highlight_scope_directory()
         )
-        if not target_scope.is_dir():
+        if not self._safe_is_dir(target_scope):
             return
         try:
             display_scope = target_scope.resolve()
@@ -8941,7 +9116,7 @@ class MdExploreWindow(QMainWindow):
         target_scope = (
             scope if isinstance(scope, Path) else self._highlight_scope_directory()
         )
-        if not target_scope.is_dir():
+        if not self._safe_is_dir(target_scope):
             return
         try:
             display_scope = target_scope.resolve()
@@ -8972,7 +9147,7 @@ class MdExploreWindow(QMainWindow):
         """Return default folder used by the copy destination chooser."""
         if (
             isinstance(self._copy_destination_directory, Path)
-            and self._copy_destination_directory.is_dir()
+            and self._safe_is_dir(self._copy_destination_directory)
         ):
             return self._copy_destination_directory
         return self._effective_root_for_persistence()
@@ -8994,7 +9169,7 @@ class MdExploreWindow(QMainWindow):
             selected = selected.resolve()
         except Exception:
             pass
-        if not selected.is_dir():
+        if not self._safe_is_dir(selected):
             self.statusBar().showMessage("Selected directory is unavailable", 3500)
             return None
         self._copy_destination_directory = selected
@@ -9035,7 +9210,7 @@ class MdExploreWindow(QMainWindow):
             else "imagebase64-off.png"
         )
         icon_path = _ui_asset_path(icon_name)
-        if icon_path.is_file():
+        if self._safe_is_file(icon_path):
             button.setIcon(QIcon(str(icon_path)))
             button.setIconSize(QSize(19, 19))
             button.setText("")
@@ -9361,7 +9536,7 @@ class MdExploreWindow(QMainWindow):
                 resolved_local = local_path.resolve()
             except Exception:
                 resolved_local = local_path
-            if not resolved_local.is_file():
+            if not self._safe_is_file(resolved_local):
                 return None
             cache_key = f"file::{self._path_key(resolved_local)}"
             found, cached = self._copy_base64_cache_get(cache_key)
@@ -9716,7 +9891,7 @@ class MdExploreWindow(QMainWindow):
         copy_failures = 0
         converted_links_total = 0
         for source_path in normalized:
-            if not source_path.is_file():
+            if not self._safe_is_file(source_path):
                 copy_failures += 1
                 continue
 
@@ -9757,7 +9932,7 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             target = self.current_file
 
-        if not target.is_file():
+        if not self._safe_is_file(target):
             self.statusBar().showMessage("Previewed file is unavailable", 3000)
             return
 
@@ -9841,12 +10016,12 @@ class MdExploreWindow(QMainWindow):
         path = Path(self.model.filePath(current))
         scope_changed = False
         scope_candidate: Path | None = None
-        if path.is_dir():
+        if self._safe_is_dir(path):
             scope_candidate = path
-        elif path.is_file() and path.suffix.lower() == ".md":
+        elif self._safe_is_file(path) and path.suffix.lower() == ".md":
             scope_candidate = path.parent
 
-        if scope_candidate is not None and scope_candidate.is_dir():
+        if scope_candidate is not None and self._safe_is_dir(scope_candidate):
             try:
                 resolved_scope = scope_candidate.resolve()
             except Exception:
@@ -9869,11 +10044,11 @@ class MdExploreWindow(QMainWindow):
             self.last_directory_selection = resolved_scope
 
         self._update_window_title()
-        if path.is_dir():
+        if self._safe_is_dir(path):
             # Keep existing behavior for explicit directory selections.
             self._rerun_active_search_for_scope()
             return
-        if not path.is_file() or path.suffix.lower() != ".md":
+        if not self._safe_is_file(path) or path.suffix.lower() != ".md":
             return
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
@@ -11163,7 +11338,11 @@ def main() -> int:
     if not root.exists():
         print(f"Path does not exist: {root}", file=sys.stderr)
         return 2
-    if not root.is_dir():
+    try:
+        root_is_dir = root.is_dir()
+    except OSError:
+        root_is_dir = False
+    if not root_is_dir:
         print(f"Path is not a directory: {root}", file=sys.stderr)
         return 2
 

@@ -229,6 +229,25 @@ def _pdf_pattern_variants(pattern: str) -> list[str]:
     return [pattern, f"{base}.[pP][dD][fF]"]
 
 
+def _safe_is_file(path: Path) -> bool:
+    """Return whether path is a regular file, skipping unreadable entries."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _safe_resolved_key(path: Path) -> str:
+    """Build a stable dedupe key without failing on unreadable symlink targets."""
+    try:
+        return str(path.resolve())
+    except OSError:
+        try:
+            return str(path.absolute())
+        except Exception:
+            return str(path)
+
+
 def _iter_candidate_paths(patterns: list[str], recursive: bool):
     """Yield candidate files progressively as globbing discovers them."""
     seen: set[str] = set()
@@ -245,9 +264,9 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
                 for item in glob.iglob(recursive_pattern, recursive=True):
                     matched_any = True
                     path = Path(item)
-                    if not path.is_file():
+                    if not _safe_is_file(path):
                         continue
-                    key = str(path.resolve())
+                    key = _safe_resolved_key(path)
                     if key in seen:
                         continue
                     seen.add(key)
@@ -258,9 +277,9 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
                     for item in glob.iglob(raw_pattern, recursive=True):
                         matched_any = True
                         path = Path(item)
-                        if not path.is_file():
+                        if not _safe_is_file(path):
                             continue
-                        key = str(path.resolve())
+                        key = _safe_resolved_key(path)
                         if key in seen:
                             continue
                         seen.add(key)
@@ -270,9 +289,9 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
                 for item in glob.iglob(raw_pattern, recursive=False):
                     matched_any = True
                     path = Path(item)
-                    if not path.is_file():
+                    if not _safe_is_file(path):
                         continue
-                    key = str(path.resolve())
+                    key = _safe_resolved_key(path)
                     if key in seen:
                         continue
                     seen.add(key)
@@ -282,8 +301,8 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
         # preserve them as literals too.
         if not matched_any and os.path.exists(raw):
             path = Path(raw)
-            if path.is_file():
-                key = str(path.resolve())
+            if _safe_is_file(path):
+                key = _safe_resolved_key(path)
                 if key not in seen:
                     seen.add(key)
                     yield path

@@ -588,6 +588,36 @@ class HfindCliTests(unittest.TestCase):
                 ],
             )
 
+    def test_recursive_glob_skips_unreadable_symlink_targets(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-unreadable-symlink-") as tmpdir:
+            root = Path(tmpdir)
+            visible = root / "visible.txt"
+            visible.write_text("plain text\n", encoding="utf-8")
+
+            restricted = root / "restricted"
+            restricted.mkdir(parents=True, exist_ok=True)
+            secret = restricted / "secret.txt"
+            secret.write_text("hidden\n", encoding="utf-8")
+
+            blocked_link = root / "blocked-doc"
+            try:
+                blocked_link.symlink_to(secret)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlink creation is not supported in this environment")
+
+            os.chmod(restricted, 0)
+            try:
+                code, lines = self._run_main([
+                    "-r",
+                    "visible",
+                    str(root / "*"),
+                ])
+            finally:
+                os.chmod(restricted, 0o700)
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(visible)])
+
 
 if __name__ == "__main__":
     unittest.main()

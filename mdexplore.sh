@@ -214,10 +214,6 @@ configure_qt_graphics_fallback() {
     export QT_QUICK_BACKEND="software"
     echo "Using QT_QUICK_BACKEND=software"
   fi
-  if [[ -z "${QSG_RHI_BACKEND:-}" ]]; then
-    export QSG_RHI_BACKEND="software"
-    echo "Using QSG_RHI_BACKEND=software"
-  fi
   if [[ -z "${QT_OPENGL:-}" ]]; then
     export QT_OPENGL="software"
     echo "Using QT_OPENGL=software"
@@ -232,6 +228,65 @@ configure_qt_graphics_fallback() {
     export QTWEBENGINE_CHROMIUM_FLAGS="${chromium_flags}"
     echo "Using QTWEBENGINE_CHROMIUM_FLAGS=${QTWEBENGINE_CHROMIUM_FLAGS}"
   fi
+}
+
+probe_gpu_context_available() {
+  # Return success only when Qt can create and bind an OpenGL context for this
+  # runtime/platform. This avoids a no-window hang on hosts where the process
+  # starts but cannot create a usable WebEngine GL context.
+  "${VENV_PYTHON}" - <<'PY'
+from PySide6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+from PySide6.QtWidgets import QApplication
+
+app = QApplication([])
+surface = QOffscreenSurface()
+surface.setFormat(QSurfaceFormat.defaultFormat())
+surface.create()
+if not surface.isValid():
+    raise SystemExit(1)
+
+context = QOpenGLContext()
+context.setFormat(surface.format())
+if not context.create():
+    raise SystemExit(1)
+if not context.makeCurrent(surface):
+    raise SystemExit(1)
+context.doneCurrent()
+raise SystemExit(0)
+PY
+}
+
+should_force_software_rendering() {
+  local force_value="${MDEXPLORE_FORCE_SOFTWARE:-}"
+  force_value="$(printf '%s' "${force_value}" | tr '[:upper:]' '[:lower:]')"
+  case "${force_value}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    0|false|no|off)
+      return 1
+      ;;
+  esac
+
+  # If the caller already forced software mode or disabled GPU in Chromium
+  # flags, honor that and skip probing.
+  if [[ "${QT_OPENGL:-}" == "software" ]]; then
+    return 0
+  fi
+  if [[ "${QT_QUICK_BACKEND:-}" == "software" ]]; then
+    return 0
+  fi
+  if [[ " ${QTWEBENGINE_CHROMIUM_FLAGS:-} " == *" --disable-gpu "* ]]; then
+    return 0
+  fi
+
+  if probe_gpu_context_available; then
+    echo "GPU context probe succeeded."
+    return 1
+  fi
+
+  echo "GPU context probe failed; enabling software rendering fallback."
+  return 0
 }
 
 TARGET_PATH=""
@@ -405,6 +460,10 @@ fi
 
 if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
   trim_log_file_inplace "${LOG_FILE}" "${MAX_LOG_LINES}"
+fi
+
+if should_force_software_rendering; then
+  configure_qt_graphics_fallback
 fi
 
 launch_mdexplore() {
