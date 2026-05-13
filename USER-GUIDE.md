@@ -257,11 +257,18 @@ Common patterns:
 ./hfind.sh --query "OR(fred, paul)" --content --recursive *.txt
 ./hfind.sh -q "AND('Fred',paul)" /path/to/dir/*.md
 ./hfind.sh -cv "'Nico '" "./**/*.md"
+./hfind.sh -rb "site" "./**/*"
 ./hfind.sh -rs "conflicted" "./**/*"
 ./hfind.sh -rS "conflicted" "./**/*"
 ```
 
 Use `hfind` when you do not need GUI preview/navigation.
+
+Matching target modes:
+
+- Default: query matches against each discovered path (directories + filename).
+- `-b` / `--base`: query matches basename only (filename + extension).
+- `-c` / `--content`: also evaluates file contents, while keeping path/base matching active.
 
 Sorting modes:
 

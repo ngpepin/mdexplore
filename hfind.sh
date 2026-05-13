@@ -9,4 +9,7 @@ while [[ -L "${SOURCE_PATH}" ]]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "${SOURCE_PATH}")" && pwd)"
 
+# Default to a high worker count for hfind unless caller already set one.
+export HFIND_SEARCH_THREADS="${HFIND_SEARCH_THREADS:-35}"
+
 exec python3 "$SCRIPT_DIR/hfind.py" "$@"

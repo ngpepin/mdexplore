@@ -222,19 +222,21 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
 
-- `--content` / `-c` is optional (default is filename-only search).
+- `--content` / `-c` is optional.
 - `--recursive` / `-r` is optional.
+- Default filename/query matching target is full discovered path (directories + filename).
+- `--base` / `-b` switches query matching target to basename only (filename + extension).
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
 - Default output is progressive: matches print as they are found.
@@ -254,7 +256,7 @@ Notes:
   - Exception: this boundary rule applies only to a single leading/trailing space. Terms like `'  Nico'` or `'Nico  '` require those two literal spaces.
 - Short flags are stackable in any order (for example `-cr`, `-rc`).
 - If `-q` / `--query` is omitted, the first positional string is treated as the query.
-- Filename-only mode checks the full filename (including extension, no path).
+- Base mode checks basename only (including extension, no path).
 
 Examples:
 
@@ -262,7 +264,7 @@ Examples:
 ./hfind.sh --query "OR(fred, paul)" --content --recursive *.txt
 ```
 
-Recursively searches from current directory for readable `.txt` files whose filename or content contains (case-insensitive) `fred` or `paul`.
+Recursively searches from current directory for readable `.txt` files whose path or content contains (case-insensitive) `fred` or `paul`.
 
 ```bash
 ./hfind.sh -q "OR(fred, paul)" -cr *.txt
@@ -280,7 +282,7 @@ All above are valid shorthand forms.
 ./hfind.sh -rS "conflicted" "./**/*"
 ```
 
-Shows the two sort modes over recursive filename matches:
+Shows the two sort modes over recursive path matches:
 - `-rs` sorts case-insensitively.
 - `-rS` sorts case-sensitively.
 
@@ -288,13 +290,19 @@ Shows the two sort modes over recursive filename matches:
 ./hfind.sh --query "OR(fred, paul)" *.txt
 ```
 
-Searches filenames only (current directory, non-recursive).
+Searches discovered paths only (current directory, non-recursive).
+
+```bash
+./hfind.sh -rb "site" "./**/*"
+```
+
+Recursively searches using basename-only matching (legacy filename behavior).
 
 ```bash
 ./hfind.sh -q "AND('Fred',paul)" /path/to/directory/*.md
 ```
 
-Searches markdown filenames in `/path/to/directory/` (non-recursive) where query requires case-sensitive `Fred` and case-insensitive `paul`.
+Searches discovered paths in `/path/to/directory/` (non-recursive) where query requires case-sensitive `Fred` and case-insensitive `paul`.
 
 ```bash
 ./hfind.sh -rc "NEAR(\"Fred is my friend\", \"is a nice guy\")" "/path/to my/directory/*.md"

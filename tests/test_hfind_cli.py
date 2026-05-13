@@ -50,7 +50,7 @@ class HfindCliTests(unittest.TestCase):
         ]
         return code, stdout_lines, stderr_lines
 
-    def test_default_filename_only_search_ignores_content(self) -> None:
+    def test_default_path_search_ignores_content(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-filename-only-") as tmpdir:
             root = Path(tmpdir)
             (root / "paul_notes.txt").write_text("nothing special\n", encoding="utf-8")
@@ -69,6 +69,63 @@ class HfindCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual([self._strip_ansi(line) for line in lines], ["paul_notes.txt"])
+
+    def test_default_search_matches_directory_path_components(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-default-path-target-") as tmpdir:
+            root = Path(tmpdir)
+            nested = root / "project" / "logs"
+            nested.mkdir(parents=True, exist_ok=True)
+            source = nested / "inside.txt"
+            source.write_text("no content term\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code, lines = self._run_main([
+                    "-r",
+                    "project",
+                    "*.txt",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(Path("project") / "logs" / "inside.txt")],
+            )
+
+    def test_base_switch_limits_search_target_to_basename(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-base-switch-") as tmpdir:
+            root = Path(tmpdir)
+            nested = root / "project" / "logs"
+            nested.mkdir(parents=True, exist_ok=True)
+            source = nested / "inside.txt"
+            source.write_text("no content term\n", encoding="utf-8")
+
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                code_project, lines_project = self._run_main([
+                    "-rb",
+                    "project",
+                    "*.txt",
+                ])
+                code_inside, lines_inside = self._run_main([
+                    "-rb",
+                    "inside",
+                    "*.txt",
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code_project, 1)
+            self.assertEqual(lines_project, [])
+            self.assertEqual(code_inside, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines_inside],
+                [str(Path("project") / "logs" / "inside.txt")],
+            )
 
     def test_recursive_content_search_with_stackable_short_flags(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-recursive-content-") as tmpdir:

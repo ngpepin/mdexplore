@@ -23,14 +23,15 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--content] [--recursive] [--verbose] [--pdf] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-c] [-r] [-v] [-p] [-s|-S] [PATTERN ...]
-    hfind.py -crvps QUERY [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-s|-S] [PATTERN ...]
+    hfind.py -bcrvps QUERY [PATTERN ...]
 
 Notes:
   - If -q/--query is omitted, the first positional argument is used as QUERY.
     - If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
-  - Default search checks filename (including extension, no path).
+    - Default search checks the full discovered path (directories + filename).
+    - --base/-b switches matching target to basename only (filename + extension).
   - --content/-c includes file contents in matching.
   - --recursive/-r expands each pattern recursively under its base directory.
     - --verbose/-v lists matching lines under each matched file with yellow hits.
@@ -39,8 +40,11 @@ Notes:
     - --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
 
 Examples:
-    # Filename-only search (default): stem contains fred OR paul
+    # Path search (default): path contains fred OR paul
     hfind.py --query "OR(fred, paul)" *.txt
+
+    # Basename-only search (legacy behavior)
+    hfind.py -b --query "OR(fred, paul)" *.txt
 
     # Recursive content search with stacked flags
     hfind.py -cr "AND(product, roadmap)" "docs/*.md"
@@ -99,12 +103,13 @@ def _style_filepath(path: Path) -> str:
 
 def _parse_args(
     argv: list[str],
-) -> tuple[str, bool, bool, bool, bool, bool, bool, list[str]]:
+) -> tuple[str, bool, bool, bool, bool, bool, bool, bool, list[str]]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
 
     query: str | None = None
     include_content = False
+    search_base_only = False
     recursive = False
     verbose = False
     include_pdf = False
@@ -129,6 +134,10 @@ def _parse_args(
             continue
         if arg == "--content":
             include_content = True
+            i += 1
+            continue
+        if arg == "--base":
+            search_base_only = True
             i += 1
             continue
         if arg == "--recursive":
@@ -159,6 +168,9 @@ def _parse_args(
             for flag in arg[1:]:
                 if flag == "c":
                     include_content = True
+                    continue
+                if flag == "b":
+                    search_base_only = True
                     continue
                 if flag == "r":
                     recursive = True
@@ -201,6 +213,7 @@ def _parse_args(
     return (
         query,
         include_content,
+        search_base_only,
         recursive,
         verbose,
         include_pdf,
@@ -580,11 +593,12 @@ def _scan_candidate_for_query(
     predicate,
     *,
     include_content: bool,
+    search_base_only: bool,
     include_pdf: bool,
 ) -> tuple[Path, str, bool]:
     """Read one candidate and evaluate query match state."""
     is_pdf = path.suffix.lower() == ".pdf"
-    file_name = path.name
+    search_target = path.name if search_base_only else str(path)
     content = ""
 
     if include_content:
@@ -611,7 +625,7 @@ def _scan_candidate_for_query(
         preserve_line_structure=False,
     )
     try:
-        matched = bool(predicate(file_name, searchable_content))
+        matched = bool(predicate(search_target, searchable_content))
     except Exception:
         matched = False
     return path, content, matched
@@ -622,6 +636,7 @@ def main(argv: list[str]) -> int:
         (
             query,
             include_content,
+            search_base_only,
             recursive,
             verbose,
             include_pdf,
@@ -669,6 +684,7 @@ def main(argv: list[str]) -> int:
                     candidate_path,
                     predicate,
                     include_content=include_content,
+                    search_base_only=search_base_only,
                     include_pdf=include_pdf,
                 )
                 if not matched:
@@ -694,6 +710,7 @@ def main(argv: list[str]) -> int:
                                 path,
                                 predicate,
                                 include_content=include_content,
+                                search_base_only=search_base_only,
                                 include_pdf=include_pdf,
                             )
                         )
