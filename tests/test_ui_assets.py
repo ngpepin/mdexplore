@@ -18,6 +18,7 @@ UI_ASSET_FILENAMES = (
     "refresh.png",
     "refresh.svg",
     "search-hit.svg",
+    "symlink.png",
     "views.svg",
     "views2.svg",
 )

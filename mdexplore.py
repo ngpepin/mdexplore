@@ -274,6 +274,8 @@ class MarkdownRenderer:
             self._mermaid_backend = MERMAID_BACKEND_RUST
         else:
             self._mermaid_backend = MERMAID_BACKEND_JS
+        self._mermaid_rs_status_text: str | None = None
+        self._mermaid_rs_status_text_resolved = False
         self._mermaid_svg_cache: dict[str, str] = {}
         self._last_mermaid_pdf_svg_by_hash: dict[str, str] = {}
         self._mathjax_local_script = self._resolve_local_mathjax_script()
@@ -620,6 +622,17 @@ class MarkdownRenderer:
             return self._mermaid_rs_setup_issue or "Rust Mermaid backend unavailable"
         return None
 
+    def mermaid_runtime_status_text(self) -> str | None:
+        """Return a short status-bar label for the active Mermaid runtime."""
+        if self._mermaid_backend != MERMAID_BACKEND_RUST:
+            return None
+        if self._mermaid_rs_status_text_resolved:
+            return self._mermaid_rs_status_text
+
+        self._mermaid_rs_status_text = self._resolve_mermaid_rs_status_text()
+        self._mermaid_rs_status_text_resolved = True
+        return self._mermaid_rs_status_text
+
     def _resolve_mermaid_rs_binary(self) -> Path | None:
         """Locate mmdr executable for Rust Mermaid rendering."""
         env_value = os.environ.get("MDEXPLORE_MERMAID_RS_BIN", "").strip()
@@ -668,6 +681,47 @@ class MarkdownRenderer:
                 "(set MDEXPLORE_MERMAID_RS_BIN or install mermaid-rs-renderer)"
             )
         return None
+
+    def _resolve_mermaid_rs_status_text(self) -> str | None:
+        """Return a concise mmdr status string for the status bar."""
+        if self._mermaid_rs_binary is None:
+            return None
+
+        commands = (
+            [str(self._mermaid_rs_binary), "--version"],
+            [str(self._mermaid_rs_binary), "-V"],
+            [str(self._mermaid_rs_binary), "version"],
+        )
+        version_pattern = re.compile(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b")
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:
+                continue
+
+            version_output = (
+                (result.stdout or "") + "\n" + (result.stderr or "")
+            ).strip()
+            if not version_output:
+                continue
+
+            match = version_pattern.search(version_output)
+            if match:
+                return f"mmdr {match.group(0)}"
+
+            first_line = version_output.splitlines()[0].strip()
+            if first_line:
+                if first_line.lower().startswith("mmdr"):
+                    return first_line
+                return f"mmdr {first_line}"
+
+        return "mmdr"
 
     def _render_mermaid_svg_markup(
         self, code: str, render_profile: str = "preview"
@@ -1260,6 +1314,7 @@ class PreviewPage(QWebEnginePage):
     """Handle preview-side custom navigation actions emitted by injected JS."""
 
     namedViewRequested = Signal(int)
+    relativeMarkdownLinkRequested = Signal(str)
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # type: ignore[override]
         if isinstance(url, QUrl) and url.scheme() == "mdexplore":
@@ -1273,6 +1328,22 @@ class PreviewPage(QWebEnginePage):
                         0,
                         lambda requested_view_id=view_id: self.namedViewRequested.emit(
                             requested_view_id
+                        ),
+                    )
+                return False
+            if url.host() == "open-relative":
+                encoded_target = str(url.path() or "").lstrip("/")
+                if not encoded_target:
+                    return False
+                try:
+                    requested_target = urllib.parse.unquote(encoded_target)
+                except Exception:
+                    requested_target = encoded_target
+                if requested_target:
+                    QTimer.singleShot(
+                        0,
+                        lambda raw_target=requested_target: self.relativeMarkdownLinkRequested.emit(
+                            raw_target
                         ),
                     )
                 return False
@@ -1344,6 +1415,7 @@ class MdExploreWindow(QMainWindow):
         self._recent_root_directories = self._load_recent_root_directories_from_config()
         self._recent_active_root: Path = self.root
         self._recent_root_entered_at = time.monotonic()
+        self._session_top_visited_root: Path = self.root
         self._copy_base64_images_enabled = self._load_copy_base64_toggle_from_config()
         self._preview_profile_instance_id: str | None = None
         self._preview_profile_cache_dir: Path | None = None
@@ -1434,6 +1506,10 @@ class MdExploreWindow(QMainWindow):
         self._pdf_export_in_progress = False
         self._pdf_export_source_key: str | None = None
         self._preview_load_in_progress = False
+        # One-step document back-navigation state.
+        self._previous_document_path: Path | None = None
+        self._last_opened_document_path: Path | None = None
+        self._pending_back_navigation_target_key: str | None = None
         self._pdf_diagram_ready_by_key: dict[str, bool] = {}
         self._pdf_diagram_settle_deadline_by_key: dict[str, float] = {}
         self._pdf_diagram_probe_expected_key: str | None = None
@@ -1662,6 +1738,9 @@ class MdExploreWindow(QMainWindow):
         self._preview_page.namedViewRequested.connect(
             self._on_preview_named_view_requested
         )
+        self._preview_page.relativeMarkdownLinkRequested.connect(
+            self._on_preview_relative_markdown_link_requested
+        )
 
         self.view_tabs = ViewTabBar()
         self.view_tabs.setDocumentMode(True)
@@ -1703,6 +1782,14 @@ class MdExploreWindow(QMainWindow):
         self.up_btn = QPushButton("^")
         self._apply_compact_toolbar_button_width(self.up_btn, horizontal_padding_px=10)
         self.up_btn.clicked.connect(self._go_up_directory)
+
+        self.back_btn = QPushButton("<")
+        self._apply_compact_toolbar_button_width(self.back_btn, horizontal_padding_px=10)
+        self.back_btn.setToolTip(
+            "Open the previous markdown document once (single-step back)"
+        )
+        self.back_btn.clicked.connect(self._go_back_document)
+        self.back_btn.setEnabled(False)
 
         refresh_btn = QPushButton("Refresh")
         self._apply_compact_toolbar_button_width(refresh_btn, horizontal_padding_px=12)
@@ -1844,6 +1931,7 @@ class MdExploreWindow(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.addWidget(self.recent_btn)
+        top_bar.addWidget(self.back_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
         top_bar.addWidget(self.pdf_btn)
@@ -1928,6 +2016,16 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay.hide()
         self._position_restore_overlay()
         self.statusBar().showMessage(self._default_status_text)
+        self._mermaid_runtime_status_label = QLabel(
+            self.renderer.mermaid_runtime_status_text() or ""
+        )
+        self._mermaid_runtime_status_label.setStyleSheet(
+            "color: rgba(156, 163, 175, 0.45);"
+        )
+        self._mermaid_runtime_status_label.setVisible(
+            bool(self._mermaid_runtime_status_label.text())
+        )
+        self.statusBar().addPermanentWidget(self._mermaid_runtime_status_label)
         self._gpu_status_label = QLabel("GPU")
         self._gpu_status_label.setStyleSheet("color: rgba(156, 163, 175, 0.45);")
         self._gpu_status_label.setVisible(self._gpu_context_available)
@@ -4440,6 +4538,171 @@ class MdExploreWindow(QMainWindow):
         )
         self._on_preview_named_view_requested(view_id)
 
+    def _resolve_relative_markdown_link_target(self, raw_target: str) -> Path | None:
+        """Resolve one clicked relative markdown link against current document."""
+        if self.current_file is None:
+            return None
+
+        cleaned_target = self._strip_markdown_link_wrappers(raw_target)
+        if not cleaned_target:
+            return None
+
+        parsed_target = urllib.parse.urlsplit(cleaned_target)
+        if parsed_target.scheme or parsed_target.netloc:
+            return None
+
+        encoded_path = str(parsed_target.path or "").strip()
+        if not encoded_path:
+            return None
+
+        try:
+            relative_path_text = urllib.parse.unquote(encoded_path)
+        except Exception:
+            relative_path_text = encoded_path
+        relative_path_text = relative_path_text.strip()
+        if not relative_path_text:
+            return None
+
+        if Path(relative_path_text).is_absolute():
+            return None
+        if re.match(r"^[A-Za-z]:[\\/]", relative_path_text):
+            return None
+
+        resolved_target = self._safe_resolve(
+            self.current_file.parent / Path(relative_path_text)
+        )
+        if (
+            not self._safe_is_file(resolved_target)
+            or resolved_target.suffix.lower() != ".md"
+        ):
+            return None
+        return resolved_target
+
+    def _expand_directory_path_in_tree(self, directory: Path) -> None:
+        """Expand all visible tree ancestors from current root to one directory."""
+        if not self._safe_is_dir(directory):
+            return
+
+        root_key = self._path_key(self.root)
+        target_key = self._path_key(directory)
+        if target_key != root_key and not target_key.startswith(root_key + os.sep):
+            return
+
+        chain: list[Path] = []
+        cursor = directory
+        while self._path_key(cursor) != root_key:
+            parent = cursor.parent
+            if parent == cursor:
+                return
+            chain.append(cursor)
+            cursor = parent
+        chain.reverse()
+
+        self._suspend_directory_open_on_expand = True
+        try:
+            for part in chain:
+                index = self.model.index(str(part))
+                if index.isValid():
+                    self.tree.expand(index)
+        finally:
+            self._suspend_directory_open_on_expand = False
+
+    def _select_tree_markdown_path_with_retry(
+        self,
+        target_path: Path,
+        attempts_left: int = 40,
+        show_loading_placeholder: bool = True,
+    ) -> None:
+        """Select one markdown path once model indexes become available."""
+        resolved_target = self._safe_resolve(target_path)
+        if show_loading_placeholder:
+            target_key = self._path_key(resolved_target)
+            if self._current_preview_path_key() != target_key:
+                try:
+                    pending_base_url = QUrl.fromLocalFile(
+                        f"{resolved_target.parent.resolve()}/"
+                    )
+                except Exception:
+                    pending_base_url = QUrl.fromLocalFile(f"{self.root}/")
+                self._set_preview_html(
+                    self._placeholder_html(
+                        f"Preparing markdown preview for {resolved_target.name}..."
+                    ),
+                    pending_base_url,
+                )
+        index = self.model.index(str(resolved_target))
+        if index.isValid():
+            self.tree.setCurrentIndex(index)
+            self.tree.scrollTo(index, QTreeView.ScrollHint.PositionAtCenter)
+            # Selection changes normally trigger preview loading via
+            # _on_tree_selection_changed(). In some model-transition edge
+            # cases that signal may not fire; ensure the target preview opens.
+            if self._current_preview_path_key() != self._path_key(resolved_target):
+                self.last_directory_selection = self._safe_resolve(resolved_target.parent)
+                self._update_window_title()
+                self.statusBar().showMessage(
+                    f"Loading preview: {resolved_target.name}...",
+                    2500,
+                )
+                self._load_preview(resolved_target)
+                QTimer.singleShot(0, self._rerun_active_search_for_scope)
+            return
+
+        if attempts_left <= 0:
+            if self._pending_back_navigation_target_key == self._path_key(
+                resolved_target
+            ):
+                self._pending_back_navigation_target_key = None
+            if (
+                self._safe_is_file(resolved_target)
+                and resolved_target.suffix.lower() == ".md"
+            ):
+                # Avoid dropped navigation when QFileSystemModel indexing lags.
+                self.last_directory_selection = self._safe_resolve(
+                    resolved_target.parent
+                )
+                self._update_window_title()
+                self.statusBar().showMessage(
+                    f"Loading preview without tree selection: {resolved_target.name}...",
+                    2500,
+                )
+                self._load_preview(resolved_target)
+                QTimer.singleShot(0, self._rerun_active_search_for_scope)
+                return
+            self.statusBar().showMessage(
+                f"Linked markdown path is unavailable in tree: {resolved_target}",
+                3500,
+            )
+            return
+
+        QTimer.singleShot(
+            70,
+            lambda path=resolved_target, remaining=attempts_left
+            - 1: self._select_tree_markdown_path_with_retry(
+                path,
+                remaining,
+                show_loading_placeholder=False,
+            ),
+        )
+
+    def _on_preview_relative_markdown_link_requested(self, raw_target: str) -> None:
+        """Open one clicked relative markdown link in-tree like normal selection."""
+        target_path = self._resolve_relative_markdown_link_target(raw_target)
+        if target_path is None:
+            return
+
+        target_key = self._path_key(target_path)
+        target_directory = target_path.parent
+        if not self._is_path_key_under_root(target_key):
+            self._set_root_directory(
+                target_directory,
+                pending_preview_target=target_path,
+            )
+
+        self._expand_directory_path_in_tree(target_directory)
+        self.statusBar().showMessage(f"Opening linked markdown: {target_path.name}...", 2500)
+        self._select_tree_markdown_path_with_retry(target_path)
+
     def _poll_preview_actions(self) -> None:
         """Poll one-shot preview actions requested by injected marker scripts."""
         if self.current_file is None or self._preview_load_in_progress:
@@ -6054,6 +6317,7 @@ class MdExploreWindow(QMainWindow):
             target_root = next_root.resolve()
         except Exception:
             target_root = next_root
+        self._update_session_top_visited_root(target_root)
         now = time.monotonic()
         previous_root = getattr(self, "_recent_active_root", None)
         previous_entered_at = float(getattr(self, "_recent_root_entered_at", now) or now)
@@ -6063,6 +6327,48 @@ class MdExploreWindow(QMainWindow):
                 self._commit_recent_root_from_departure(previous_root, elapsed)
         self._recent_active_root = target_root
         self._recent_root_entered_at = now
+
+    def _update_session_top_visited_root(self, candidate_root: Path) -> None:
+        """Keep a running top-most (common ancestor) root visited this session."""
+        candidate = self._safe_resolve(candidate_root)
+        current = getattr(self, "_session_top_visited_root", None)
+        if not isinstance(current, Path):
+            self._session_top_visited_root = candidate
+            return
+
+        current_key = self._path_key(current)
+        candidate_key = self._path_key(candidate)
+        if not current_key:
+            self._session_top_visited_root = candidate
+            return
+        if candidate_key == current_key or candidate_key.startswith(current_key + os.sep):
+            return
+        if current_key.startswith(candidate_key + os.sep):
+            self._session_top_visited_root = candidate
+            return
+
+        try:
+            common_key = os.path.commonpath([current_key, candidate_key])
+        except Exception:
+            return
+        if not common_key:
+            return
+        self._session_top_visited_root = self._safe_resolve(Path(common_key))
+
+    def _session_top_scope_root(self) -> Path:
+        """Return top-most root visited during this app session."""
+        candidate = getattr(self, "_session_top_visited_root", None)
+        if isinstance(candidate, Path):
+            return candidate
+        return self.root
+
+    def _is_path_within_session_top_scope(self, path: Path) -> bool:
+        """Return whether path is within the top-most root visited this session."""
+        scope_root = self._session_top_scope_root()
+        return self._is_path_key_under_root(
+            self._path_key(path),
+            root_key=self._path_key(scope_root),
+        )
 
     def _refresh_recent_root_menu(self) -> None:
         """Rebuild the Recent button dropdown actions from in-memory state."""
@@ -6141,8 +6447,12 @@ class MdExploreWindow(QMainWindow):
             return
         self._set_root_directory(target)
 
-    def _set_root_directory(self, new_root: Path) -> None:
-        """Re-root the tree view and reset file preview state."""
+    def _set_root_directory(
+        self,
+        new_root: Path,
+        pending_preview_target: Path | None = None,
+    ) -> None:
+        """Re-root tree view and reset preview state, with optional pending target."""
         self._stop_restore_overlay_monitor()
         self._stop_pdf_diagram_readiness_monitor()
         self._capture_current_preview_scroll(force=True)
@@ -6153,6 +6463,7 @@ class MdExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         self.last_directory_selection = self.root
         self.current_file = None
+        self._update_back_button_state()
         self._preview_load_in_progress = False
         self._pdf_diagram_settle_deadline_by_key.clear()
         self._current_document_total_lines = 1
@@ -6169,10 +6480,26 @@ class MdExploreWindow(QMainWindow):
         self._invalidate_visible_tree_markdown_cache()
         self.path_label.setText("Select a markdown file")
         self.path_label.setToolTip("Select a markdown file")
-        self._set_preview_html(
-            self._placeholder_html("Select a markdown file to preview"),
-            QUrl.fromLocalFile(f"{self.root}/"),
-        )
+        if isinstance(pending_preview_target, Path):
+            resolved_pending_target = self._safe_resolve(pending_preview_target)
+            try:
+                pending_base_url = QUrl.fromLocalFile(
+                    f"{resolved_pending_target.parent.resolve()}/"
+                )
+            except Exception:
+                pending_base_url = QUrl.fromLocalFile(f"{self.root}/")
+            pending_message = (
+                f"Preparing markdown preview for {resolved_pending_target.name}..."
+            )
+            self._set_preview_html(
+                self._placeholder_html(pending_message),
+                pending_base_url,
+            )
+        else:
+            self._set_preview_html(
+                self._placeholder_html("Select a markdown file to preview"),
+                QUrl.fromLocalFile(f"{self.root}/"),
+            )
         self._initial_split_applied = False
         self._update_up_button_state()
         self._update_window_title()
@@ -6320,6 +6647,67 @@ class MdExploreWindow(QMainWindow):
 
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
+
+    def _has_available_previous_document(self) -> bool:
+        """Return whether one valid previous markdown target can be opened."""
+        previous_path = self._previous_document_path
+        if previous_path is None:
+            return False
+        resolved_previous = self._safe_resolve(previous_path)
+        if (
+            not self._safe_is_file(resolved_previous)
+            or resolved_previous.suffix.lower() != ".md"
+        ):
+            return False
+        if self.current_file is None:
+            return True
+        return self._path_key(resolved_previous) != self._current_preview_path_key()
+
+    def _update_back_button_state(self) -> None:
+        """Enable Back only when one previous document is available."""
+        if not hasattr(self, "back_btn"):
+            return
+        self.back_btn.setEnabled(self._has_available_previous_document())
+
+    def _set_previous_document_path(self, path: Path | None) -> None:
+        """Store one previous markdown path and refresh Back button state."""
+        self._previous_document_path = (
+            self._safe_resolve(path) if isinstance(path, Path) else None
+        )
+        self._update_back_button_state()
+
+    def _go_back_document(self) -> None:
+        """Open the previously viewed markdown document once, then disable."""
+        if not self._has_available_previous_document():
+            self._set_previous_document_path(None)
+            return
+
+        target_path = self._safe_resolve(self._previous_document_path)
+        # Consume one-step history immediately so this cannot chain backwards.
+        self._set_previous_document_path(None)
+
+        if (
+            not self._safe_is_file(target_path)
+            or target_path.suffix.lower() != ".md"
+        ):
+            self.statusBar().showMessage("Previous document is unavailable", 3500)
+            return
+
+        target_key = self._path_key(target_path)
+        self._pending_back_navigation_target_key = target_key
+        target_directory = target_path.parent
+        if not self._is_path_key_under_root(target_key):
+            self._set_root_directory(
+                target_directory,
+                pending_preview_target=target_path,
+            )
+
+        self._expand_directory_path_in_tree(target_directory)
+        self.statusBar().showMessage(
+            f"Navigating back to: {target_path.name}...",
+            2500,
+        )
+        self._select_tree_markdown_path_with_retry(target_path)
 
     def _go_up_directory(self) -> None:
         """Navigate one level up from the current root."""
@@ -10006,6 +10394,45 @@ class MdExploreWindow(QMainWindow):
             4000,
         )
 
+    def _resolve_markdown_symlink_target(self, path: Path) -> Path | None:
+        """Resolve one markdown symlink path to its target markdown file."""
+        if not self._safe_is_file(path) or path.suffix.lower() != ".md":
+            return None
+        try:
+            if not path.is_symlink():
+                return None
+        except OSError:
+            return None
+
+        target = self._safe_resolve(path)
+        if not self._safe_is_file(target) or target.suffix.lower() != ".md":
+            return None
+        return target
+
+    def _maybe_follow_markdown_symlink_selection(self, path: Path) -> bool:
+        """Redirect one selected markdown symlink row to its target file when allowed."""
+        target_path = self._resolve_markdown_symlink_target(path)
+        if target_path is None:
+            return False
+        if not self._is_path_within_session_top_scope(target_path):
+            return False
+
+        target_directory = target_path.parent
+        target_key = self._path_key(target_path)
+        if not self._is_path_key_under_root(target_key):
+            self._set_root_directory(
+                target_directory,
+                pending_preview_target=target_path,
+            )
+
+        self._expand_directory_path_in_tree(target_directory)
+        self.statusBar().showMessage(
+            f"Opening symlink target: {target_path.name}...",
+            2500,
+        )
+        self._select_tree_markdown_path_with_retry(target_path)
+        return True
+
     def _on_tree_selection_changed(self, current, _previous) -> None:
         # Any selection transition means the user is leaving the previous
         # document/scope, so immediately clear restore UI state.
@@ -10049,6 +10476,8 @@ class MdExploreWindow(QMainWindow):
             self._rerun_active_search_for_scope()
             return
         if not self._safe_is_file(path) or path.suffix.lower() != ".md":
+            return
+        if self._maybe_follow_markdown_symlink_selection(path):
             return
         self.statusBar().showMessage(f"Loading preview: {path.name}...")
         self._load_preview(path)
@@ -10749,6 +11178,19 @@ class MdExploreWindow(QMainWindow):
         self._stop_restore_overlay_monitor()
         previous_path_key = self._current_preview_path_key()
         next_path_key = self._path_key(path)
+        is_back_navigation = self._pending_back_navigation_target_key == next_path_key
+        if is_back_navigation:
+            self._pending_back_navigation_target_key = None
+            self._set_previous_document_path(None)
+        else:
+            if self._pending_back_navigation_target_key is not None:
+                # A different navigation completed before the pending back target.
+                self._pending_back_navigation_target_key = None
+            if isinstance(self._last_opened_document_path, Path):
+                resolved_last_opened = self._safe_resolve(self._last_opened_document_path)
+                if self._path_key(resolved_last_opened) != next_path_key:
+                    self._set_previous_document_path(resolved_last_opened)
+        self._last_opened_document_path = self._safe_resolve(path)
         if previous_path_key != next_path_key:
             # Abort stale inline image hydration work immediately so a new
             # document can reach first paint with placeholders without waiting
@@ -10797,6 +11239,7 @@ class MdExploreWindow(QMainWindow):
         self._stop_pdf_diagram_readiness_monitor()
 
         self.current_file = path
+        self._update_back_button_state()
         self._update_pdf_button_state()
         self._current_preview_text_highlights = self._load_text_highlights_for_path_key(
             next_path_key
@@ -10822,6 +11265,13 @@ class MdExploreWindow(QMainWindow):
             base_url = QUrl.fromLocalFile(f"{path.parent.resolve()}/")
         except Exception:
             base_url = QUrl.fromLocalFile(f"{self.root}/")
+
+        self._set_preview_html(
+            self._placeholder_html(
+                f"Rendering markdown preview for {path.name}..."
+            ),
+            base_url,
+        )
 
         try:
             resolved = path.resolve()

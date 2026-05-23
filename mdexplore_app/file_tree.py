@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
-from .icons import load_svg_icon
+from .icons import load_svg_icon, ui_asset_path
 from .runtime import search_hit_count_font_family
 
 
@@ -39,6 +39,7 @@ class ColorizedExtensionModel(QFileSystemModel):
     PRIMARY_ICON_COLOR = "#bcc5d1"
     VIEWS_ICON_COLOR = "#e3e7ee"
     MARKER_ICON_COLOR = "#c8b4f6"
+    SYMLINK_ICON_COLOR = "#a8bcc8"
     _ICON_SIZE = 16
     _ICON_GAP = 2
     _VIEWS_ICON_SIZE = 12
@@ -64,9 +65,10 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._effective_scope_root_key: str | None = None
         self._out_of_scope_background_enabled = False
         self._primary_icon = self._load_primary_icon()
+        self._symlink_icon = self._load_symlink_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
-        self._decorated_icon_cache: dict[tuple[bool, bool, str], QIcon] = {}
+        self._decorated_icon_cache: dict[tuple[object, ...], QIcon] = {}
 
     def _load_primary_icon(self) -> QIcon:
         icon_name = str(self.PRIMARY_ICON_NAME or "").strip()
@@ -78,6 +80,43 @@ class ColorizedExtensionModel(QFileSystemModel):
 
     def _fallback_primary_icon(self) -> QIcon:
         return QIcon()
+
+    def _load_symlink_icon(self) -> QIcon:
+        """Load dedicated icon used for target-extension symlink rows."""
+        try:
+            icon_path = ui_asset_path("symlink.png")
+            if icon_path.is_file():
+                pixmap = QPixmap(str(icon_path))
+                if pixmap.isNull():
+                    return self._fallback_primary_icon()
+                tint = QColor(self.SYMLINK_ICON_COLOR)
+                if not tint.isValid():
+                    tint = QColor("#a8bcc8")
+                tinted = QPixmap(pixmap.size())
+                tinted.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(tinted)
+                painter.drawPixmap(0, 0, pixmap)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                painter.fillRect(tinted.rect(), tint)
+                painter.end()
+                icon = QIcon(tinted)
+                if not icon.isNull():
+                    return icon
+        except Exception:
+            pass
+        return self._fallback_primary_icon()
+
+    def supports_symlink_primary_icon(self) -> bool:
+        """Return whether symlink target files should use dedicated icon state."""
+        return False
+
+    @staticmethod
+    def _is_symlink_path(path: Path) -> bool:
+        """Return whether one path is a symlink, swallowing filesystem errors."""
+        try:
+            return path.is_symlink()
+        except OSError:
+            return False
 
     @classmethod
     def _normalized_target_extension(cls) -> str:
@@ -101,8 +140,13 @@ class ColorizedExtensionModel(QFileSystemModel):
         if role == Qt.ItemDataRole.DecorationRole:
             info = self.fileInfo(index)
             if self.matches_file_info(info):
-                path_key = self._path_key(Path(info.filePath()))
+                file_path = Path(info.filePath())
+                path_key = self._path_key(file_path)
                 search_hit_count = self._search_match_counts.get(path_key, 0)
+                if self.supports_symlink_primary_icon() and self._is_symlink_path(
+                    file_path
+                ):
+                    return self._decorated_symlink_icon(search_hit_count)
                 has_multi_view = path_key in self._multi_view_paths
                 has_persistent_highlight = path_key in self._highlighted_preview_paths
                 return self._decorated_primary_icon(
@@ -498,8 +542,18 @@ class ColorizedExtensionModel(QFileSystemModel):
         info = self.fileInfo(index)
         if not self.matches_file_info(info):
             return QSize(self._ICON_SIZE, self._ICON_SIZE)
-        path_key = self._path_key(Path(info.filePath()))
+        file_path = Path(info.filePath())
+        path_key = self._path_key(file_path)
         search_hit_count = self._search_match_counts.get(path_key, 0)
+        if self.supports_symlink_primary_icon() and self._is_symlink_path(file_path):
+            widths: list[int] = []
+            if self._search_count_display_text(search_hit_count):
+                widths.append(self._SEARCH_SLOT_WIDTH)
+            widths.append(self._ICON_SIZE)
+            return QSize(
+                sum(widths) + (self._ICON_GAP * max(0, len(widths) - 1)),
+                self._ICON_SIZE,
+            )
         has_multi_view = path_key in self._multi_view_paths
         has_persistent_highlight = path_key in self._highlighted_preview_paths
         return self.decoration_size_for_state(
@@ -513,7 +567,12 @@ class ColorizedExtensionModel(QFileSystemModel):
         search_hit_count: int,
     ) -> QIcon:
         search_count_text = self._search_count_display_text(search_hit_count)
-        cache_key = (has_multi_view, has_persistent_highlight, search_count_text)
+        cache_key = (
+            "primary",
+            has_multi_view,
+            has_persistent_highlight,
+            search_count_text,
+        )
         cached = self._decorated_icon_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -632,6 +691,122 @@ class ColorizedExtensionModel(QFileSystemModel):
 
         if not self._primary_icon.isNull():
             icon_pixmap = self._primary_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
+            painter.drawPixmap(cursor_x, 0, icon_pixmap)
+        painter.end()
+
+        decorated = QIcon(canvas)
+        self._decorated_icon_cache[cache_key] = decorated
+        return decorated
+
+    def _decorated_symlink_icon(self, search_hit_count: int) -> QIcon:
+        """Return symlink-only decoration cluster with optional search-hit pill."""
+        search_count_text = self._search_count_display_text(search_hit_count)
+        cache_key = ("symlink", search_count_text)
+        cached = self._decorated_icon_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        widths: list[int] = []
+        if search_count_text:
+            widths.append(self._SEARCH_SLOT_WIDTH)
+        widths.append(self._ICON_SIZE)
+        cluster_width = sum(widths) + (self._ICON_GAP * max(0, len(widths) - 1))
+
+        total_width = self.max_decoration_width()
+        total_height = self._ICON_SIZE
+        canvas = QPixmap(total_width, total_height)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        cursor_x = max(0, total_width - cluster_width)
+        if search_count_text:
+            oversample = max(1, int(self._SEARCH_COUNT_OVERSAMPLE))
+            text_oversample = max(oversample, int(self._SEARCH_COUNT_TEXT_OVERSAMPLE))
+            slot_w = self._SEARCH_SLOT_WIDTH
+            slot_h = self._ICON_SIZE
+            hi_w = slot_w * oversample
+            hi_h = slot_h * oversample
+
+            count_canvas = QPixmap(hi_w, hi_h)
+            count_canvas.fill(Qt.GlobalColor.transparent)
+            count_painter = QPainter(count_canvas)
+            count_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            count_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            count_painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform, True
+            )
+            font = count_painter.font()
+            base_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
+            font.setFamily(search_hit_count_font_family())
+            font.setPointSizeF(max(6.5, base_size - 1.8) * oversample)
+            font.setBold(False)
+            count_painter.setFont(font)
+            metrics = QFontMetrics(font)
+            text_rect = metrics.boundingRect(search_count_text)
+            pill_padding_x = max(6 * oversample, int(metrics.height() * 0.42))
+            pill_padding_y = max(2 * oversample, int(metrics.height() * 0.12))
+            pill_width = min(
+                hi_w - (2 * oversample),
+                text_rect.width() + (2 * pill_padding_x),
+            )
+            pill_height = min(
+                hi_h - (2 * oversample),
+                text_rect.height() + (2 * pill_padding_y),
+            )
+            pill_x = max(0, (hi_w - pill_width) // 2)
+            pill_y = max(0, (hi_h - pill_height) // 2)
+            pill_rect = QRect(pill_x, pill_y, pill_width, pill_height)
+            radius = max(oversample, int(pill_height * 0.28))
+
+            count_painter.setPen(Qt.PenStyle.NoPen)
+            count_painter.setBrush(QColor("#f7e27a"))
+            count_painter.drawRoundedRect(pill_rect, radius, radius)
+            count_painter.end()
+
+            text_canvas = QPixmap(slot_w * text_oversample, slot_h * text_oversample)
+            text_canvas.fill(Qt.GlobalColor.transparent)
+            text_painter = QPainter(text_canvas)
+            text_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            text_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            text_painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform, True
+            )
+            text_font = text_painter.font()
+            text_base_size = (
+                text_font.pointSizeF() if text_font.pointSizeF() > 0 else 10.0
+            )
+            text_font.setFamily(search_hit_count_font_family())
+            text_font.setPointSizeF(max(6.5, text_base_size - 1.8) * text_oversample)
+            text_font.setBold(False)
+            text_painter.setFont(text_font)
+            text_painter.setPen(QPen(QColor("#111111")))
+            text_painter.drawText(
+                QRect(0, 0, slot_w * text_oversample, slot_h * text_oversample),
+                Qt.AlignmentFlag.AlignCenter,
+                search_count_text,
+            )
+            text_painter.end()
+
+            count_layer = count_canvas.scaled(
+                slot_w,
+                slot_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            text_layer = text_canvas.scaled(
+                slot_w,
+                slot_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(cursor_x, 0, count_layer)
+            painter.drawPixmap(cursor_x, 0, text_layer)
+            cursor_x += self._SEARCH_SLOT_WIDTH + self._ICON_GAP
+
+        if not self._symlink_icon.isNull():
+            icon_pixmap = self._symlink_icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
             painter.drawPixmap(cursor_x, 0, icon_pixmap)
         painter.end()
 

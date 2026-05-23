@@ -52,6 +52,13 @@ class TemplateAssetTests(unittest.TestCase):
         source = get_template_asset("preview/document.html")
         self.assertIn("window.__mdexploreLoadMathJaxScript", source)
 
+    def test_preview_template_routes_relative_markdown_links_through_custom_scheme(
+        self,
+    ) -> None:
+        source = get_template_asset("preview/document.html")
+        self.assertIn("isRelativeMarkdownHref", source)
+        self.assertIn("mdexplore://open-relative/", source)
+
     def test_markdown_renderer_uses_external_preview_template(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         rendered = renderer.render_document("# Heading", 'Doc "Title"')

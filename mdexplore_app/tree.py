@@ -19,6 +19,9 @@ class ColorizedMarkdownModel(ColorizedExtensionModel):
     def _fallback_primary_icon(self) -> QIcon:
         return build_markdown_icon()
 
+    def supports_symlink_primary_icon(self) -> bool:
+        return True
+
 
 class MarkdownTreeItemDelegate(ExtensionTreeItemDelegate):
     """Paint filename-only highlight backgrounds for markdown rows."""

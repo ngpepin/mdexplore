@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QSizePolicy
@@ -66,6 +67,36 @@ class WindowLayoutTests(unittest.TestCase):
         self.assertFalse(self.window._safe_is_dir(denied))
         self.assertFalse(self.window._safe_is_file(denied))
         self.assertIs(self.window._safe_resolve(denied), denied)
+
+    def test_status_bar_shows_mmdr_version_before_gpu(self) -> None:
+        self.window.close()
+        QApplication.processEvents()
+
+        with patch.object(
+            mdexplore.MarkdownRenderer,
+            "mermaid_runtime_status_text",
+            return_value="mmdr 0.2.2",
+        ):
+            self.window = mdexplore.MdExploreWindow(
+                root=Path(self._tempdir.name),
+                app_icon=QIcon(),
+                config_path=Path(self._tempdir.name) / ".mdexplore.cfg",
+                gpu_context_available=True,
+            )
+
+        self.window.show()
+        QApplication.processEvents()
+
+        status_widgets = [
+            widget.text()
+            for widget in self.window.statusBar().findChildren(mdexplore.QLabel)
+            if widget.text() in {"mmdr 0.2.2", "GPU"}
+        ]
+        self.assertEqual(status_widgets, ["mmdr 0.2.2", "GPU"])
+        self.assertEqual(
+            self.window._mermaid_runtime_status_label.styleSheet(),
+            self.window._gpu_status_label.styleSheet(),
+        )
 
 
 if __name__ == "__main__":
