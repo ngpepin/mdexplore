@@ -3,8 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from pdfexplore.app import PdfExploreWindow
@@ -275,6 +277,195 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertTrue(tabs)
         first_tab = tabs[0]
         self.assertEqual(first_tab.get("state", {}).get("page"), 6)
+
+    def test_single_view_scroll_state_restores_when_returning_to_document(self) -> None:
+        first_pdf = Path(self._tempdir.name) / "first.pdf"
+        second_pdf = Path(self._tempdir.name) / "second.pdf"
+        _create_pdf_with_text(first_pdf, "first")
+        _create_pdf_with_text(second_pdf, "second")
+
+        first_key = self.window._path_key(first_pdf)
+        first_preview = self.window._preview_widget_for_path(first_pdf)
+        first_preview.setUrl(self.window._viewer_url_for_pdf(first_pdf))
+        self.window._viewer_bridge_ready_by_path[first_key] = True
+
+        captured_sources: list[str] = []
+        first_state = {
+            "page": 4,
+            "pagesCount": 10,
+            "scale": "page-width",
+            "scrollTop": 160,
+            "scrollRatio": 0.4,
+        }
+
+        def fake_run_viewer_js(source, callback=None):
+            captured_sources.append(source)
+            if "getViewState" in source and callback is not None:
+                callback(first_state)
+                return
+            if callback is not None:
+                callback(None)
+
+        self.window._run_viewer_js = fake_run_viewer_js  # type: ignore[method-assign]
+
+        self.window._open_path_in_active_view(first_pdf)
+        QApplication.processEvents()
+        self.window._open_path_in_active_view(second_pdf)
+        QApplication.processEvents()
+        self.window._open_path_in_active_view(first_pdf)
+        QApplication.processEvents()
+
+        restore_calls = [
+            source for source in captured_sources if "restoreViewState" in source
+        ]
+        self.assertTrue(restore_calls)
+        self.assertIn('"page": 4', restore_calls[-1])
+        self.assertIn('"scrollTop": 160', restore_calls[-1])
+        self.assertIn('"scrollRatio": 0.4', restore_calls[-1])
+
+    def test_show_preview_context_menu_uses_request_selected_text_hint(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeRequest:
+            def selectedText(self) -> str:
+                return "Selected from Qt"
+
+        class _FakePreview:
+            def lastContextMenuRequest(self):
+                return _FakeRequest()
+
+            def selectedText(self) -> str:
+                return ""
+
+        original_current_preview_widget = self.window._current_preview_widget
+        original_show_with_cached_selection = (
+            self.window._show_preview_context_menu_with_cached_selection
+        )
+        try:
+            self.window._current_preview_widget = lambda: _FakePreview()  # type: ignore[method-assign]
+            self.window._show_preview_context_menu_with_cached_selection = (  # type: ignore[method-assign]
+                lambda pos, info, selected_text_hint, **kwargs: captured.update(
+                    {
+                        "pos": pos,
+                        "info": info,
+                        "selected_text_hint": selected_text_hint,
+                        "kwargs": kwargs,
+                    }
+                )
+            )
+
+            self.window._show_preview_context_menu(QPoint(11, 17))
+        finally:
+            self.window._current_preview_widget = original_current_preview_widget  # type: ignore[method-assign]
+            self.window._show_preview_context_menu_with_cached_selection = (  # type: ignore[method-assign]
+                original_show_with_cached_selection
+            )
+
+        self.assertEqual(captured.get("selected_text_hint"), "Selected from Qt")
+        self.assertEqual(captured.get("info"), {})
+        kwargs = captured.get("kwargs")
+        self.assertIsInstance(kwargs, dict)
+        assert isinstance(kwargs, dict)
+        self.assertEqual(kwargs.get("click_x"), 11)
+        self.assertEqual(kwargs.get("click_y"), 17)
+
+    def test_request_preview_context_menu_selection_info_reuses_selected_text_hint(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run_viewer_js(_source, callback=None):
+            if callback is not None:
+                callback(
+                    {
+                        "page": 2,
+                        "start": 4,
+                        "end": 12,
+                        "selectedText": "",
+                        "hasSelection": False,
+                    }
+                )
+
+        self.window._run_viewer_js = fake_run_viewer_js  # type: ignore[method-assign]
+        self.window._request_preview_context_menu_selection_info(
+            11,
+            17,
+            "Selected from Qt",
+            lambda info: captured.update(info),
+        )
+
+        self.assertEqual(captured.get("selectedText"), "Selected from Qt")
+        self.assertEqual(captured.get("hasSelection"), True)
+
+    def test_preview_zoom_in_out_and_reset_adjust_current_view_only(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "zoom.pdf"
+        _create_pdf_with_text(pdf_path, "zoom test")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        path_key = self.window._path_key(pdf_path)
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        captured_sources: list[str] = []
+        zoom_state = {"currentScale": 1.0, "currentScaleValue": "page-width", "percent": 100}
+
+        def fake_run_viewer_js(source, callback=None):
+            captured_sources.append(source)
+            if callback is not None:
+                callback(None)
+
+        def fake_request_zoom_state(callback):
+            callback(dict(zoom_state))
+
+        self.window._run_viewer_js = fake_run_viewer_js  # type: ignore[method-assign]
+        self.window._request_preview_zoom_state = fake_request_zoom_state  # type: ignore[method-assign]
+
+        self.window._zoom_preview_in()
+        QApplication.processEvents()
+        self.assertIn("setZoomScale", captured_sources[-1])
+        self.assertIn("1.1", captured_sources[-1])
+
+        zoom_state["currentScale"] = 1.1
+        self.window._zoom_preview_out()
+        QApplication.processEvents()
+        self.assertIn("setZoomScale", captured_sources[-1])
+        self.assertIn("1.0", captured_sources[-1])
+
+        self.window._reset_preview_zoom()
+        QApplication.processEvents()
+        self.assertIn("resetZoom", captured_sources[-1])
+
+        self.assertTrue(self.window._preview_zoom_overlay.isVisible())
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "Fit Width")
+
+    def test_schedule_followup_view_restore_reapplies_restore_and_highlights(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "followup.pdf"
+        _create_pdf_with_text(pdf_path, "followup")
+        path_key = self.window._path_key(pdf_path)
+        restore_state = {
+            "page": 5,
+            "pagesCount": 11,
+            "scale": "page-width",
+            "scrollTop": 220,
+            "scrollRatio": 0.5,
+        }
+        captured_sources: list[str] = []
+        apply_highlights_calls: list[str] = []
+        apply_search_calls: list[str] = []
+
+        self.window._current_preview_path_key = lambda: path_key  # type: ignore[method-assign]
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        self.window._run_viewer_js = lambda source, callback=None: captured_sources.append(source)  # type: ignore[method-assign]
+        self.window._apply_persistent_text_highlights = lambda: apply_highlights_calls.append("h")  # type: ignore[method-assign]
+        self.window._apply_active_search_to_viewer = lambda: apply_search_calls.append("s")  # type: ignore[method-assign]
+
+        with patch("pdfexplore.app.QTimer.singleShot", new=lambda _delay, fn: fn()):
+            self.window._schedule_followup_view_restore(path_key, restore_state)
+
+        restore_calls = [
+            source for source in captured_sources if "restoreViewState" in source
+        ]
+        self.assertEqual(len(restore_calls), 3)
+        self.assertIn('"page": 5', restore_calls[-1])
+        self.assertEqual(len(apply_highlights_calls), 3)
+        self.assertEqual(len(apply_search_calls), 3)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,13 @@
 
   const state = {
     installed: false,
+    eventBusHooksInstalled: false,
     persistentEntries: [],
     searchTerms: [],
     lastClickedHighlightId: "",
     lastSelectionPayload: null,
     lastSelectionTimestamp: 0,
+    lastViewState: null,
     refreshHandle: 0,
     observer: null,
   };
@@ -25,6 +27,23 @@
 
   function viewerContainer() {
     return document.getElementById("viewerContainer");
+  }
+
+  function captureViewState() {
+    const currentApp = app();
+    const currentViewer = viewer();
+    const container = viewerContainer();
+    if (!currentApp || !currentViewer || !container) {
+      return {};
+    }
+    const maxScrollTop = Math.max(1, container.scrollHeight - container.clientHeight);
+    return {
+      page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
+      pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+      scale: String(currentViewer.currentScaleValue || "page-width"),
+      scrollTop: Number(container.scrollTop || 0),
+      scrollRatio: Number((container.scrollTop || 0) / maxScrollTop),
+    };
   }
 
   function escapeRegExp(value) {
@@ -87,10 +106,10 @@ html, body {
   background: rgba(245, 211, 79, 0.42);
 }
 .pdfexplore-highlight-rect.normal {
-  background: rgba(187, 157, 245, 0.33);
+  background: rgba(102, 86, 178, 0.36);
 }
 .pdfexplore-highlight-rect.important {
-  background: rgba(239, 125, 125, 0.34);
+  background: rgba(225, 214, 255, 0.76);
 }
 `;
     document.head.appendChild(style);
@@ -192,11 +211,11 @@ html, body {
     return range;
   }
 
-  function rectsForRange(pageEl, range) {
+  function rectsForRange(pageEl, range, host) {
     if (!range) {
       return [];
     }
-    const pageRect = pageEl.getBoundingClientRect();
+    const baseRect = (host || pageEl).getBoundingClientRect();
     const rects = [];
     for (const rect of Array.from(range.getClientRects())) {
       const width = rect.width;
@@ -205,8 +224,8 @@ html, body {
         continue;
       }
       rects.push({
-        left: rect.left - pageRect.left,
-        top: rect.top - pageRect.top,
+        left: rect.left - baseRect.left,
+        top: rect.top - baseRect.top,
         width,
         height,
       });
@@ -289,9 +308,10 @@ html, body {
       if (!range) {
         continue;
       }
+      const host = ensureOverlayHost(pageEl);
       paintRects(
         pageEl,
-        rectsForRange(pageEl, range),
+        rectsForRange(pageEl, range, host),
         String(entry.kind || "").toLowerCase() === "important" ? "important" : "normal",
         String(entry.id || ""),
       );
@@ -326,7 +346,8 @@ html, body {
           }
           const range = rangeForOffsets(pageEl, start, end);
           if (range) {
-            paintRects(pageEl, rectsForRange(pageEl, range), "search", "");
+            const host = ensureOverlayHost(pageEl);
+            paintRects(pageEl, rectsForRange(pageEl, range, host), "search", "");
           }
           if (pattern.lastIndex <= start) {
             pattern.lastIndex = start + 1;
@@ -411,8 +432,38 @@ html, body {
           state.lastSelectionTimestamp = Date.now();
         }
       }, true);
+      const container = viewerContainer();
+      if (container) {
+        container.addEventListener("scroll", () => {
+          state.lastViewState = captureViewState();
+          if (state.persistentEntries.length || state.searchTerms.length) {
+            scheduleRefresh();
+          }
+        }, { passive: true });
+      }
       state.installed = true;
     }
+    if (
+      !state.eventBusHooksInstalled
+      && currentApp.eventBus
+      && typeof currentApp.eventBus.on === "function"
+    ) {
+      const refreshFromPdfJs = () => {
+        state.lastViewState = captureViewState();
+        scheduleRefresh();
+      };
+      currentApp.eventBus.on("updateviewarea", () => {
+        state.lastViewState = captureViewState();
+        if (state.persistentEntries.length || state.searchTerms.length) {
+          scheduleRefresh();
+        }
+      });
+      currentApp.eventBus.on("pagerendered", refreshFromPdfJs);
+      currentApp.eventBus.on("pagesloaded", refreshFromPdfJs);
+      currentApp.eventBus.on("textlayerrendered", refreshFromPdfJs);
+      state.eventBusHooksInstalled = true;
+    }
+    state.lastViewState = captureViewState();
     scheduleRefresh();
     return true;
   }
@@ -423,20 +474,14 @@ html, body {
   }
 
   function getViewState() {
-    const currentApp = app();
-    const currentViewer = viewer();
-    const container = viewerContainer();
-    if (!currentApp || !currentViewer || !container) {
-      return {};
+    const currentState = captureViewState();
+    if (currentState && typeof currentState === "object" && Object.keys(currentState).length > 0) {
+      state.lastViewState = currentState;
+      return currentState;
     }
-    const maxScrollTop = Math.max(1, container.scrollHeight - container.clientHeight);
-    return {
-      page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
-      pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
-      scale: String(currentViewer.currentScaleValue || "page-width"),
-      scrollTop: Number(container.scrollTop || 0),
-      scrollRatio: Number((container.scrollTop || 0) / maxScrollTop),
-    };
+    return state.lastViewState && typeof state.lastViewState === "object"
+      ? Object.assign({}, state.lastViewState)
+      : {};
   }
 
   function restoreViewState(stateValue) {
@@ -449,25 +494,85 @@ html, body {
     const scale = String(stateValue.scale || "page-width");
     const page = Number.parseInt(stateValue.page, 10);
     currentViewer.currentScaleValue = scale || "page-width";
-    if (Number.isFinite(page) && page > 0) {
-      currentApp.page = page;
-    }
+    state.lastViewState = {
+      page: Number.isFinite(page) && page > 0 ? page : Number(currentApp.page || currentViewer.currentPageNumber || 1),
+      pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+      scale: scale || "page-width",
+      scrollTop: Number(stateValue.scrollTop || 0),
+      scrollRatio: Number(stateValue.scrollRatio || 0),
+    };
+    const applyPageState = () => {
+      if (!Number.isFinite(page) || page <= 0) {
+        return;
+      }
+      if (currentApp.pdfLinkService && typeof currentApp.pdfLinkService.goToPage === "function") {
+        currentApp.pdfLinkService.goToPage(page);
+        return;
+      }
+      if (typeof currentViewer.scrollPageIntoView === "function") {
+        currentViewer.scrollPageIntoView({ pageNumber: page });
+        return;
+      }
+      if ("page" in currentApp) {
+        currentApp.page = page;
+      }
+      if ("currentPageNumber" in currentViewer) {
+        currentViewer.currentPageNumber = page;
+      }
+    };
     const applyScrollState = () => {
       const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
       const ratio = Number(stateValue.scrollRatio);
       const scrollTop = Number(stateValue.scrollTop);
-      if (Number.isFinite(ratio) && ratio >= 0) {
-        container.scrollTop = Math.max(0, Math.min(maxScrollTop, ratio * maxScrollTop));
-      } else if (Number.isFinite(scrollTop) && scrollTop >= 0) {
+      if (Number.isFinite(scrollTop) && scrollTop >= 0) {
         container.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop));
+      } else if (Number.isFinite(ratio) && ratio >= 0) {
+        container.scrollTop = Math.max(0, Math.min(maxScrollTop, ratio * maxScrollTop));
       }
     };
+    applyPageState();
     window.requestAnimationFrame(() => {
+      applyPageState();
       applyScrollState();
-      window.requestAnimationFrame(applyScrollState);
-      window.setTimeout(applyScrollState, 80);
-      window.setTimeout(applyScrollState, 220);
+      state.lastViewState = captureViewState();
+      window.requestAnimationFrame(() => {
+        applyPageState();
+        applyScrollState();
+        state.lastViewState = captureViewState();
+      });
+      window.setTimeout(() => {
+        applyPageState();
+        applyScrollState();
+        state.lastViewState = captureViewState();
+      }, 80);
+      window.setTimeout(() => {
+        applyPageState();
+        applyScrollState();
+        state.lastViewState = captureViewState();
+      }, 220);
+      window.setTimeout(() => {
+        applyPageState();
+        applyScrollState();
+        state.lastViewState = captureViewState();
+      }, 450);
+      window.setTimeout(() => {
+        applyPageState();
+        applyScrollState();
+        state.lastViewState = captureViewState();
+      }, 900);
     });
+    if (currentApp.eventBus && typeof currentApp.eventBus.on === "function") {
+      const reapply = () => {
+        applyPageState();
+        applyScrollState();
+        if (currentApp.eventBus && typeof currentApp.eventBus.off === "function") {
+          currentApp.eventBus.off("pagerendered", reapply);
+          currentApp.eventBus.off("pagesloaded", reapply);
+        }
+      };
+      currentApp.eventBus.on("pagerendered", reapply);
+      currentApp.eventBus.on("pagesloaded", reapply);
+    }
     return true;
   }
 
@@ -481,6 +586,46 @@ html, body {
     if (container) {
       container.scrollTop = 0;
     }
+    return true;
+  }
+
+  function getZoomState() {
+    const currentViewer = viewer();
+    if (!currentViewer) {
+      return {};
+    }
+    const currentScale = Number(currentViewer.currentScale || 1);
+    const currentScaleValue = String(currentViewer.currentScaleValue || "page-width");
+    return {
+      currentScale,
+      currentScaleValue,
+      percent: Math.round(currentScale * 100),
+    };
+  }
+
+  function setZoomScale(scaleValue) {
+    const currentViewer = viewer();
+    if (!currentViewer) {
+      return false;
+    }
+    const nextScale = Number(scaleValue);
+    if (!Number.isFinite(nextScale) || nextScale <= 0) {
+      return false;
+    }
+    currentViewer.currentScale = nextScale;
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function resetZoom() {
+    const currentViewer = viewer();
+    if (!currentViewer) {
+      return false;
+    }
+    currentViewer.currentScaleValue = "page-width";
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
     return true;
   }
 
@@ -550,6 +695,10 @@ html, body {
   function setPersistentHighlights(entries) {
     state.persistentEntries = Array.isArray(entries) ? entries.slice() : [];
     scheduleRefresh();
+    window.setTimeout(scheduleRefresh, 60);
+    window.setTimeout(scheduleRefresh, 180);
+    window.setTimeout(scheduleRefresh, 420);
+    window.setTimeout(scheduleRefresh, 900);
     return true;
   }
 
@@ -571,6 +720,9 @@ html, body {
     getViewState,
     restoreViewState,
     goToTop,
+    getZoomState,
+    setZoomScale,
+    resetZoom,
     getSelectionInfo,
     setPersistentHighlights,
     setSearchTerms,

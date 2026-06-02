@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -45,11 +47,21 @@ from PySide6.QtWidgets import (
 )
 
 from mdexplore_app.icons import build_clear_x_icon, ui_asset_path
+from mdexplore_app.constants import (
+    PREVIEW_PERSISTENT_HIGHLIGHT_COLOR,
+    PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR,
+    PREVIEW_ZOOM_MAX,
+    PREVIEW_ZOOM_MIN,
+    PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS,
+    PREVIEW_ZOOM_RESET,
+    PREVIEW_ZOOM_STEP,
+)
 from mdexplore_app.runtime import (
     config_file_path as _shared_config_file_path,
     gpu_context_available,
 )
 from mdexplore_app.search import (
+    compile_term_pattern,
     compile_match_hit_counter,
     compile_match_predicate,
     extract_search_terms,
@@ -57,7 +69,7 @@ from mdexplore_app.search import (
 from mdexplore_app.tabs import ViewTabBar
 
 from .tree import ColorizedPdfModel, PdfTreeItemDelegate
-from .workers import PdfSearchWorker
+from .workers import PdfSearchWorker, PdfTreeMarkerScanWorker
 
 
 CONFIG_FILE_NAME = ".pdfexplore.cfg"
@@ -71,6 +83,13 @@ class PdfExploreWindow(QMainWindow):
     """Main window for browsing and highlighting PDFs."""
 
     MAX_DOCUMENT_VIEWS = 8
+    MAX_RECENT_ROOT_DIRECTORIES = 35
+    RECENT_ROOT_MENU_MRU_COUNT = 10
+    MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
+    CONFIG_DEFAULT_ROOT_KEY = "default_root"
+    CONFIG_RECENT_ROOTS_KEY = "recent_roots"
+    PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
+    PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -95,6 +114,9 @@ class PdfExploreWindow(QMainWindow):
         self.root = root.resolve()
         self.config_path = config_path
         self.debug_mode = bool(debug_mode)
+        self._recent_root_directories = self._load_recent_root_directories_from_config()
+        self._recent_active_root = self.root
+        self._recent_root_entered_at = time.monotonic()
         self.current_file: Path | None = None
         self.last_directory_selection: Path | None = self.root
         self.current_match_files: list[Path] = []
@@ -113,6 +135,8 @@ class PdfExploreWindow(QMainWindow):
         self._next_view_sequence = 1
         self._next_tab_color_index = 0
         self._pending_search_terms: list[tuple[str, bool]] = []
+        self._visible_tree_pdf_cache: list[Path] = []
+        self._visible_tree_pdf_cache_dirty = True
         self._viewer_bridge_source = VIEWER_BRIDGE_JS.read_text(encoding="utf-8")
         self._preview_widgets_by_path: dict[str, QWebEngineView] = {}
         self._viewer_bridge_ready_by_path: dict[str, bool] = {}
@@ -122,11 +146,30 @@ class PdfExploreWindow(QMainWindow):
 
         self.thread_pool = QThreadPool(self)
         self._search_request_id = 0
+        self._active_search_workers: set[PdfSearchWorker] = set()
+        self._search_scan_expected_workers = 0
+        self._search_scan_completed_workers = 0
+        self._search_scan_total_candidates = 0
+        self._search_scan_scope: Path | None = None
+        self._search_scan_candidate_order: dict[str, int] = {}
+        self._search_scan_match_counts: dict[str, int] = {}
+        self._search_scan_filename_match_paths: set[str] = set()
+        self._search_scan_error_count = 0
+        self._tree_marker_scan_pool = QThreadPool(self)
+        self._tree_marker_scan_pool.setMaxThreadCount(1)
+        self._tree_marker_scan_request_id = 0
+        self._active_tree_marker_scan_workers: set[PdfTreeMarkerScanWorker] = set()
+        self._tree_marker_cache_root_key: str | None = None
 
         self.match_timer = QTimer(self)
         self.match_timer.setInterval(220)
         self.match_timer.setSingleShot(True)
         self.match_timer.timeout.connect(self._run_match_search)
+
+        self._tree_search_refresh_timer = QTimer(self)
+        self._tree_search_refresh_timer.setSingleShot(True)
+        self._tree_search_refresh_timer.setInterval(180)
+        self._tree_search_refresh_timer.timeout.connect(self._run_match_search)
 
         self._viewer_ready_timer = QTimer(self)
         self._viewer_ready_timer.setInterval(160)
@@ -166,6 +209,8 @@ class PdfExploreWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self.tree.selectionModel().currentChanged.connect(self._on_tree_selection_changed)
+        self.tree.expanded.connect(self._on_tree_directory_expanded)
+        self.tree.collapsed.connect(self._on_tree_directory_collapsed)
 
         self.preview_stack = QStackedWidget()
         self._empty_preview = QWidget()
@@ -191,6 +236,17 @@ class PdfExploreWindow(QMainWindow):
             self._on_view_tab_beginning_reset_requested
         )
         self.view_tabs.setVisible(False)
+
+        self.recent_btn = QPushButton("Recent")
+        self.recent_btn.setToolTip(
+            "Open one of the 35 retained recent root directories"
+        )
+        self.recent_menu = QMenu(self.recent_btn)
+        self.recent_menu.aboutToShow.connect(
+            self._reload_recent_root_directories_before_menu_open
+        )
+        self.recent_btn.setMenu(self.recent_menu)
+        self._refresh_recent_root_menu()
 
         self.up_btn = QPushButton("^")
         self.up_btn.clicked.connect(self._go_up_directory)
@@ -308,6 +364,7 @@ class PdfExploreWindow(QMainWindow):
 
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.addWidget(self.recent_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
         top_bar.addWidget(self.add_view_btn)
@@ -321,11 +378,36 @@ class PdfExploreWindow(QMainWindow):
         top_bar_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         preview_container = QWidget()
+        self.preview_container = preview_container
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
         preview_layout.addWidget(self.view_tabs)
         preview_layout.addWidget(self.preview_stack, 1)
+
+        self._preview_zoom_overlay = QLabel("", self.preview_container)
+        self._preview_zoom_overlay.setObjectName("pdfexplore-preview-zoom-overlay")
+        self._preview_zoom_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_zoom_overlay.setStyleSheet(
+            """
+            QLabel#pdfexplore-preview-zoom-overlay {
+                background-color: rgba(11, 20, 38, 210);
+                color: #e5e7eb;
+                border: 1px solid rgba(148, 163, 184, 0.55);
+                border-radius: 8px;
+                padding: 3px 9px;
+                font-weight: 600;
+            }
+            """
+        )
+        self._preview_zoom_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self._preview_zoom_overlay.hide()
+        self._preview_zoom_overlay_timer = QTimer(self)
+        self._preview_zoom_overlay_timer.setSingleShot(True)
+        self._preview_zoom_overlay_timer.setInterval(PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS)
+        self._preview_zoom_overlay_timer.timeout.connect(self._preview_zoom_overlay.hide)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tree)
@@ -350,6 +432,21 @@ class PdfExploreWindow(QMainWindow):
         refresh_action.triggered.connect(self._refresh_directory_view)
         self.addAction(refresh_action)
 
+        preview_zoom_in_action = QAction("Preview Zoom In", self)
+        preview_zoom_in_action.setShortcuts(["Ctrl++", "Ctrl+=", "Ctrl+Shift+="])
+        preview_zoom_in_action.triggered.connect(self._zoom_preview_in)
+        self.addAction(preview_zoom_in_action)
+
+        preview_zoom_out_action = QAction("Preview Zoom Out", self)
+        preview_zoom_out_action.setShortcuts(["Ctrl+-", "Ctrl+_"])
+        preview_zoom_out_action.triggered.connect(self._zoom_preview_out)
+        self.addAction(preview_zoom_out_action)
+
+        preview_zoom_reset_action = QAction("Preview Zoom Reset", self)
+        preview_zoom_reset_action.setShortcuts(["Ctrl+0", "Ctrl+Shift+0"])
+        preview_zoom_reset_action.triggered.connect(self._reset_preview_zoom)
+        self.addAction(preview_zoom_reset_action)
+
         self._set_root_directory(self.root)
         self._update_window_title()
         self._update_up_button_state()
@@ -370,8 +467,375 @@ class PdfExploreWindow(QMainWindow):
         shared = _shared_config_file_path()
         return shared.with_name(CONFIG_FILE_NAME)
 
+    def _config_lock_file_path(self) -> Path:
+        return self.config_path.with_name(self.config_path.name + ".lock")
+
+    @classmethod
+    def _parse_config_payload_text(cls, text: str) -> tuple[str | None, list[str]]:
+        raw = text.strip()
+        if not raw:
+            return None, []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            default_root = parsed.get(cls.CONFIG_DEFAULT_ROOT_KEY)
+            recent_roots = parsed.get(cls.CONFIG_RECENT_ROOTS_KEY)
+            normalized_default = (
+                default_root.strip()
+                if isinstance(default_root, str) and default_root.strip()
+                else None
+            )
+            normalized_recent: list[str] = []
+            if isinstance(recent_roots, list):
+                for entry in recent_roots:
+                    if isinstance(entry, str) and entry.strip():
+                        normalized_recent.append(entry.strip())
+            return normalized_default, normalized_recent
+        if isinstance(parsed, str) and parsed.strip():
+            return parsed.strip(), []
+        return raw, []
+
+    @classmethod
+    def _normalize_recent_root_directories(
+        cls, directories: list[Path | str]
+    ) -> list[Path]:
+        normalized: list[Path] = []
+        seen: set[str] = set()
+        for raw_entry in directories:
+            if isinstance(raw_entry, Path):
+                candidate = raw_entry.expanduser()
+            else:
+                raw_text = str(raw_entry or "").strip()
+                if not raw_text:
+                    continue
+                candidate = Path(raw_text).expanduser()
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            try:
+                if not resolved.is_dir():
+                    continue
+            except Exception:
+                continue
+            key = cls._path_key(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(resolved)
+            if len(normalized) >= cls.MAX_RECENT_ROOT_DIRECTORIES:
+                break
+        return normalized
+
+    def _cleanup_stale_config_lock_file(self) -> None:
+        lock_path = self._config_lock_file_path()
+        try:
+            if not lock_path.exists():
+                return
+            age_seconds = time.time() - lock_path.stat().st_mtime
+            if age_seconds > 120.0:
+                lock_path.unlink()
+        except Exception:
+            pass
+
+    def _read_config_payload(self) -> tuple[Path | None, list[Path]]:
+        raw = ""
+        lock_path = self._config_lock_file_path()
+        self._cleanup_stale_config_lock_file()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                lock_acquired = False
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    lock_acquired = True
+                except (BlockingIOError, OSError):
+                    lock_acquired = False
+                try:
+                    if self.config_path.exists():
+                        raw = self.config_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                finally:
+                    if lock_acquired:
+                        try:
+                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                        except Exception:
+                            pass
+        except Exception:
+            try:
+                if self.config_path.exists():
+                    raw = self.config_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+            except Exception:
+                raw = ""
+
+        default_root_raw, recent_roots_raw = self._parse_config_payload_text(raw)
+        default_root: Path | None = None
+        if default_root_raw:
+            normalized_default = self._normalize_recent_root_directories(
+                [default_root_raw]
+            )
+            if normalized_default:
+                default_root = normalized_default[0]
+        recent_roots = self._normalize_recent_root_directories(recent_roots_raw)
+        return default_root, recent_roots
+
+    def _load_recent_root_directories_from_config(self) -> list[Path]:
+        default_root, recent_roots = self._read_config_payload()
+        merged: list[Path | str] = []
+        if default_root is not None:
+            merged.append(default_root)
+        merged.extend(recent_roots)
+        return self._normalize_recent_root_directories(merged)
+
+    def _commit_recent_root_from_departure(
+        self, departed_root: Path, elapsed_seconds: float
+    ) -> None:
+        if float(elapsed_seconds) < float(self.MIN_RECENT_ROOT_DWELL_SECONDS):
+            return
+        self._record_recent_root_directory(departed_root)
+
+    def _on_recent_root_navigation(self, next_root: Path) -> Path:
+        try:
+            target_root = next_root.resolve()
+        except Exception:
+            target_root = next_root
+        now = time.monotonic()
+        previous_root = getattr(self, "_recent_active_root", None)
+        previous_entered_at = float(
+            getattr(self, "_recent_root_entered_at", now) or now
+        )
+        if isinstance(previous_root, Path):
+            if self._path_key(previous_root) != self._path_key(target_root):
+                elapsed = max(0.0, now - previous_entered_at)
+                self._commit_recent_root_from_departure(previous_root, elapsed)
+        self._recent_active_root = target_root
+        self._recent_root_entered_at = now
+        return target_root
+
+    def _refresh_recent_root_menu(self) -> None:
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        if not self._recent_root_directories:
+            empty_action = menu.addAction("(No recent directories)")
+            empty_action.setEnabled(False)
+            return
+
+        current_key = self._path_key(self.root) if isinstance(self.root, Path) else ""
+        mru_count = max(
+            0,
+            min(
+                int(self.RECENT_ROOT_MENU_MRU_COUNT),
+                len(self._recent_root_directories),
+            ),
+        )
+        recent_directories = self._recent_root_directories[:mru_count]
+        remaining_directories = sorted(
+            self._recent_root_directories[mru_count:],
+            key=lambda path: str(path).casefold(),
+        )
+
+        def _add_recent_action(directory: Path) -> None:
+            label = str(directory)
+            if current_key and self._path_key(directory) == current_key:
+                label = f"{label} (current)"
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, target=directory: self._open_recent_root_directory(
+                    target
+                )
+            )
+
+        for directory in recent_directories:
+            _add_recent_action(directory)
+
+        if recent_directories and remaining_directories:
+            menu.addSeparator()
+
+        for directory in remaining_directories:
+            _add_recent_action(directory)
+
+    def _reload_recent_root_directories_before_menu_open(self) -> None:
+        on_disk = self._load_recent_root_directories_from_config()
+        merged: list[Path | str] = []
+        merged.extend(on_disk)
+        merged.extend(self._recent_root_directories)
+        self._recent_root_directories = self._normalize_recent_root_directories(merged)
+        self._refresh_recent_root_menu()
+
+    def _record_recent_root_directory(self, directory: Path) -> None:
+        merged: list[Path | str] = [directory]
+        merged.extend(self._recent_root_directories)
+        self._recent_root_directories = self._normalize_recent_root_directories(merged)
+        self._refresh_recent_root_menu()
+
+    def _open_recent_root_directory(self, directory: Path) -> None:
+        normalized = self._normalize_recent_root_directories([directory])
+        if not normalized:
+            self._recent_root_directories = self._normalize_recent_root_directories(
+                self._recent_root_directories
+            )
+            self._refresh_recent_root_menu()
+            self.statusBar().showMessage("Recent directory is unavailable", 3500)
+            return
+        target = normalized[0]
+        if self._path_key(target) == self._path_key(self.root):
+            self._refresh_recent_root_menu()
+            return
+        self._set_root_directory(target)
+
     def _update_up_button_state(self) -> None:
         self.up_btn.setEnabled(self.root.parent != self.root)
+
+    def _invalidate_visible_tree_pdf_cache(self) -> None:
+        self._visible_tree_pdf_cache_dirty = True
+
+    def _reset_search_scan_state(self) -> None:
+        self._search_scan_expected_workers = 0
+        self._search_scan_completed_workers = 0
+        self._search_scan_total_candidates = 0
+        self._search_scan_scope = None
+        self._search_scan_candidate_order.clear()
+        self._search_scan_match_counts.clear()
+        self._search_scan_filename_match_paths.clear()
+        self._search_scan_error_count = 0
+
+    def _cancel_pending_search_scan(self) -> None:
+        self._search_request_id += 1
+        self.thread_pool.clear()
+        self._reset_search_scan_state()
+
+    def _cancel_pending_tree_marker_scan(self) -> None:
+        self._tree_marker_scan_request_id += 1
+        self._tree_marker_scan_pool.clear()
+
+    def _rerun_active_search_for_scope(self) -> None:
+        if not self.match_input.text().strip():
+            return
+        self.match_timer.stop()
+        self._tree_search_refresh_timer.stop()
+        self._tree_search_refresh_timer.start()
+
+    def _merge_live_tree_marker_state(
+        self,
+        multi_view_paths: set[str] | None = None,
+        highlighted_paths: set[str] | None = None,
+        *,
+        root_key: str | None = None,
+    ) -> tuple[set[str], set[str]]:
+        merged_multi_view = set(multi_view_paths or ())
+        merged_highlighted = set(highlighted_paths or ())
+        if root_key is None:
+            root = getattr(self, "root", None)
+            if isinstance(root, Path):
+                root_key = self._path_key(root)
+
+        open_counts: dict[str, int] = {}
+        for index in range(self.view_tabs.count()):
+            data = self._tab_data(index)
+            if not isinstance(data, dict):
+                continue
+            path_key = str(data.get("path_key") or "").strip()
+            if not path_key:
+                continue
+            if root_key and not (
+                path_key == root_key or path_key.startswith(root_key + os.sep)
+            ):
+                continue
+            open_counts[path_key] = open_counts.get(path_key, 0) + 1
+        for path_key, count in open_counts.items():
+            if count > 1:
+                merged_multi_view.add(path_key)
+
+        current_path_key = self._current_preview_path_key()
+        if current_path_key and self._load_text_highlights_for_path_key(current_path_key):
+            if not root_key or (
+                current_path_key == root_key
+                or current_path_key.startswith(root_key + os.sep)
+            ):
+                merged_highlighted.add(current_path_key)
+
+        return merged_multi_view, merged_highlighted
+
+    def _start_tree_marker_scan(self) -> None:
+        root = getattr(self, "root", None)
+        if not isinstance(root, Path) or not root.exists():
+            self._tree_multi_view_marker_paths.clear()
+            self._tree_highlight_marker_paths.clear()
+            self._tree_marker_cache_root_key = None
+            self._sync_tree_markers_to_model()
+            return
+
+        self._cancel_pending_tree_marker_scan()
+        request_id = self._tree_marker_scan_request_id
+        worker = PdfTreeMarkerScanWorker(
+            root,
+            request_id,
+            VIEWS_FILE_NAME,
+            HIGHLIGHTING_FILE_NAME,
+        )
+        self._active_tree_marker_scan_workers.add(worker)
+        worker.signals.finished.connect(self._on_tree_marker_scan_finished)
+        self._tree_marker_scan_pool.start(worker)
+
+    def _on_tree_marker_scan_finished(
+        self,
+        request_id: int,
+        root_key: str,
+        multi_view_paths,
+        highlighted_paths,
+        error_text: str,
+    ) -> None:
+        worker_to_remove = None
+        for worker in self._active_tree_marker_scan_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_tree_marker_scan_workers.remove(worker_to_remove)
+
+        if request_id != self._tree_marker_scan_request_id:
+            return
+
+        current_root = getattr(self, "root", None)
+        if not isinstance(current_root, Path):
+            return
+        current_root_key = self._path_key(current_root)
+        if root_key != current_root_key:
+            return
+
+        if error_text:
+            self.statusBar().showMessage(
+                f"Tree badge scan failed: {error_text}",
+                4000,
+            )
+            return
+
+        next_multi_view_paths = {
+            str(path_key)
+            for path_key in (multi_view_paths or ())
+            if isinstance(path_key, str)
+        }
+        next_highlighted_paths = {
+            str(path_key)
+            for path_key in (highlighted_paths or ())
+            if isinstance(path_key, str)
+        }
+        next_multi_view_paths, next_highlighted_paths = self._merge_live_tree_marker_state(
+            next_multi_view_paths,
+            next_highlighted_paths,
+            root_key=current_root_key,
+        )
+        self._tree_multi_view_marker_paths = next_multi_view_paths
+        self._tree_highlight_marker_paths = next_highlighted_paths
+        self._tree_marker_cache_root_key = current_root_key
+        self._sync_tree_markers_to_model()
 
     def _clear_preview_for_missing_file(self) -> None:
         self.current_file = None
@@ -515,6 +979,61 @@ class PdfExploreWindow(QMainWindow):
                 pass
         return files
 
+    def _list_visible_pdf_files_in_tree(self) -> list[Path]:
+        if not self._visible_tree_pdf_cache_dirty:
+            return list(self._visible_tree_pdf_cache)
+
+        root_index = self.tree.rootIndex()
+        if not root_index.isValid():
+            files = self._list_pdf_files_non_recursive(self._highlight_scope_directory())
+            self._visible_tree_pdf_cache = list(files)
+            self._visible_tree_pdf_cache_dirty = False
+            return list(files)
+
+        files: list[Path] = []
+        seen: set[str] = set()
+
+        def _append_file(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            files.append(resolved)
+
+        def _walk_visible_children(parent_index) -> None:
+            if self.model.canFetchMore(parent_index):
+                self.model.fetchMore(parent_index)
+            row_count = self.model.rowCount(parent_index)
+            for row in range(row_count):
+                if self.tree.isRowHidden(row, parent_index):
+                    continue
+                index = self.model.index(row, 0, parent_index)
+                if not index.isValid():
+                    continue
+                path = Path(self.model.filePath(index))
+                try:
+                    if path.is_file() and path.suffix.lower() == ".pdf":
+                        _append_file(path)
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    is_dir = path.is_dir()
+                except Exception:
+                    is_dir = False
+                if is_dir and self.tree.isExpanded(index):
+                    _walk_visible_children(index)
+
+        _walk_visible_children(root_index)
+        self._visible_tree_pdf_cache = list(files)
+        self._visible_tree_pdf_cache_dirty = False
+        return list(files)
+
     def _highlight_scope_directory(self) -> Path:
         index = self.tree.currentIndex()
         if index.isValid():
@@ -546,36 +1065,101 @@ class PdfExploreWindow(QMainWindow):
     def _persist_effective_root(self) -> None:
         scope = self._effective_root_for_persistence()
         try:
-            self.config_path.write_text(str(scope.resolve()) + "\n", encoding="utf-8")
+            resolved_scope = scope.resolve()
+        except Exception:
+            resolved_scope = scope
+
+        lock_path = self._config_lock_file_path()
+        self._cleanup_stale_config_lock_file()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        def _serialize_payload(recent_roots: list[Path]) -> str:
+            payload = {
+                self.CONFIG_DEFAULT_ROOT_KEY: str(resolved_scope),
+                self.CONFIG_RECENT_ROOTS_KEY: [str(path) for path in recent_roots],
+            }
+            return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+        try:
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    return
+
+                raw = ""
+                try:
+                    if self.config_path.exists():
+                        raw = self.config_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                except Exception:
+                    raw = ""
+
+                _on_disk_default, on_disk_recent = self._parse_config_payload_text(raw)
+                merged: list[Path | str] = []
+                merged.extend(self._recent_root_directories)
+                merged.extend(on_disk_recent)
+                merged_recent = self._normalize_recent_root_directories(merged)
+
+                serialized = _serialize_payload(merged_recent)
+                tmp_path = self.config_path.with_name(
+                    f".{self.config_path.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+                )
+                try:
+                    tmp_path.write_text(serialized, encoding="utf-8")
+                    tmp_path.replace(self.config_path)
+                finally:
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    except Exception:
+                        pass
+
+                self._recent_root_directories = merged_recent
+                self._refresh_recent_root_menu()
+
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
         except Exception:
             pass
 
     def _set_root_directory(self, directory: Path) -> None:
-        try:
-            self.root = directory.resolve()
-        except Exception:
-            self.root = directory
+        target_root = self._on_recent_root_navigation(directory)
+        if self.current_file is not None:
+            self._persist_document_view_session(
+                self._path_key(self.current_file), capture_current=True
+            )
+        self._invalidate_visible_tree_pdf_cache()
+        self.root = target_root
         self.model.setRootPath("")
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.expand(root_index)
+        self.last_directory_selection = self.root
+        self.tree.clearSelection()
+        self._clear_preview_for_missing_file()
         self._rebuild_tree_marker_cache()
         self._update_window_title()
         self._update_up_button_state()
+        self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
+        if self.match_input.text().strip():
+            self._run_match_search()
 
     def _go_up_directory(self) -> None:
         parent = self.root.parent
         if parent == self.root:
             return
-        current_key = self._current_preview_path_key()
-        if current_key:
-            self._persist_document_view_session(current_key, capture_current=True)
         self._set_root_directory(parent)
-        if self.match_input.text().strip():
-            self._run_match_search()
 
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         self.statusBar().showMessage("Refreshing directory view...")
+        self._invalidate_visible_tree_pdf_cache()
         selected_path: Path | None = None
         current_index = self.tree.currentIndex()
         if current_index.isValid():
@@ -591,6 +1175,7 @@ class PdfExploreWindow(QMainWindow):
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self._rebuild_tree_marker_cache()
+        self._start_tree_marker_scan()
 
         if expanded_paths:
             self._restore_expanded_directory_paths(expanded_paths)
@@ -626,32 +1211,25 @@ class PdfExploreWindow(QMainWindow):
             self._run_match_search()
 
     def _on_match_text_changed(self, text: str) -> None:
-        self.match_clear_action.setVisible(bool(text))
+        self.match_clear_action.setVisible(bool(text.strip()))
+        self._cancel_pending_search_scan()
+        if not text.strip():
+            self.match_timer.stop()
+            self._tree_search_refresh_timer.stop()
+            self._clear_match_results()
+            return
         self.match_timer.start()
 
     def _clear_match_input(self) -> None:
+        self.match_timer.stop()
+        self._tree_search_refresh_timer.stop()
         self.match_input.clear()
         self._clear_match_results()
 
     def _run_match_search_now(self) -> None:
         self.match_timer.stop()
+        self._tree_search_refresh_timer.stop()
         self._run_match_search()
-
-    def _search_scope_files(
-        self, scope: Path, query: str
-    ) -> tuple[list[Path], dict[Path, int]]:
-        predicate = compile_match_predicate(query)
-        hit_counter = compile_match_hit_counter(query)
-        candidates = self._list_pdf_files_non_recursive(scope)
-        matches: list[Path] = []
-        match_counts: dict[Path, int] = {}
-        for path in candidates:
-            content = self._read_pdf_text(path)
-            if predicate(path.name, content):
-                matches.append(path)
-                count = hit_counter(path.name, content)
-                match_counts[path] = count if count > 0 else 1
-        return matches, match_counts
 
     def _run_match_search(self) -> None:
         query = self.match_input.text().strip()
@@ -659,40 +1237,146 @@ class PdfExploreWindow(QMainWindow):
             self._clear_match_results()
             return
         scope = self._highlight_scope_directory()
-        candidates = self._list_pdf_files_non_recursive(scope)
-        self.statusBar().showMessage(
-            f"Searching {len(candidates)} PDF file(s) in {scope}..."
-        )
-        self._search_request_id += 1
+        candidates = self._list_visible_pdf_files_in_tree()
+        self._cancel_pending_search_scan()
         request_id = self._search_request_id
-        worker = PdfSearchWorker(scope, request_id, query, self._search_scope_files)
-        worker.signals.finished.connect(self._on_search_finished)
-        self.thread_pool.start(worker)
+        self._search_scan_total_candidates = len(candidates)
+        self._search_scan_scope = scope
+        self._search_scan_candidate_order = {
+            self._path_key(path): index for index, path in enumerate(candidates)
+        }
+
+        if not candidates:
+            self.current_match_files = []
+            self._current_match_counts = {}
+            self.model.clear_search_match_paths()
+            self.tree.viewport().update()
+            self.statusBar().showMessage(
+                f"Matched 0 of 0 visible PDF file(s) in tree under {scope}",
+                2500,
+            )
+            self._remove_viewer_search_highlights()
+            self._reset_search_scan_state()
+            return
+
+        try:
+            predicate = compile_match_predicate(query)
+            hit_counter = compile_match_hit_counter(query)
+            filename_patterns = []
+            for term_text, is_case_sensitive in extract_search_terms(query):
+                if not term_text:
+                    continue
+                filename_patterns.append(
+                    compile_term_pattern(term_text, bool(is_case_sensitive))
+                )
+        except Exception as exc:
+            self.statusBar().showMessage(
+                f"Search query preparation failed: {str(exc)}",
+                4000,
+            )
+            self._clear_match_results()
+            return
+
+        worker_limit = max(1, min(self.thread_pool.maxThreadCount(), len(candidates)))
+        target_chunks = max(worker_limit, worker_limit * 4)
+        chunk_size = max(1, (len(candidates) + target_chunks - 1) // target_chunks)
+        started_workers = 0
+        for start in range(0, len(candidates), chunk_size):
+            chunk = candidates[start : start + chunk_size]
+            if not chunk:
+                continue
+            worker = PdfSearchWorker(
+                request_id,
+                chunk,
+                predicate,
+                hit_counter,
+                filename_patterns,
+                self._read_pdf_text,
+            )
+            self._active_search_workers.add(worker)
+            worker.signals.finished.connect(self._on_search_finished)
+            self.thread_pool.start(worker)
+            started_workers += 1
+
+        self._search_scan_expected_workers = started_workers
+        self.statusBar().showMessage(
+            f"Searching {len(candidates)} visible PDF file(s) in tree under {scope} using {started_workers} worker(s)..."
+        )
 
     def _on_search_finished(
         self,
         request_id: int,
-        matches: list[Path],
-        match_counts: dict[Path, int],
+        matched_paths,
+        match_counts,
+        filename_match_paths,
         error: str,
     ) -> None:
+        worker_to_remove = None
+        for worker in self._active_search_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_search_workers.remove(worker_to_remove)
+
         if request_id != self._search_request_id:
             return
+        self._search_scan_completed_workers += 1
         if error:
-            self.statusBar().showMessage(f"Search failed: {error}", 4000)
+            self._search_scan_error_count += 1
+
+        if isinstance(match_counts, dict):
+            for raw_path_key, raw_count in match_counts.items():
+                if not isinstance(raw_path_key, str):
+                    continue
+                try:
+                    count = int(raw_count)
+                except Exception:
+                    count = 0
+                self._search_scan_match_counts[raw_path_key] = count if count > 0 else 1
+        if isinstance(matched_paths, (list, tuple, set)):
+            for raw_path_key in matched_paths:
+                if not isinstance(raw_path_key, str):
+                    continue
+                if raw_path_key not in self._search_scan_match_counts:
+                    self._search_scan_match_counts[raw_path_key] = 1
+        if isinstance(filename_match_paths, (list, tuple, set)):
+            for raw_path_key in filename_match_paths:
+                if isinstance(raw_path_key, str):
+                    self._search_scan_filename_match_paths.add(raw_path_key)
+
+        if self._search_scan_completed_workers < self._search_scan_expected_workers:
             return
-        self.current_match_files = list(matches or [])
-        self._current_match_counts = dict(match_counts or {})
-        self.model.set_search_match_counts(self._current_match_counts)
-        self.tree.viewport().update()
-        scope = self._highlight_scope_directory()
-        self.statusBar().showMessage(
-            f"Matched {len(self.current_match_files)} PDF file(s) in {scope}",
-            3500,
+
+        ordered_match_keys = sorted(
+            self._search_scan_match_counts.keys(),
+            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
         )
+        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
+        self._current_match_counts = {
+            Path(path_key): self._search_scan_match_counts[path_key]
+            for path_key in ordered_match_keys
+        }
+        self.model.set_search_match_counts(
+            self._current_match_counts,
+            filename_match_path_keys=self._search_scan_filename_match_paths,
+        )
+        self.tree.viewport().update()
+        scope = self._search_scan_scope or self._highlight_scope_directory()
+        status_message = (
+            f"Matched {len(self.current_match_files)} of {self._search_scan_total_candidates} visible PDF file(s) in tree under {scope}"
+        )
+        if self._search_scan_error_count > 0:
+            status_message = (
+                f"{status_message} ({self._search_scan_error_count} worker error(s))"
+            )
+        self.statusBar().showMessage(status_message, 3500)
         self._apply_active_search_to_viewer()
+        self._reset_search_scan_state()
 
     def _clear_match_results(self) -> None:
+        self._tree_search_refresh_timer.stop()
+        self._cancel_pending_search_scan()
         self.current_match_files = []
         self._current_match_counts = {}
         self.model.clear_search_match_paths()
@@ -855,6 +1539,57 @@ class PdfExploreWindow(QMainWindow):
         if path.is_file() and path.suffix.lower() == ".pdf":
             self._open_path_in_active_view(path)
 
+    def _on_tree_directory_expanded(self, index) -> None:
+        self._invalidate_visible_tree_pdf_cache()
+        if not index.isValid():
+            return
+        path = Path(self.model.filePath(index))
+        if not path.is_dir():
+            return
+        was_selected = self.tree.currentIndex() == index
+        self.tree.setCurrentIndex(index)
+        try:
+            self.last_directory_selection = path.resolve()
+        except Exception:
+            self.last_directory_selection = path
+        self._update_window_title()
+        if was_selected:
+            self._rerun_active_search_for_scope()
+
+    def _on_tree_directory_collapsed(self, index) -> None:
+        self._invalidate_visible_tree_pdf_cache()
+        if not index.isValid():
+            return
+        collapsed_path = Path(self.model.filePath(index))
+        if not collapsed_path.is_dir():
+            return
+
+        current_index = self.tree.currentIndex()
+        if not current_index.isValid() or current_index != index:
+            self._rerun_active_search_for_scope()
+            return
+
+        parent_index = index.parent()
+        if not parent_index.isValid():
+            parent_index = self.tree.rootIndex()
+
+        next_scope = self.root
+        if parent_index.isValid():
+            parent_path = Path(self.model.filePath(parent_index))
+            if parent_path.is_dir():
+                try:
+                    next_scope = parent_path.resolve()
+                except Exception:
+                    next_scope = parent_path
+        self.last_directory_selection = next_scope
+
+        if parent_index.isValid() and parent_index != current_index:
+            self.tree.setCurrentIndex(parent_index)
+            return
+
+        self._update_window_title()
+        self._rerun_active_search_for_scope()
+
     def _viewer_url_for_pdf(self, path: Path) -> QUrl:
         viewer_url = QUrl.fromLocalFile(str(VIEWER_HTML))
         pdf_url = QUrl.fromLocalFile(str(path))
@@ -910,6 +1645,176 @@ class PdfExploreWindow(QMainWindow):
             preview.page().runJavaScript(source)
             return
         preview.page().runJavaScript(source, callback)
+
+    @staticmethod
+    def _normalize_viewer_json_result(result) -> dict:
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    def _run_viewer_js_json(self, expression: str, callback) -> None:
+        js = f"""
+(() => {{
+  try {{
+    const __result = {expression};
+    return JSON.stringify(__result || {{}});
+  }} catch (err) {{
+    return JSON.stringify({{
+      __error__: String(err),
+      __stack__: err && err.stack ? String(err.stack) : "",
+    }});
+  }}
+}})();
+"""
+
+        def _on_result(result) -> None:
+            callback(self._normalize_viewer_json_result(result))
+
+        self._run_viewer_js(js, _on_result)
+
+    def _schedule_followup_view_restore(
+        self,
+        path_key: str | None,
+        restore_state: dict | None,
+        *,
+        delays_ms: tuple[int, ...] = (180, 420, 900),
+    ) -> None:
+        if not path_key or not isinstance(restore_state, dict) or not restore_state:
+            return
+        payload = self._clone_json_compatible_dict(restore_state)
+        if not payload:
+            return
+        try:
+            page = max(1, int(payload.get("page", 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            scroll_top = float(payload.get("scrollTop", 0.0) or 0.0)
+        except Exception:
+            scroll_top = 0.0
+        try:
+            scroll_ratio = float(payload.get("scrollRatio", 0.0) or 0.0)
+        except Exception:
+            scroll_ratio = 0.0
+        scale = str(payload.get("scale", "page-width") or "page-width").strip() or "page-width"
+        if (
+            page <= 1
+            and scroll_top <= 1.0
+            and scroll_ratio <= 0.001
+            and scale == "page-width"
+        ):
+            return
+
+        def _reapply(expected_key: str = path_key, state: dict = payload) -> None:
+            if (
+                self._current_preview_path_key() != expected_key
+                or not self._viewer_bridge_ready_by_path.get(expected_key, False)
+            ):
+                return
+            self._run_viewer_js(
+                "window.__pdfexploreBridge && window.__pdfexploreBridge.restoreViewState && "
+                f"window.__pdfexploreBridge.restoreViewState({json.dumps(state)});"
+            )
+            self._apply_persistent_text_highlights()
+            self._apply_active_search_to_viewer()
+
+        for raw_delay in delays_ms:
+            try:
+                delay = max(1, int(raw_delay))
+            except Exception:
+                delay = 1
+            QTimer.singleShot(delay, _reapply)
+
+    def _request_preview_zoom_state(self, callback) -> None:
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing zoom", 2000)
+            return
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.getZoomState && window.__pdfexploreBridge.getZoomState()",
+            callback,
+        )
+
+    def _apply_preview_zoom_scale(self, scale_value: float) -> None:
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing zoom", 2000)
+            return
+        clamped = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(scale_value)))
+        self._run_viewer_js(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.setZoomScale && "
+            f"window.__pdfexploreBridge.setZoomScale({json.dumps(clamped)});"
+        )
+        percent_text = f"{int(round(clamped * 100))}%"
+        self.statusBar().showMessage(f"Preview zoom: {percent_text}", 1500)
+        self._show_preview_zoom_overlay(percent_text)
+
+    def _zoom_preview_in(self) -> None:
+        def _on_zoom_state(payload: dict) -> None:
+            try:
+                current = float(payload.get("currentScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
+            except Exception:
+                current = PREVIEW_ZOOM_RESET
+            self._apply_preview_zoom_scale(current + PREVIEW_ZOOM_STEP)
+
+        self._request_preview_zoom_state(_on_zoom_state)
+
+    def _zoom_preview_out(self) -> None:
+        def _on_zoom_state(payload: dict) -> None:
+            try:
+                current = float(payload.get("currentScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
+            except Exception:
+                current = PREVIEW_ZOOM_RESET
+            self._apply_preview_zoom_scale(current - PREVIEW_ZOOM_STEP)
+
+        self._request_preview_zoom_state(_on_zoom_state)
+
+    def _reset_preview_zoom(self) -> None:
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing zoom", 2000)
+            return
+        self._run_viewer_js(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.resetZoom && "
+            "window.__pdfexploreBridge.resetZoom();"
+        )
+        self.statusBar().showMessage("Preview zoom: page width", 1500)
+        self._show_preview_zoom_overlay("Fit Width")
+
+    def _show_preview_zoom_overlay(self, percent_text: str) -> None:
+        self._preview_zoom_overlay.setText(percent_text)
+        self._preview_zoom_overlay.adjustSize()
+        self._position_preview_zoom_overlay()
+        self._preview_zoom_overlay.raise_()
+        self._preview_zoom_overlay.show()
+        self._preview_zoom_overlay_timer.start()
+
+    def _position_preview_zoom_overlay(self) -> None:
+        overlay = getattr(self, "_preview_zoom_overlay", None)
+        target = self._current_preview_widget()
+        if overlay is None or target is None:
+            return
+        top_left = target.mapTo(self.preview_container, QPoint(0, 0))
+        target_width = max(1, target.width())
+        x = top_left.x() + max(8, (target_width - overlay.width()) // 2)
+        y = top_left.y() + 8
+        overlay.move(x, y)
 
     @staticmethod
     def _default_view_state() -> dict[str, int | float | str]:
@@ -1122,8 +2027,8 @@ class PdfExploreWindow(QMainWindow):
             if loop is not None and loop.isRunning():
                 loop.quit()
 
-        self._run_viewer_js(
-            "window.__pdfexploreBridge && window.__pdfexploreBridge.getViewState && window.__pdfexploreBridge.getViewState();",
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.getViewState && window.__pdfexploreBridge.getViewState()",
             _on_state,
         )
         if blocking and not done and loop is not None and timeout_timer is not None:
@@ -1484,6 +2389,7 @@ class PdfExploreWindow(QMainWindow):
             )
             self._apply_persistent_text_highlights()
             self._apply_active_search_to_viewer()
+            self._schedule_followup_view_restore(path_key, restore_state)
         else:
             self._viewer_ready_timer.start()
         self._rebuild_tree_marker_cache()
@@ -1703,6 +2609,7 @@ class PdfExploreWindow(QMainWindow):
     def _refresh_tree_marker_cache_for_path(self, path_key: str | None) -> None:
         if not path_key:
             return
+        session = self._view_session_for_path_key(path_key)
         if self._load_text_highlights_for_path_key(path_key):
             self._tree_highlight_marker_paths.add(path_key)
         else:
@@ -1715,45 +2622,36 @@ class PdfExploreWindow(QMainWindow):
             candidate = str(data.get("path_key") or "").strip()
             if candidate:
                 open_counts[candidate] = open_counts.get(candidate, 0) + 1
-        if open_counts.get(path_key, 0) > 1:
+        if open_counts.get(path_key, 0) > 1 or self._should_persist_document_view_session(
+            session
+        ):
             self._tree_multi_view_marker_paths.add(path_key)
         else:
             self._tree_multi_view_marker_paths.discard(path_key)
         self._sync_tree_markers_to_model()
 
     def _rebuild_tree_marker_cache(self) -> None:
-        root = self.root
-        highlighted_paths: set[str] = set()
-        multi_view_paths: set[str] = set()
-        open_counts: dict[str, int] = {}
-        for index in range(self.view_tabs.count()):
-            data = self._tab_data(index)
-            if not data:
-                continue
-            path_key = str(data.get("path_key") or "").strip()
-            if path_key:
-                open_counts[path_key] = open_counts.get(path_key, 0) + 1
-        multi_view_paths.update(
-            path_key for path_key, count in open_counts.items() if count > 1
+        root_key = self._path_key(self.root)
+        current_multi = {
+            path_key
+            for path_key in self._tree_multi_view_marker_paths
+            if path_key == root_key or path_key.startswith(root_key + os.sep)
+        }
+        current_highlights = {
+            path_key
+            for path_key in self._tree_highlight_marker_paths
+            if path_key == root_key or path_key.startswith(root_key + os.sep)
+        }
+        next_multi, next_highlights = self._merge_live_tree_marker_state(
+            current_multi,
+            current_highlights,
+            root_key=root_key,
         )
-
-        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-            directory = Path(dirpath)
-            if VIEWS_FILE_NAME in filenames:
-                sessions = self._directory_view_states(directory)
-                for file_name, session in sessions.items():
-                    if self._should_persist_document_view_session(session):
-                        multi_view_paths.add(self._path_key(directory / file_name))
-            if HIGHLIGHTING_FILE_NAME not in filenames:
-                continue
-            highlights_by_file = self._directory_text_highlights(directory)
-            for file_name, entries in highlights_by_file.items():
-                if self._normalize_text_highlight_entries(entries):
-                    highlighted_paths.add(self._path_key(directory / file_name))
-
-        self._tree_multi_view_marker_paths = multi_view_paths
-        self._tree_highlight_marker_paths = highlighted_paths
+        self._tree_multi_view_marker_paths = next_multi
+        self._tree_highlight_marker_paths = next_highlights
         self._sync_tree_markers_to_model()
+        if self._tree_marker_cache_root_key != root_key:
+            self._start_tree_marker_scan()
 
     def _sync_tree_markers_to_model(self) -> None:
         self.model.set_multi_view_path_keys(self._tree_multi_view_marker_paths)
@@ -1988,6 +2886,87 @@ class PdfExploreWindow(QMainWindow):
         self._next_text_highlight_id += 1
         return f"pdfhl-{token}"
 
+    def _replace_persistent_preview_highlight_range(
+        self,
+        path_key: str,
+        page: int,
+        start: int,
+        end: int,
+        kind: str,
+        text: str = "",
+    ) -> None:
+        if page <= 0 or end <= start:
+            self.statusBar().showMessage("Select text to highlight", 3000)
+            return
+        normalized_kind = "important" if kind == "important" else "normal"
+        entries = self._normalize_text_highlight_entries(self._current_text_highlights)
+        updated: list[dict[str, int | str]] = []
+        for entry in entries:
+            entry_page = int(entry.get("page", 0))
+            entry_start = int(entry.get("start", -1))
+            entry_end = int(entry.get("end", -1))
+            entry_kind = (
+                "important"
+                if str(entry.get("kind", "normal")).strip().lower() == "important"
+                else "normal"
+            )
+            entry_text = str(entry.get("text", ""))
+            if entry_page != page or entry_end <= start or entry_start >= end:
+                updated.append(
+                    {
+                        "id": str(entry.get("id", "")).strip()
+                        or self._new_text_highlight_id(),
+                        "page": entry_page,
+                        "start": entry_start,
+                        "end": entry_end,
+                        "kind": entry_kind,
+                        "text": entry_text,
+                    }
+                )
+                continue
+            if entry_start < start:
+                updated.append(
+                    {
+                        "id": self._new_text_highlight_id(),
+                        "page": entry_page,
+                        "start": entry_start,
+                        "end": start,
+                        "kind": entry_kind,
+                        "text": entry_text,
+                    }
+                )
+            if entry_end > end:
+                updated.append(
+                    {
+                        "id": self._new_text_highlight_id(),
+                        "page": entry_page,
+                        "start": end,
+                        "end": entry_end,
+                        "kind": entry_kind,
+                        "text": entry_text,
+                    }
+                )
+        updated.append(
+            {
+                "id": self._new_text_highlight_id(),
+                "page": page,
+                "start": start,
+                "end": end,
+                "kind": normalized_kind,
+                "text": str(text or ""),
+            }
+        )
+        normalized = self._normalize_text_highlight_entries(updated)
+        self._current_text_highlights = normalized
+        self._persist_text_highlights_for_path_key(path_key, normalized)
+        self._apply_persistent_text_highlights()
+        self.statusBar().showMessage(
+            "Important highlight added"
+            if normalized_kind == "important"
+            else "Highlight added",
+            2500,
+        )
+
     def _load_text_highlights_for_path_key(self, path_key: str | None) -> list[dict]:
         resolved = self._path_directory_and_name(path_key)
         if resolved is None:
@@ -2053,6 +3032,7 @@ class PdfExploreWindow(QMainWindow):
             )
             self._apply_persistent_text_highlights()
             self._apply_active_search_to_viewer()
+            self._schedule_followup_view_restore(path_key, restore_state)
 
         self._run_viewer_js(js, _on_ready)
 
@@ -2064,60 +3044,161 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _show_preview_context_menu(self, pos: QPoint) -> None:
-        js = (
-            "window.__pdfexploreBridge && window.__pdfexploreBridge.getSelectionInfo && "
-            f"window.__pdfexploreBridge.getSelectionInfo({int(pos.x())}, {int(pos.y())});"
+        preview = self._current_preview_widget()
+        if preview is None:
+            return
+        request = getattr(preview, "lastContextMenuRequest", lambda: None)()
+        selected_text_hint = ""
+        if request is not None:
+            try:
+                selected_text_hint = str(request.selectedText() or "")
+            except Exception:
+                selected_text_hint = ""
+        if not selected_text_hint.strip():
+            try:
+                selected_text_hint = str(preview.selectedText() or "")
+            except Exception:
+                selected_text_hint = ""
+        self._show_preview_context_menu_with_cached_selection(
+            pos,
+            {},
+            selected_text_hint,
+            click_x=int(pos.x()),
+            click_y=int(pos.y()),
         )
 
+    def _request_preview_context_menu_selection_info(
+        self,
+        click_x: int,
+        click_y: int,
+        selected_text_hint: str,
+        callback,
+    ) -> None:
         def _on_info(result) -> None:
-            info = result if isinstance(result, dict) else {}
-            self._show_preview_context_menu_with_info(pos, info)
+            info = self._normalize_viewer_json_result(result)
+            if (
+                isinstance(info, dict)
+                and selected_text_hint.strip()
+                and not str(info.get("selectedText", "") or "").strip()
+            ):
+                info["selectedText"] = selected_text_hint
+                info["hasSelection"] = bool(
+                    info.get("hasSelection")
+                    or str(info.get("selectedText", "") or "").strip()
+                )
+            callback(info)
 
-        self._run_viewer_js(js, _on_info)
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.getSelectionInfo && "
+            f"window.__pdfexploreBridge.getSelectionInfo({int(click_x)}, {int(click_y)})",
+            _on_info,
+        )
 
-    def _show_preview_context_menu_with_info(self, pos: QPoint, info: dict) -> None:
+    def _show_preview_context_menu_with_cached_selection(
+        self,
+        pos: QPoint,
+        info: dict,
+        selected_text_hint: str,
+        *,
+        click_x: int | None = None,
+        click_y: int | None = None,
+    ) -> None:
         menu = QMenu(self)
         selected_text = str(info.get("selectedText", "") or "")
-        page = info.get("page")
-        start = info.get("start")
-        end = info.get("end")
+        has_selection = bool(selected_text_hint.strip() or selected_text.strip())
+        if isinstance(info, dict):
+            if info.get("hasSelection"):
+                has_selection = True
+            try:
+                page = int(info.get("page", 0))
+                start = int(info.get("start", -1))
+                end = int(info.get("end", -1))
+            except Exception:
+                page = 0
+                start = -1
+                end = -1
+            if page > 0 and start >= 0 and end > start:
+                has_selection = True
         clicked_highlight_id = str(info.get("clickedHighlightId", "") or "").strip()
+        has_existing_persistent_highlights = bool(
+            self._normalize_text_highlight_entries(self._current_text_highlights)
+        )
 
         highlight_action = None
         highlight_important_action = None
-        if selected_text.strip():
+        if has_selection:
             highlight_action = menu.addAction("Highlight")
             highlight_important_action = menu.addAction("Highlight Important")
 
         remove_action = None
-        if clicked_highlight_id or selected_text.strip():
+        if clicked_highlight_id or has_selection or has_existing_persistent_highlights:
             remove_action = menu.addAction("Remove Highlight")
 
         copy_action = None
-        if selected_text.strip():
+        if has_selection:
             menu.addSeparator()
             copy_action = menu.addAction("Copy Selected Text")
 
         preview = self._current_preview_widget()
         if preview is None:
             return
+
+        def _run_with_fresh_context_info(handler) -> None:
+            if click_x is None or click_y is None:
+                handler(info if isinstance(info, dict) else {})
+                return
+            self._request_preview_context_menu_selection_info(
+                int(click_x),
+                int(click_y),
+                selected_text_hint,
+                lambda live_info: handler(live_info if isinstance(live_info, dict) else {}),
+            )
+
         chosen = menu.exec(preview.mapToGlobal(pos))
         if chosen is None:
             return
         if highlight_action is not None and chosen == highlight_action:
-            self._add_persistent_preview_highlight(info, kind="normal")
+            _run_with_fresh_context_info(
+                lambda live_info: self._add_persistent_preview_highlight(
+                    live_info,
+                    kind="normal",
+                    selected_text_hint=selected_text_hint,
+                )
+            )
             return
         if highlight_important_action is not None and chosen == highlight_important_action:
-            self._add_persistent_preview_highlight(info, kind="important")
+            _run_with_fresh_context_info(
+                lambda live_info: self._add_persistent_preview_highlight(
+                    live_info,
+                    kind="important",
+                    selected_text_hint=selected_text_hint,
+                )
+            )
             return
         if remove_action is not None and chosen == remove_action:
-            self._remove_persistent_preview_highlight(info)
+            _run_with_fresh_context_info(self._remove_persistent_preview_highlight)
             return
         if copy_action is not None and chosen == copy_action:
-            QApplication.clipboard().setText(selected_text, QClipboard.Mode.Clipboard)
-            self.statusBar().showMessage("Copied selected text", 2500)
+            def _copy_text(live_info: dict) -> None:
+                copied_text = str(live_info.get("selectedText", "") or "").strip() or selected_text_hint
+                if not copied_text.strip():
+                    self.statusBar().showMessage("No selected text to copy", 2500)
+                    return
+                QApplication.clipboard().setText(
+                    copied_text,
+                    QClipboard.Mode.Clipboard,
+                )
+                self.statusBar().showMessage("Copied selected text", 2500)
 
-    def _add_persistent_preview_highlight(self, info: dict, *, kind: str) -> None:
+            _run_with_fresh_context_info(_copy_text)
+
+    def _add_persistent_preview_highlight(
+        self,
+        info: dict,
+        *,
+        kind: str,
+        selected_text_hint: str = "",
+    ) -> None:
         if self.current_file is None:
             return
         if info.get("multiPageSelection"):
@@ -2133,22 +3214,15 @@ class PdfExploreWindow(QMainWindow):
         if page <= 0 or start < 0 or end <= start:
             self.statusBar().showMessage("Select text to highlight", 3000)
             return
-        entries = self._normalize_text_highlight_entries(self._current_text_highlights)
-        entries.append(
-            {
-                "id": self._new_text_highlight_id(),
-                "page": page,
-                "start": start,
-                "end": end,
-                "kind": "important" if kind == "important" else "normal",
-                "text": str(info.get("selectedText", "") or ""),
-            }
-        )
         path_key = self._path_key(self.current_file)
-        self._current_text_highlights = entries
-        self._persist_text_highlights_for_path_key(path_key, entries)
-        self._apply_persistent_text_highlights()
-        self.statusBar().showMessage("Important highlight added" if kind == "important" else "Highlight added", 2500)
+        self._replace_persistent_preview_highlight_range(
+            path_key,
+            page,
+            start,
+            end,
+            kind,
+            str(info.get("selectedText", "") or "").strip() or selected_text_hint,
+        )
 
     def _remove_persistent_preview_highlight(self, info: dict) -> None:
         if self.current_file is None:
@@ -2382,7 +3456,13 @@ class PdfExploreWindow(QMainWindow):
 
     def _update_window_title(self) -> None:
         scope = self._highlight_scope_directory()
+        if self.model.set_effective_scope_directory(scope):
+            self.tree.viewport().update()
         self.setWindowTitle(f"pdfexplore - {scope}")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._position_preview_zoom_overlay()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         current_index = self.view_tabs.currentIndex()
@@ -2399,10 +3479,17 @@ def _default_root_from_config() -> Path:
     try:
         if not config_path.exists():
             return fallback
-        raw = config_path.read_text(encoding="utf-8").strip()
-        candidate = Path(raw).expanduser()
-        if candidate.is_dir():
-            return candidate.resolve()
+        raw = config_path.read_text(encoding="utf-8", errors="replace")
+        default_root_raw, recent_roots_raw = PdfExploreWindow._parse_config_payload_text(
+            raw
+        )
+        candidates: list[str] = []
+        if default_root_raw:
+            candidates.append(default_root_raw)
+        candidates.extend(recent_roots_raw)
+        normalized = PdfExploreWindow._normalize_recent_root_directories(candidates)
+        if normalized:
+            return normalized[0]
     except Exception:
         pass
     return fallback

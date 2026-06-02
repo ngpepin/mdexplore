@@ -19,7 +19,18 @@ class PdfExploreAssetTests(unittest.TestCase):
         source = bridge.read_text(encoding="utf-8")
         self.assertIn("__pdfexploreBridge", source)
         self.assertIn("lastSelectionPayload", source)
-        self.assertIn("setTimeout(applyScrollState", source)
+        self.assertIn("captureViewState()", source)
+        self.assertIn("getZoomState()", source)
+        self.assertIn("setZoomScale(", source)
+        self.assertIn("resetZoom()", source)
+        self.assertIn('currentApp.eventBus.on("updateviewarea"', source)
+        self.assertIn("container.addEventListener(\"scroll\"", source)
+        self.assertIn("window.setTimeout(() => {", source)
+        self.assertIn('currentViewer.currentPageNumber = page', source)
+        self.assertIn('currentApp.eventBus.on("pagerendered", reapply)', source)
+        self.assertIn('currentApp.eventBus.on("textlayerrendered", refreshFromPdfJs)', source)
+        self.assertIn("rgba(102, 86, 178, 0.36)", source)
+        self.assertIn("rgba(225, 214, 255, 0.76)", source)
 
 
 if __name__ == "__main__":

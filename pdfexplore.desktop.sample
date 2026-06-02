@@ -1,0 +1,29 @@
+# Copy this file to: ~/.local/share/applications/pdfexplore.desktop
+# Then edit the absolute paths below for your environment.
+#
+# Example:
+#   cp /path/to/mdexplore/pdfexplore.desktop.sample ~/.local/share/applications/pdfexplore.desktop
+#   chmod +x ~/.local/share/applications/pdfexplore.desktop
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=pdfexplore
+GenericName=PDF Explorer
+Comment=Browse and preview PDF files with persistent highlights and views
+
+# Absolute path to your launcher script:
+# Keep %u so file-manager integrations can pass a selected directory/URI.
+Exec=/home/YOUR_USER/Projects/mdexplore/pdfexplore.sh %u
+
+# Optional working directory:
+Path=/home/YOUR_USER/Projects/mdexplore
+
+# Absolute path to icon file:
+Icon=/home/YOUR_USER/Projects/mdexplore/assets/ui/pdf.svg
+StartupWMClass=pdfexplore
+
+Terminal=false
+StartupNotify=true
+Categories=Utility;Office;Viewer;
+Keywords=pdf;preview;viewer;highlight;
