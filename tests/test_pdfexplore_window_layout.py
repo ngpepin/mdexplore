@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QEvent, Qt
+from PySide6.QtGui import QIcon, QKeyEvent
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from pdfexplore.app import PdfExploreWindow
@@ -57,6 +57,21 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
     def test_pdf_tree_uses_pdf_name_filter(self) -> None:
         self.assertEqual(self.window.model.nameFilters(), ["*.pdf"])
+
+    def test_new_document_defaults_to_page_fit_view(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "default-fit.pdf"
+        _create_pdf_with_text(pdf_path, "default fit")
+
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        tab_index = self.window.view_tabs.currentIndex()
+        tab_data = self.window._tab_data(tab_index) or {}
+        state = tab_data.get("state") if isinstance(tab_data, dict) else {}
+        self.assertEqual((state or {}).get("scale"), "page-fit")
+
+        viewer_url = self.window._viewer_url_for_pdf(pdf_path)
+        self.assertEqual(viewer_url.fragment(), "zoom=page-fit")
 
     def test_reuses_cached_preview_widget_for_previously_opened_pdf(self) -> None:
         first_pdf = Path(self._tempdir.name) / "first.pdf"
@@ -435,6 +450,99 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertTrue(self.window._preview_zoom_overlay.isVisible())
         self.assertEqual(self.window._preview_zoom_overlay.text(), "Fit Width")
 
+    def test_toggle_preview_three_up_uses_bridge_and_updates_overlay(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "three-up.pdf"
+        _create_pdf_with_text(pdf_path, "three up")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        path_key = self.window._path_key(pdf_path)
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        captured_expressions: list[str] = []
+
+        def fake_run_viewer_js_json(expression, callback):
+            captured_expressions.append(expression)
+            callback({"threeUpActive": True, "onePageScale": 1.25, "percent": 125})
+
+        self.window._run_viewer_js_json = fake_run_viewer_js_json  # type: ignore[method-assign]
+        self.window._toggle_preview_three_up()
+
+        self.assertTrue(captured_expressions)
+        self.assertIn("toggleThreeUpMode", captured_expressions[-1])
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "3-Up")
+
+    def test_set_preview_zoom_one_hundred_uses_bridge_and_updates_overlay(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "zoom-100.pdf"
+        _create_pdf_with_text(pdf_path, "zoom 100")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        path_key = self.window._path_key(pdf_path)
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        captured_expressions: list[str] = []
+
+        def fake_run_viewer_js_json(expression, callback):
+            captured_expressions.append(expression)
+            callback({"ok": True, "threeUpActive": False, "onePageScale": 1.0, "percent": 100})
+
+        self.window._run_viewer_js_json = fake_run_viewer_js_json  # type: ignore[method-assign]
+        self.window._set_preview_zoom_one_hundred()
+
+        self.assertTrue(captured_expressions)
+        self.assertIn("setOnePageZoom100", captured_expressions[-1])
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "100%")
+
+    def test_context_menu_disables_highlight_actions_in_three_up(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "menu-three-up.pdf"
+        _create_pdf_with_text(pdf_path, "menu three up")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        class _FakeAction:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeMenu:
+            last_labels: list[str] = []
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.labels: list[str] = []
+                _FakeMenu.last_labels = self.labels
+
+            def addAction(self, text: str):
+                self.labels.append(text)
+                return _FakeAction(text)
+
+            def addSeparator(self) -> None:
+                self.labels.append("---")
+
+            def exec(self, *_args, **_kwargs):
+                return None
+
+        info = {
+            "selectedText": "Alpha",
+            "hasSelection": True,
+            "page": 1,
+            "start": 0,
+            "end": 5,
+            "threeUpActive": True,
+        }
+
+        with patch("pdfexplore.app.QMenu", _FakeMenu):
+            self.window._show_preview_context_menu_with_cached_selection(
+                QPoint(4, 4),
+                info,
+                "Alpha",
+                click_x=4,
+                click_y=4,
+            )
+
+        labels = _FakeMenu.last_labels
+        self.assertNotIn("Highlight", labels)
+        self.assertNotIn("Highlight Important", labels)
+        self.assertNotIn("Remove Highlight", labels)
+        self.assertIn("Copy Selected Text", labels)
+
     def test_schedule_followup_view_restore_reapplies_restore_and_highlights(self) -> None:
         pdf_path = Path(self._tempdir.name) / "followup.pdf"
         _create_pdf_with_text(pdf_path, "followup")
@@ -466,6 +574,46 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertIn('"page": 5', restore_calls[-1])
         self.assertEqual(len(apply_highlights_calls), 3)
         self.assertEqual(len(apply_search_calls), 3)
+
+    def test_event_filter_handles_ctrl_bar_toggle_shortcut(self) -> None:
+        calls: list[str] = []
+        self.window._toggle_preview_three_up = lambda: calls.append("toggle")  # type: ignore[method-assign]
+
+        shifted_event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Backslash,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+            "|",
+        )
+        plain_event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Backslash,
+            Qt.KeyboardModifier.ControlModifier,
+            "\\",
+        )
+        override_event = QKeyEvent(
+            QEvent.Type.ShortcutOverride,
+            Qt.Key.Key_Backslash,
+            Qt.KeyboardModifier.ControlModifier,
+            "\\",
+        )
+        ctrl_nine_event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_9,
+            Qt.KeyboardModifier.ControlModifier,
+            "9",
+        )
+
+        handled_shifted = self.window.eventFilter(self.window, shifted_event)
+        handled_plain = self.window.eventFilter(self.window, plain_event)
+        handled_override = self.window.eventFilter(self.window, override_event)
+        handled_ctrl_nine = self.window.eventFilter(self.window, ctrl_nine_event)
+
+        self.assertTrue(handled_shifted)
+        self.assertTrue(handled_plain)
+        self.assertTrue(handled_override)
+        self.assertTrue(handled_ctrl_nine)
+        self.assertEqual(calls, ["toggle", "toggle", "toggle"])
 
 
 if __name__ == "__main__":

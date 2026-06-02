@@ -448,6 +448,259 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
         )
         self.assertEqual(str(reset_state.get("currentScaleValue", "")), "page-width")
 
+    def test_three_up_does_not_persist_scroll_and_restores_one_page_zoom(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+
+        desired_state = {
+            "page": 3,
+            "pagesCount": 5,
+            "scale": "1.3",
+            "scrollTop": 1500,
+            "scrollRatio": 0.5,
+        }
+        self.run_current_viewer_js(
+            f"window.__pdfexploreBridge.restoreViewState({json.dumps(desired_state)});"
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("scrollTop", 0)
+            >= 1400,
+            timeout_ms=12000,
+        )
+        settled_before = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getViewState()"
+        )
+
+        toggled = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.toggleThreeUpMode()"
+        )
+        self.assertTrue(bool(toggled.get("threeUpActive")))
+
+        self.run_current_viewer_js("window.__pdfexploreBridge.setZoomScale(1.6);")
+        self.wait_until(
+            lambda: float(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getZoomState()"
+                ).get("currentScale", 0.0)
+            )
+            >= 1.58,
+            timeout_ms=8000,
+        )
+
+        self.run_current_viewer_js(
+            "(() => { const c = document.getElementById('viewerContainer'); if (c) { c.scrollLeft = 1400; c.scrollTop = 400; } return true; })();"
+        )
+
+        self._open_and_wait_for_viewer(self.second_pdf)
+        self._open_and_wait_for_viewer(self.first_pdf)
+
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isThreeUpActive();"
+            )
+            is False,
+            timeout_ms=12000,
+        )
+
+        restored_zoom = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getZoomState()"
+        )
+        restored_view = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getViewState()"
+        )
+
+        self.assertFalse(bool(restored_zoom.get("threeUpActive")))
+        self.assertLessEqual(
+            abs(float(restored_zoom.get("currentScale", 0.0)) - 1.6),
+            0.12,
+        )
+        self.assertLessEqual(
+            abs(float(restored_view.get("scrollTop", 0)) - float(settled_before.get("scrollTop", 0))),
+            260.0,
+        )
+
+    def test_three_up_toggle_responds_to_ctrl_backslash_keys_in_viewer(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+
+        initial_state = self.run_current_viewer_js(
+            "window.__pdfexploreBridge.isThreeUpActive();"
+        )
+        self.assertEqual(initial_state, False)
+
+        after_ctrl_backslash = self.run_current_viewer_js_json(
+            """
+(() => {
+    const event = new KeyboardEvent('keydown', {
+        key: String.fromCharCode(92),
+        code: 'Backslash',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+    });
+    document.dispatchEvent(event);
+    return {
+        threeUpActive: window.__pdfexploreBridge.isThreeUpActive(),
+        scrollMode: window.PDFViewerApplication.pdfViewer.scrollMode,
+    };
+})()
+"""
+        )
+        self.assertEqual(bool(after_ctrl_backslash.get("threeUpActive")), True)
+        self.assertEqual(int(after_ctrl_backslash.get("scrollMode", -1)), 2)
+
+        after_ctrl_shift_bar = self.run_current_viewer_js(
+            """
+(() => {
+  const event = new KeyboardEvent('keydown', {
+    key: '|',
+    code: 'Backslash',
+    ctrlKey: true,
+    shiftKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  document.dispatchEvent(event);
+  return window.__pdfexploreBridge.isThreeUpActive();
+})();
+"""
+        )
+        self.assertEqual(after_ctrl_shift_bar, False)
+
+    def test_three_up_exit_page_selection_depends_on_exit_action(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+
+        entry_state = {
+            "page": 1,
+            "pagesCount": 6,
+            "scale": "page-width",
+            "scrollTop": 0,
+            "scrollRatio": 0,
+        }
+        self.run_current_viewer_js(
+            f"window.__pdfexploreBridge.restoreViewState({json.dumps(entry_state)});"
+        )
+        self.wait_until(
+            lambda: int(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getViewState()"
+                ).get("page", 0)
+            )
+            == 1,
+            timeout_ms=12000,
+        )
+
+        self.run_current_viewer_js("window.__pdfexploreBridge.toggleThreeUpMode();")
+        self.wait_until(
+            lambda: bool(
+                self.run_current_viewer_js("window.__pdfexploreBridge.isThreeUpActive();")
+            ),
+            timeout_ms=12000,
+        )
+        self.run_current_viewer_js(
+            "(() => { const c = document.getElementById('viewerContainer'); if (c) { c.scrollTop = 2200; c.scrollLeft = 320; } return true; })();"
+        )
+
+        center_page = int(
+            self.run_current_viewer_js_json(
+                """
+(() => {
+  const c = document.getElementById('viewerContainer');
+  const pages = Array.from(document.querySelectorAll('#viewer .page[data-page-number]'));
+  if (!c || !pages.length) {
+    return { centerPage: Number(window.PDFViewerApplication.page || 1) };
+  }
+  const cr = c.getBoundingClientRect();
+  const cx = cr.left + (c.clientWidth / 2);
+  const cy = cr.top + (c.clientHeight / 2);
+  let bestPage = Number(window.PDFViewerApplication.page || 1);
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const page of pages) {
+    const pageNumber = Number(page.dataset.pageNumber || 0);
+    if (!pageNumber) {
+      continue;
+    }
+    const rect = page.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      continue;
+    }
+    const dx = (rect.left + (rect.width / 2)) - cx;
+    const dy = (rect.top + (rect.height / 2)) - cy;
+    const distance = (dx * dx) + (dy * dy);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestPage = pageNumber;
+    }
+  }
+  return { centerPage: bestPage };
+})()
+"""
+            ).get("centerPage", 1)
+        )
+        self.assertGreaterEqual(center_page, 1)
+
+        self.run_current_viewer_js("window.__pdfexploreBridge.toggleThreeUpMode();")
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isThreeUpActive();"
+            )
+            is False,
+            timeout_ms=12000,
+        )
+        self.wait_until(
+            lambda: int(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getViewState()"
+                ).get("page", 0)
+            )
+            == center_page,
+            timeout_ms=12000,
+        )
+        toggle_exit_page = int(
+            self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("page", 0)
+        )
+        self.assertEqual(toggle_exit_page, center_page)
+
+        self.run_current_viewer_js(
+            f"window.__pdfexploreBridge.restoreViewState({json.dumps(entry_state)});"
+        )
+        self.wait_until(
+            lambda: int(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getViewState()"
+                ).get("page", 0)
+            )
+            == 1,
+            timeout_ms=12000,
+        )
+
+        self.run_current_viewer_js("window.__pdfexploreBridge.toggleThreeUpMode();")
+        self.wait_until(
+            lambda: bool(
+                self.run_current_viewer_js("window.__pdfexploreBridge.isThreeUpActive();")
+            ),
+            timeout_ms=12000,
+        )
+        self.run_current_viewer_js(
+            "(() => { const c = document.getElementById('viewerContainer'); if (c) { c.scrollTop = 2200; c.scrollLeft = 320; } return true; })();"
+        )
+        self.run_current_viewer_js("window.__pdfexploreBridge.setOnePageZoom100();")
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isThreeUpActive();"
+            )
+            is False,
+            timeout_ms=12000,
+        )
+        zoom_exit_page = int(
+            self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("page", 0)
+        )
+        self.assertEqual(zoom_exit_page, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

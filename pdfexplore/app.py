@@ -14,6 +14,7 @@ from pathlib import Path
 from pypdf import PdfReader
 from PySide6.QtCore import (
     QDir,
+    QEvent,
     QEventLoop,
     QMimeData,
     QPoint,
@@ -23,7 +24,7 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
 )
-from PySide6.QtGui import QAction, QClipboard, QIcon
+from PySide6.QtGui import QAction, QClipboard, QIcon, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -77,6 +78,23 @@ VIEWS_FILE_NAME = ".pdfexplore-views.json"
 HIGHLIGHTING_FILE_NAME = ".pdfexplore-highlighting.json"
 VIEWER_HTML = Path(__file__).resolve().parent / "vendor" / "pdfjs" / "web" / "viewer.html"
 VIEWER_BRIDGE_JS = Path(__file__).resolve().parent / "assets" / "viewer_bridge.js"
+
+
+class PdfPreviewWebView(QWebEngineView):
+    """WebEngine view that lets the app intercept hotkeys before pdf.js consumes them."""
+
+    def __init__(self, key_handler, parent=None) -> None:
+        super().__init__(parent)
+        self._key_handler = key_handler
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        try:
+            if callable(self._key_handler) and self._key_handler(event):
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().keyPressEvent(event)
 
 
 class PdfExploreWindow(QMainWindow):
@@ -143,6 +161,7 @@ class PdfExploreWindow(QMainWindow):
         self._viewer_pending_restore_state_by_path: dict[str, dict | None] = {}
         self._preview_signatures_by_path: dict[str, tuple[int, int]] = {}
         self._gpu_context_available = bool(gpu_context_available)
+        self._global_shortcuts: list[QShortcut] = []
 
         self.thread_pool = QThreadPool(self)
         self._search_request_id = 0
@@ -443,13 +462,184 @@ class PdfExploreWindow(QMainWindow):
         self.addAction(preview_zoom_out_action)
 
         preview_zoom_reset_action = QAction("Preview Zoom Reset", self)
-        preview_zoom_reset_action.setShortcuts(["Ctrl+0", "Ctrl+Shift+0"])
+        preview_zoom_reset_action.setShortcuts(["Ctrl+0"])
         preview_zoom_reset_action.triggered.connect(self._reset_preview_zoom)
         self.addAction(preview_zoom_reset_action)
+
+        self.preview_toggle_three_up_action = QAction("Preview Toggle 3-Up", self)
+        self.preview_toggle_three_up_action.setShortcuts(
+            [
+                "Ctrl+\\",
+                "Ctrl+|",
+                "Ctrl+Shift+\\",
+                "Ctrl+(",
+                "Ctrl+Shift+9",
+                "Ctrl+9",
+            ]
+        )
+        self.preview_toggle_three_up_action.triggered.connect(self._toggle_preview_three_up)
+        self.addAction(self.preview_toggle_three_up_action)
+
+        self.preview_zoom_one_hundred_action = QAction("Preview Zoom 100%", self)
+        self.preview_zoom_one_hundred_action.setShortcuts(["Ctrl+)", "Ctrl+Shift+0"])
+        self.preview_zoom_one_hundred_action.triggered.connect(
+            self._set_preview_zoom_one_hundred
+        )
+        self.addAction(self.preview_zoom_one_hundred_action)
+
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+\\"),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+|"),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+Shift+\\"),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence(
+                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Backslash
+            ),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence(
+                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Bar
+            ),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+Shift+9"),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+9"),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+("),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence(
+                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_ParenLeft
+            ),
+            self._toggle_preview_three_up,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+Shift+0"),
+            self._set_preview_zoom_one_hundred,
+        )
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+)"),
+            self._set_preview_zoom_one_hundred,
+        )
+        self._register_global_shortcut(
+            QKeySequence(
+                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_ParenRight
+            ),
+            self._set_preview_zoom_one_hundred,
+        )
 
         self._set_root_directory(self.root)
         self._update_window_title()
         self._update_up_button_state()
+        self.installEventFilter(self)
+
+    def _register_global_shortcut(self, sequence: QKeySequence, callback) -> None:
+        shortcut = QShortcut(sequence, self)
+        shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        shortcut.activated.connect(callback)
+        self._global_shortcuts.append(shortcut)
+
+    @staticmethod
+    def _has_ctrl_without_alt_meta(modifiers: Qt.KeyboardModifiers) -> bool:
+        if not (modifiers & Qt.KeyboardModifier.ControlModifier):
+            return False
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            return False
+        if modifiers & Qt.KeyboardModifier.MetaModifier:
+            return False
+        return True
+
+    @classmethod
+    def _is_ctrl_left_paren_key_event(cls, event: QKeyEvent) -> bool:
+        if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
+            return False
+        modifiers = event.modifiers()
+        if not cls._has_ctrl_without_alt_meta(modifiers):
+            return False
+        key = event.key()
+        has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if key == Qt.Key.Key_ParenLeft:
+            return True
+        if key == Qt.Key.Key_9:
+            return True
+        if has_shift and key in {Qt.Key.Key_9, Qt.Key.Key_ParenLeft}:
+            return True
+        key_text = str(event.text() or "")
+        if key_text in {"(", "9"}:
+            return True
+        return False
+
+    @classmethod
+    def _is_ctrl_bar_key_event(cls, event: QKeyEvent) -> bool:
+        if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
+            return False
+        modifiers = event.modifiers()
+        if not cls._has_ctrl_without_alt_meta(modifiers):
+            return False
+        key = event.key()
+        if key in {Qt.Key.Key_Bar, Qt.Key.Key_Backslash}:
+            return True
+        key_text = str(event.text() or "")
+        if key_text in {"|", "\\", "¦"}:
+            return True
+        return False
+
+    @classmethod
+    def _is_ctrl_right_paren_key_event(cls, event: QKeyEvent) -> bool:
+        if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
+            return False
+        modifiers = event.modifiers()
+        if not cls._has_ctrl_without_alt_meta(modifiers):
+            return False
+        key = event.key()
+        has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if key == Qt.Key.Key_ParenRight:
+            return True
+        if has_shift and key in {Qt.Key.Key_0, Qt.Key.Key_ParenRight}:
+            return True
+        key_text = str(event.text() or "")
+        if key_text == ")":
+            return True
+        return False
+
+    def _handle_custom_shortcut_key_event(self, event: QKeyEvent) -> bool:
+        is_toggle = self._is_ctrl_bar_key_event(event) or self._is_ctrl_left_paren_key_event(event)
+        is_zoom_100 = self._is_ctrl_right_paren_key_event(event)
+        if not (is_toggle or is_zoom_100):
+            return False
+        if event.type() == QEvent.Type.ShortcutOverride:
+            return True
+        if event.type() == QEvent.Type.KeyPress:
+            if is_toggle:
+                self.preview_toggle_three_up_action.trigger()
+                return True
+            if is_zoom_100:
+                self.preview_zoom_one_hundred_action.trigger()
+                return True
+        return False
+
+    def eventFilter(self, watched, event) -> bool:
+        if isinstance(event, QKeyEvent):
+            if self._handle_custom_shortcut_key_event(event):
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def _debug_log(self, message: str) -> None:
         if self.debug_mode:
@@ -1594,7 +1784,7 @@ class PdfExploreWindow(QMainWindow):
         viewer_url = QUrl.fromLocalFile(str(VIEWER_HTML))
         pdf_url = QUrl.fromLocalFile(str(path))
         viewer_url.setQuery(f"file={pdf_url.toString(QUrl.ComponentFormattingOption.FullyEncoded)}")
-        viewer_url.setFragment("zoom=page-width")
+        viewer_url.setFragment("zoom=page-fit")
         return viewer_url
 
     def _current_preview_widget(self) -> QWebEngineView | None:
@@ -1610,7 +1800,8 @@ class PdfExploreWindow(QMainWindow):
 
     def _create_preview_widget(self, path: Path) -> QWebEngineView:
         path_key = self._path_key(path)
-        preview = QWebEngineView()
+        preview = PdfPreviewWebView(self._handle_custom_shortcut_key_event)
+        preview.installEventFilter(self)
         preview.setProperty("pdfexplore_path_key", path_key)
         preview_settings = preview.settings()
         preview_settings.setAttribute(
@@ -1703,12 +1894,12 @@ class PdfExploreWindow(QMainWindow):
             scroll_ratio = float(payload.get("scrollRatio", 0.0) or 0.0)
         except Exception:
             scroll_ratio = 0.0
-        scale = str(payload.get("scale", "page-width") or "page-width").strip() or "page-width"
+        scale = str(payload.get("scale", "page-fit") or "page-fit").strip() or "page-fit"
         if (
             page <= 1
             and scroll_top <= 1.0
             and scroll_ratio <= 0.001
-            and scale == "page-width"
+            and scale == "page-fit"
         ):
             return
 
@@ -1797,6 +1988,63 @@ class PdfExploreWindow(QMainWindow):
         self.statusBar().showMessage("Preview zoom: page width", 1500)
         self._show_preview_zoom_overlay("Fit Width")
 
+    def _toggle_preview_three_up(self) -> None:
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing layout", 2000)
+            return
+
+        def _on_toggle(payload: dict) -> None:
+            active = bool(payload.get("threeUpActive") or payload.get("active"))
+            try:
+                one_page_scale = float(payload.get("onePageScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
+            except Exception:
+                one_page_scale = PREVIEW_ZOOM_RESET
+            percent_text = f"{int(round(one_page_scale * 100))}%"
+            if active:
+                self.statusBar().showMessage(
+                    f"Preview layout: 3-up rows (1-up zoom {percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay("3-Up")
+            else:
+                self.statusBar().showMessage(
+                    f"Preview layout: single page ({percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay(percent_text)
+
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.toggleThreeUpMode && "
+            "window.__pdfexploreBridge.toggleThreeUpMode()",
+            _on_toggle,
+        )
+
+    def _set_preview_zoom_one_hundred(self) -> None:
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing zoom", 2000)
+            return
+
+        def _on_result(payload: dict) -> None:
+            if payload.get("ok") is False:
+                self.statusBar().showMessage("Unable to set preview zoom", 2200)
+                return
+            self.statusBar().showMessage("Preview zoom: 100%", 1800)
+            self._show_preview_zoom_overlay("100%")
+
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.setOnePageZoom100 && "
+            "window.__pdfexploreBridge.setOnePageZoom100()",
+            _on_result,
+        )
+
     def _show_preview_zoom_overlay(self, percent_text: str) -> None:
         self._preview_zoom_overlay.setText(percent_text)
         self._preview_zoom_overlay.adjustSize()
@@ -1821,7 +2069,7 @@ class PdfExploreWindow(QMainWindow):
         return {
             "page": 1,
             "pagesCount": 1,
-            "scale": "page-width",
+            "scale": "page-fit",
             "scrollTop": 0.0,
             "scrollRatio": 0.0,
         }
@@ -2382,7 +2630,7 @@ class PdfExploreWindow(QMainWindow):
             self._viewer_bridge_ready_by_path[path_key] = False
             preview.setUrl(QUrl(wanted_url))
         elif self._viewer_bridge_ready_by_path.get(path_key, False):
-            restore_state = wanted_state or {"scale": "page-width"}
+            restore_state = wanted_state or {"scale": "page-fit"}
             self._run_viewer_js(
                 "window.__pdfexploreBridge && window.__pdfexploreBridge.restoreViewState && "
                 f"window.__pdfexploreBridge.restoreViewState({json.dumps(restore_state)});"
@@ -3023,7 +3271,7 @@ class PdfExploreWindow(QMainWindow):
             self._viewer_bridge_ready_by_path[path_key] = True
             restore_state = (
                 self._viewer_pending_restore_state_by_path.get(path_key)
-                or {"scale": "page-width"}
+                or {"scale": "page-fit"}
             )
             self._viewer_pending_restore_state_by_path[path_key] = None
             self._run_viewer_js(
@@ -3120,18 +3368,19 @@ class PdfExploreWindow(QMainWindow):
             if page > 0 and start >= 0 and end > start:
                 has_selection = True
         clicked_highlight_id = str(info.get("clickedHighlightId", "") or "").strip()
+        three_up_active = bool(info.get("threeUpActive"))
         has_existing_persistent_highlights = bool(
             self._normalize_text_highlight_entries(self._current_text_highlights)
         )
 
         highlight_action = None
         highlight_important_action = None
-        if has_selection:
+        if has_selection and not three_up_active:
             highlight_action = menu.addAction("Highlight")
             highlight_important_action = menu.addAction("Highlight Important")
 
         remove_action = None
-        if clicked_highlight_id or has_selection or has_existing_persistent_highlights:
+        if (clicked_highlight_id or has_selection or has_existing_persistent_highlights) and not three_up_active:
             remove_action = menu.addAction("Remove Highlight")
 
         copy_action = None

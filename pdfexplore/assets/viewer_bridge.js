@@ -3,6 +3,26 @@
     return window.__pdfexploreBridge;
   }
 
+  const ScrollMode = Object.freeze({
+    UNKNOWN: -1,
+    VERTICAL: 0,
+    HORIZONTAL: 1,
+    WRAPPED: 2,
+    PAGE: 3,
+  });
+
+  const SpreadMode = Object.freeze({
+    UNKNOWN: -1,
+    NONE: 0,
+    ODD: 1,
+    EVEN: 2,
+  });
+
+  const THREE_UP_DIVISOR = 3;
+  const MIN_ZOOM_SCALE = 0.1;
+  const MAX_ZOOM_SCALE = 10.0;
+  const RESTORE_STABILIZE_MS = 2800;
+
   const state = {
     installed: false,
     eventBusHooksInstalled: false,
@@ -14,7 +34,44 @@
     lastViewState: null,
     refreshHandle: 0,
     observer: null,
+    threeUpActive: false,
+    threeUpBaselineViewState: null,
+    threeUpOnePageScale: 1,
+    threeUpEntryOnePageScale: 1,
+    threeUpBaselineScaleValue: "page-width",
+    threeUpCenterPage: 1,
+    threeUpNormalScrollMode: ScrollMode.VERTICAL,
+    threeUpNormalSpreadMode: SpreadMode.NONE,
+    pendingRestoreViewState: null,
+    pendingRestoreUntil: 0,
   };
+
+  function computeThreeUpScale(currentViewer) {
+    if (!currentViewer) {
+      return 1;
+    }
+    const rawEntryScale = Number(state.threeUpEntryOnePageScale || 0);
+    const entryScale = Number.isFinite(rawEntryScale) && rawEntryScale > 0
+      ? rawEntryScale
+      : 1;
+    const factor = clampZoomScale(state.threeUpOnePageScale) / entryScale;
+
+    const originalScaleValue = String(currentViewer.currentScaleValue || "page-width");
+    currentViewer.currentScaleValue = "page-width";
+    const fitWidthScale = clampZoomScale(currentViewer.currentScale || 1);
+    currentViewer.currentScaleValue = originalScaleValue || "page-width";
+
+    return clampZoomScale((fitWidthScale / THREE_UP_DIVISOR) * factor);
+  }
+
+  function applyThreeUpLayout(currentViewer) {
+    if (!currentViewer) {
+      return;
+    }
+    currentViewer.spreadMode = SpreadMode.NONE;
+    currentViewer.scrollMode = ScrollMode.WRAPPED;
+    currentViewer.currentScale = computeThreeUpScale(currentViewer);
+  }
 
   function app() {
     return window.PDFViewerApplication || null;
@@ -27,6 +84,117 @@
 
   function viewerContainer() {
     return document.getElementById("viewerContainer");
+  }
+
+  function isThreeUpToggleShortcutEvent(event) {
+    if (!event || typeof event !== "object") {
+      return false;
+    }
+    if (!event.ctrlKey || event.altKey || event.metaKey) {
+      return false;
+    }
+    const key = String(event.key || "");
+    const code = String(event.code || "");
+    if (key === "\\" || key === "|") {
+      return true;
+    }
+    if (code === "Backslash") {
+      return true;
+    }
+    if (key === "(" || key === "9") {
+      return true;
+    }
+    if (code === "Digit9") {
+      return true;
+    }
+    return false;
+  }
+
+  function pageNearestViewportCenter(currentApp, currentViewer, container) {
+    const fallbackPage = Number.parseInt(
+      (currentApp && currentApp.page) || (currentViewer && currentViewer.currentPageNumber) || 1,
+      10
+    );
+    if (!container) {
+      return Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const viewportCenterX = containerRect.left + (container.clientWidth / 2);
+    const viewportCenterY = containerRect.top + (container.clientHeight / 2);
+
+    let bestPage = Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const pageEl of pageElements()) {
+      const pageNumber = Number.parseInt(pageEl.dataset.pageNumber || "", 10);
+      if (!Number.isFinite(pageNumber) || pageNumber <= 0) {
+        continue;
+      }
+      const rect = pageEl.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+      const pageCenterX = rect.left + (rect.width / 2);
+      const pageCenterY = rect.top + (rect.height / 2);
+      const dx = pageCenterX - viewportCenterX;
+      const dy = pageCenterY - viewportCenterY;
+      const distance = (dx * dx) + (dy * dy);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestPage = pageNumber;
+      }
+    }
+    return bestPage;
+  }
+
+  function clampZoomScale(rawScale) {
+    const parsed = Number(rawScale);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return 1;
+    }
+    return Math.max(MIN_ZOOM_SCALE, Math.min(MAX_ZOOM_SCALE, parsed));
+  }
+
+  function cloneStateObject(rawValue) {
+    if (!rawValue || typeof rawValue !== "object") {
+      return {};
+    }
+    return Object.assign({}, rawValue);
+  }
+
+  function onePageScaleFromViewer(currentViewer) {
+    return clampZoomScale(currentViewer && currentViewer.currentScale ? currentViewer.currentScale : 1);
+  }
+
+  function threeUpViewState() {
+    const baseline = cloneStateObject(state.threeUpBaselineViewState);
+    const currentViewer = viewer();
+    const currentApp = app();
+    const page = Number.parseInt(baseline.page, 10);
+    const pagesCount = Number(
+      baseline.pagesCount
+      || (currentViewer && currentViewer.pagesCount)
+      || (currentApp && currentApp.pagesCount)
+      || 0
+    );
+    const scrollTop = Number(baseline.scrollTop || 0);
+    const scrollRatio = Number(baseline.scrollRatio || 0);
+    const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+    const baselineScaleValue = String(state.threeUpBaselineScaleValue || "").trim();
+    const scaleValue = baselineScaleValue || String(onePageScale);
+    return {
+      page: Number.isFinite(page) && page > 0 ? page : Number(currentApp && currentApp.page ? currentApp.page : 1),
+      pagesCount: Number.isFinite(pagesCount) && pagesCount > 0 ? pagesCount : 1,
+      scale: scaleValue,
+      scrollTop: Number.isFinite(scrollTop) && scrollTop >= 0 ? scrollTop : 0,
+      scrollRatio: Number.isFinite(scrollRatio) && scrollRatio >= 0 ? scrollRatio : 0,
+    };
+  }
+
+  function capturePersistedViewState() {
+    if (state.threeUpActive) {
+      return threeUpViewState();
+    }
+    return captureViewState();
   }
 
   function captureViewState() {
@@ -412,6 +580,14 @@ html, body {
     ensureInjectedStyle();
     ensureObservers();
     if (!state.installed) {
+      document.addEventListener("keydown", (event) => {
+        if (!isThreeUpToggleShortcutEvent(event)) {
+          return;
+        }
+        toggleThreeUpMode();
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
       document.addEventListener("contextmenu", (event) => {
         state.lastClickedHighlightId = locateClickedHighlightId(event.clientX, event.clientY);
       }, true);
@@ -435,7 +611,18 @@ html, body {
       const container = viewerContainer();
       if (container) {
         container.addEventListener("scroll", () => {
-          state.lastViewState = captureViewState();
+          if (state.threeUpActive) {
+            const currentAppForCenter = app();
+            const currentViewerForCenter = viewer();
+            if (currentAppForCenter && currentViewerForCenter) {
+              state.threeUpCenterPage = pageNearestViewportCenter(
+                currentAppForCenter,
+                currentViewerForCenter,
+                container
+              );
+            }
+          }
+          state.lastViewState = capturePersistedViewState();
           if (state.persistentEntries.length || state.searchTerms.length) {
             scheduleRefresh();
           }
@@ -449,11 +636,11 @@ html, body {
       && typeof currentApp.eventBus.on === "function"
     ) {
       const refreshFromPdfJs = () => {
-        state.lastViewState = captureViewState();
+        state.lastViewState = capturePersistedViewState();
         scheduleRefresh();
       };
       currentApp.eventBus.on("updateviewarea", () => {
-        state.lastViewState = captureViewState();
+        state.lastViewState = capturePersistedViewState();
         if (state.persistentEntries.length || state.searchTerms.length) {
           scheduleRefresh();
         }
@@ -463,7 +650,7 @@ html, body {
       currentApp.eventBus.on("textlayerrendered", refreshFromPdfJs);
       state.eventBusHooksInstalled = true;
     }
-    state.lastViewState = captureViewState();
+    state.lastViewState = capturePersistedViewState();
     scheduleRefresh();
     return true;
   }
@@ -473,18 +660,38 @@ html, body {
     return !!(state.installed && currentViewer && currentViewer.pagesCount >= 1);
   }
 
-  function getViewState() {
-    const currentState = captureViewState();
-    if (currentState && typeof currentState === "object" && Object.keys(currentState).length > 0) {
-      state.lastViewState = currentState;
-      return currentState;
+  function applyPageState(currentApp, currentViewer, page) {
+    if (!Number.isFinite(page) || page <= 0) {
+      return;
     }
-    return state.lastViewState && typeof state.lastViewState === "object"
-      ? Object.assign({}, state.lastViewState)
-      : {};
+    if (currentApp.pdfLinkService && typeof currentApp.pdfLinkService.goToPage === "function") {
+      currentApp.pdfLinkService.goToPage(page);
+      return;
+    }
+    if (typeof currentViewer.scrollPageIntoView === "function") {
+      currentViewer.scrollPageIntoView({ pageNumber: page });
+      return;
+    }
+    if ("page" in currentApp) {
+      currentApp.page = page;
+    }
+    if ("currentPageNumber" in currentViewer) {
+      currentViewer.currentPageNumber = page;
+    }
   }
 
-  function restoreViewState(stateValue) {
+  function applyScrollState(container, stateValue) {
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const ratio = Number(stateValue.scrollRatio);
+    const scrollTop = Number(stateValue.scrollTop);
+    if (Number.isFinite(scrollTop) && scrollTop >= 0) {
+      container.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop));
+    } else if (Number.isFinite(ratio) && ratio >= 0) {
+      container.scrollTop = Math.max(0, Math.min(maxScrollTop, ratio * maxScrollTop));
+    }
+  }
+
+  function applyViewState(stateValue) {
     const currentApp = app();
     const currentViewer = viewer();
     const container = viewerContainer();
@@ -501,70 +708,43 @@ html, body {
       scrollTop: Number(stateValue.scrollTop || 0),
       scrollRatio: Number(stateValue.scrollRatio || 0),
     };
-    const applyPageState = () => {
-      if (!Number.isFinite(page) || page <= 0) {
-        return;
-      }
-      if (currentApp.pdfLinkService && typeof currentApp.pdfLinkService.goToPage === "function") {
-        currentApp.pdfLinkService.goToPage(page);
-        return;
-      }
-      if (typeof currentViewer.scrollPageIntoView === "function") {
-        currentViewer.scrollPageIntoView({ pageNumber: page });
-        return;
-      }
-      if ("page" in currentApp) {
-        currentApp.page = page;
-      }
-      if ("currentPageNumber" in currentViewer) {
-        currentViewer.currentPageNumber = page;
-      }
-    };
-    const applyScrollState = () => {
-      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-      const ratio = Number(stateValue.scrollRatio);
-      const scrollTop = Number(stateValue.scrollTop);
-      if (Number.isFinite(scrollTop) && scrollTop >= 0) {
-        container.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop));
-      } else if (Number.isFinite(ratio) && ratio >= 0) {
-        container.scrollTop = Math.max(0, Math.min(maxScrollTop, ratio * maxScrollTop));
-      }
-    };
-    applyPageState();
+    state.pendingRestoreViewState = cloneStateObject(state.lastViewState);
+    state.pendingRestoreUntil = Date.now() + RESTORE_STABILIZE_MS;
+    applyPageState(currentApp, currentViewer, page);
     window.requestAnimationFrame(() => {
-      applyPageState();
-      applyScrollState();
-      state.lastViewState = captureViewState();
+      applyPageState(currentApp, currentViewer, page);
+      applyScrollState(container, stateValue);
+      state.lastViewState = capturePersistedViewState();
       window.requestAnimationFrame(() => {
-        applyPageState();
-        applyScrollState();
-        state.lastViewState = captureViewState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
+        state.lastViewState = capturePersistedViewState();
       });
       window.setTimeout(() => {
-        applyPageState();
-        applyScrollState();
-        state.lastViewState = captureViewState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
+        state.lastViewState = capturePersistedViewState();
       }, 80);
       window.setTimeout(() => {
-        applyPageState();
-        applyScrollState();
-        state.lastViewState = captureViewState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
+        state.lastViewState = capturePersistedViewState();
       }, 220);
       window.setTimeout(() => {
-        applyPageState();
-        applyScrollState();
-        state.lastViewState = captureViewState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
+        state.lastViewState = capturePersistedViewState();
       }, 450);
       window.setTimeout(() => {
-        applyPageState();
-        applyScrollState();
-        state.lastViewState = captureViewState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
+        state.lastViewState = capturePersistedViewState();
       }, 900);
     });
     if (currentApp.eventBus && typeof currentApp.eventBus.on === "function") {
       const reapply = () => {
-        applyPageState();
-        applyScrollState();
+        applyPageState(currentApp, currentViewer, page);
+        applyScrollState(container, stateValue);
         if (currentApp.eventBus && typeof currentApp.eventBus.off === "function") {
           currentApp.eventBus.off("pagerendered", reapply);
           currentApp.eventBus.off("pagesloaded", reapply);
@@ -574,6 +754,189 @@ html, body {
       currentApp.eventBus.on("pagesloaded", reapply);
     }
     return true;
+  }
+
+  function enterThreeUpMode() {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    if (state.threeUpActive) {
+      return true;
+    }
+    const baseline = capturePersistedViewState();
+    state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
+      ? baseline
+      : {
+          page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
+          pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+          scale: String(currentViewer.currentScaleValue || "page-width"),
+          scrollTop: 0,
+          scrollRatio: 0,
+        };
+    state.threeUpOnePageScale = onePageScaleFromViewer(currentViewer);
+    state.threeUpEntryOnePageScale = state.threeUpOnePageScale;
+    state.threeUpBaselineScaleValue = String(
+      currentViewer.currentScaleValue || state.threeUpOnePageScale
+    );
+    state.threeUpNormalScrollMode = Number.isInteger(currentViewer.scrollMode)
+      ? currentViewer.scrollMode
+      : ScrollMode.VERTICAL;
+    state.threeUpNormalSpreadMode = Number.isInteger(currentViewer.spreadMode)
+      ? currentViewer.spreadMode
+      : SpreadMode.NONE;
+    state.threeUpCenterPage = Number.parseInt(state.threeUpBaselineViewState.page, 10) || 1;
+    state.pendingRestoreViewState = null;
+    state.pendingRestoreUntil = 0;
+    state.threeUpActive = true;
+    applyThreeUpLayout(currentViewer);
+    applyPageState(
+      currentApp,
+      currentViewer,
+      Number.parseInt(state.threeUpBaselineViewState.page, 10)
+    );
+    state.lastViewState = threeUpViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function leaveThreeUpMode(options) {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    const rawOptions = options && typeof options === "object" ? options : {};
+    const restoreBaseline = rawOptions.restoreBaseline !== false;
+    const preferViewportCenterPage = rawOptions.preferViewportCenterPage === true;
+    const container = viewerContainer();
+    const trackedCenterPage = Number.parseInt(state.threeUpCenterPage, 10);
+    const liveCenterPage = pageNearestViewportCenter(currentApp, currentViewer, container);
+    const centeredExitPage = preferViewportCenterPage
+      ? (
+        Number.isFinite(liveCenterPage) && liveCenterPage > 0
+          ? liveCenterPage
+          : (Number.isFinite(trackedCenterPage) && trackedCenterPage > 0 ? trackedCenterPage : null)
+      )
+      : null;
+    if (Number.isFinite(Number(rawOptions.onePageScale)) && Number(rawOptions.onePageScale) > 0) {
+      state.threeUpOnePageScale = clampZoomScale(Number(rawOptions.onePageScale));
+      state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
+    }
+    if (!state.threeUpActive) {
+      return true;
+    }
+    const restoreState = threeUpViewState();
+    state.threeUpActive = false;
+    currentViewer.spreadMode = Number.isInteger(state.threeUpNormalSpreadMode)
+      ? state.threeUpNormalSpreadMode
+      : SpreadMode.NONE;
+    currentViewer.scrollMode = Number.isInteger(state.threeUpNormalScrollMode)
+      ? state.threeUpNormalScrollMode
+      : ScrollMode.VERTICAL;
+    state.threeUpBaselineViewState = null;
+    state.threeUpCenterPage = 1;
+    state.pendingRestoreViewState = null;
+    state.pendingRestoreUntil = 0;
+    if (restoreBaseline) {
+      if (Number.isFinite(centeredExitPage) && centeredExitPage > 0) {
+        const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+        const centeredState = {
+          page: centeredExitPage,
+          pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+          scale: String(onePageScale),
+        };
+        const restored = applyViewState(centeredState);
+        if (restored) {
+          scheduleRefresh();
+        }
+        return restored;
+      }
+      const restored = applyViewState(restoreState);
+      if (restored) {
+        scheduleRefresh();
+      }
+      return restored;
+    }
+    currentViewer.currentScale = clampZoomScale(state.threeUpOnePageScale);
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function toggleThreeUpMode() {
+    if (state.threeUpActive) {
+      leaveThreeUpMode({ restoreBaseline: true, preferViewportCenterPage: true });
+    } else {
+      enterThreeUpMode();
+    }
+    const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+    return {
+      active: Boolean(state.threeUpActive),
+      threeUpActive: Boolean(state.threeUpActive),
+      onePageScale,
+      percent: Math.round(onePageScale * 100),
+    };
+  }
+
+  function isThreeUpActive() {
+    return Boolean(state.threeUpActive);
+  }
+
+  function setOnePageZoom100() {
+    const resultPayload = {
+      active: false,
+      threeUpActive: false,
+      onePageScale: 1,
+      percent: 100,
+      ok: true,
+    };
+    if (state.threeUpActive) {
+      resultPayload.ok = leaveThreeUpMode({ restoreBaseline: true, onePageScale: 1.0 });
+      return resultPayload;
+    }
+    const currentViewer = viewer();
+    if (!currentViewer) {
+      resultPayload.ok = false;
+      return resultPayload;
+    }
+    currentViewer.currentScale = 1.0;
+    state.threeUpOnePageScale = 1.0;
+    state.threeUpBaselineScaleValue = "1";
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
+    return resultPayload;
+  }
+
+  function getViewState() {
+    if (
+      !state.threeUpActive
+      &&
+      state.pendingRestoreViewState
+      && Date.now() <= Number(state.pendingRestoreUntil || 0)
+    ) {
+      const pending = cloneStateObject(state.pendingRestoreViewState);
+      state.lastViewState = cloneStateObject(pending);
+      return pending;
+    }
+    state.pendingRestoreViewState = null;
+    state.pendingRestoreUntil = 0;
+    const currentState = capturePersistedViewState();
+    if (currentState && typeof currentState === "object" && Object.keys(currentState).length > 0) {
+      state.lastViewState = cloneStateObject(currentState);
+      return cloneStateObject(currentState);
+    }
+    return state.lastViewState && typeof state.lastViewState === "object"
+      ? Object.assign({}, state.lastViewState)
+      : {};
+  }
+
+  function restoreViewState(stateValue) {
+    if (state.threeUpActive) {
+      leaveThreeUpMode({ restoreBaseline: false });
+    }
+    return applyViewState(stateValue);
   }
 
   function goToTop() {
@@ -594,12 +957,22 @@ html, body {
     if (!currentViewer) {
       return {};
     }
+    if (state.threeUpActive) {
+      const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+      return {
+        currentScale: onePageScale,
+        currentScaleValue: String(onePageScale),
+        percent: Math.round(onePageScale * 100),
+        threeUpActive: true,
+      };
+    }
     const currentScale = Number(currentViewer.currentScale || 1);
     const currentScaleValue = String(currentViewer.currentScaleValue || "page-width");
     return {
       currentScale,
       currentScaleValue,
       percent: Math.round(currentScale * 100),
+      threeUpActive: false,
     };
   }
 
@@ -612,6 +985,16 @@ html, body {
     if (!Number.isFinite(nextScale) || nextScale <= 0) {
       return false;
     }
+    if (state.threeUpActive) {
+      state.threeUpOnePageScale = clampZoomScale(nextScale);
+      state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
+      state.threeUpBaselineViewState = threeUpViewState();
+      state.threeUpBaselineViewState.scale = String(state.threeUpOnePageScale);
+      applyThreeUpLayout(currentViewer);
+      state.lastViewState = threeUpViewState();
+      scheduleRefresh();
+      return true;
+    }
     currentViewer.currentScale = nextScale;
     state.lastViewState = captureViewState();
     scheduleRefresh();
@@ -623,7 +1006,12 @@ html, body {
     if (!currentViewer) {
       return false;
     }
+    if (state.threeUpActive) {
+      leaveThreeUpMode({ restoreBaseline: false });
+    }
     currentViewer.currentScaleValue = "page-width";
+    state.threeUpOnePageScale = onePageScaleFromViewer(currentViewer);
+    state.threeUpBaselineScaleValue = "page-width";
     state.lastViewState = captureViewState();
     scheduleRefresh();
     return true;
@@ -639,6 +1027,7 @@ html, body {
       start: null,
       end: null,
       multiPageSelection: false,
+      threeUpActive: Boolean(state.threeUpActive),
       clickedHighlightId: locateClickedHighlightId(Number(clickX) || 0, Number(clickY) || 0) || state.lastClickedHighlightId || "",
     };
     if (!selected || !selected.rangeCount || selected.isCollapsed) {
@@ -655,6 +1044,7 @@ html, body {
           start: cached.start,
           end: cached.end,
           multiPageSelection: Boolean(cached.multiPageSelection),
+          threeUpActive: Boolean(state.threeUpActive),
           clickedHighlightId: payload.clickedHighlightId,
         };
       }
@@ -717,6 +1107,9 @@ html, body {
   window.__pdfexploreBridge = {
     install,
     isReady,
+    isThreeUpActive,
+    toggleThreeUpMode,
+    setOnePageZoom100,
     getViewState,
     restoreViewState,
     goToTop,
