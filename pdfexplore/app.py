@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -78,6 +79,7 @@ VIEWS_FILE_NAME = ".pdfexplore-views.json"
 HIGHLIGHTING_FILE_NAME = ".pdfexplore-highlighting.json"
 VIEWER_HTML = Path(__file__).resolve().parent / "vendor" / "pdfjs" / "web" / "viewer.html"
 VIEWER_BRIDGE_JS = Path(__file__).resolve().parent / "assets" / "viewer_bridge.js"
+OKULAR_EDIT_LAUNCHER = Path("/home/npepin/.local/share/applications-scripts/run-okular.sh")
 
 
 class PdfPreviewWebView(QWebEngineView):
@@ -276,6 +278,10 @@ class PdfExploreWindow(QMainWindow):
         self.add_view_btn = QPushButton("Add View")
         self.add_view_btn.clicked.connect(self._add_document_view)
 
+        self.edit_btn = QPushButton("Edit")
+        self.edit_btn.clicked.connect(self._edit_current_file)
+        self._update_edit_button_state()
+
         self.path_label = QLabel("")
         self.path_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
@@ -387,6 +393,7 @@ class PdfExploreWindow(QMainWindow):
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
         top_bar.addWidget(self.add_view_btn)
+        top_bar.addWidget(self.edit_btn)
         top_bar.addWidget(self.path_label, 1)
         top_bar.addWidget(copy_buttons_widget, 0, Qt.AlignmentFlag.AlignRight)
         top_bar.addSpacing(16)
@@ -1038,6 +1045,16 @@ class PdfExploreWindow(QMainWindow):
         self.view_tabs.blockSignals(blocked)
         self._active_view_tab_index = -1
         self._refresh_view_tabs_visibility()
+
+    def _update_edit_button_state(self) -> None:
+        enabled = False
+        current = getattr(self, "current_file", None)
+        if isinstance(current, Path):
+            try:
+                enabled = current.is_file()
+            except Exception:
+                enabled = False
+        self.edit_btn.setEnabled(enabled)
 
     def _expanded_directory_paths(self) -> list[str]:
         expanded: list[str] = []
@@ -2606,6 +2623,7 @@ class PdfExploreWindow(QMainWindow):
             return
         path = Path(path_text)
         self.current_file = path
+        self._update_edit_button_state()
         self._set_preview_signature_for_path(path)
         try:
             label_text = str(path.relative_to(self.root))
@@ -2687,6 +2705,7 @@ class PdfExploreWindow(QMainWindow):
         elif self.view_tabs.count() == 1 and self._tab_custom_label(0) is not None:
             visible = True
         self.view_tabs.setVisible(visible)
+        self._update_edit_button_state()
         self._rebuild_tree_marker_cache()
 
     def _on_view_tab_changed(self, index: int) -> None:
@@ -3676,6 +3695,32 @@ class PdfExploreWindow(QMainWindow):
                 f"Copied previewed file to clipboard: {target.name}",
                 4000,
             )
+
+    def _edit_current_file(self) -> None:
+        if self.current_file is None:
+            self.statusBar().showMessage("Open a PDF before using Edit", 2500)
+            return
+        target = self.current_file.resolve()
+        if not target.is_file():
+            self.statusBar().showMessage("Previewed PDF is unavailable", 3000)
+            return
+        if not OKULAR_EDIT_LAUNCHER.is_file():
+            self.statusBar().showMessage(
+                f"Edit launcher not found: {OKULAR_EDIT_LAUNCHER}",
+                5000,
+            )
+            return
+        try:
+            subprocess.Popen([str(OKULAR_EDIT_LAUNCHER), str(target)])
+        except PermissionError:
+            self.statusBar().showMessage(
+                f"Edit launcher is not executable: {OKULAR_EDIT_LAUNCHER}",
+                5000,
+            )
+        except OSError as exc:
+            self.statusBar().showMessage(f"Failed to open in Okular: {exc}", 5000)
+        else:
+            self.statusBar().showMessage(f"Opened in Okular: {target.name}", 2500)
 
     def _copy_highlighted_files_to_clipboard(self, color_value: str, color_name: str) -> None:
         scope = self._highlight_scope_directory()

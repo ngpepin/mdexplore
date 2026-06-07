@@ -241,6 +241,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         QApplication.processEvents()
 
         self.assertIsNone(self.window.current_file)
+        self.assertFalse(self.window.edit_btn.isEnabled())
         self.assertEqual(self.window.view_tabs.count(), 0)
         self.assertIs(self.window.preview_stack.currentWidget(), self.window._empty_preview)
 
@@ -491,6 +492,27 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertTrue(captured_expressions)
         self.assertIn("setOnePageZoom100", captured_expressions[-1])
         self.assertEqual(self.window._preview_zoom_overlay.text(), "100%")
+
+    def test_edit_button_is_available(self) -> None:
+        self.assertEqual(self.window.edit_btn.text(), "Edit")
+        self.assertFalse(self.window.edit_btn.isEnabled())
+
+    def test_edit_current_file_uses_okular_launcher_script(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "open-in-okular.pdf"
+        _create_pdf_with_text(pdf_path, "open in okular")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+        self.assertTrue(self.window.edit_btn.isEnabled())
+
+        launcher = Path(self._tempdir.name) / "run-okular.sh"
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        with patch("pdfexplore.app.OKULAR_EDIT_LAUNCHER", launcher), patch(
+            "pdfexplore.app.subprocess.Popen"
+        ) as popen_mock:
+            self.window._edit_current_file()
+
+        popen_mock.assert_called_once_with([str(launcher), str(pdf_path.resolve())])
 
     def test_context_menu_disables_highlight_actions_in_three_up(self) -> None:
         pdf_path = Path(self._tempdir.name) / "menu-three-up.pdf"
