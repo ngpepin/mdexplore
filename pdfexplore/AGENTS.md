@@ -38,6 +38,10 @@ The system should feel predictable under stress: opening a new root, expanding f
 - Scope correctness invariant:
     - Operations that are scope-dependent (search/copy/highlight actions) must use
         the same effective-scope semantics as the tree model.
+- Search-marker interaction invariant:
+    - Right-rail search markers should appear progressively during long scans.
+    - Newly visible markers should be clickable immediately.
+    - Marker build throughput may be reduced or interrupted to preserve click-to-jump responsiveness.
 
 ## Key Sidecars
 
@@ -168,6 +172,15 @@ C4Component
     - produce sidecar-derived marker sets,
     - must be merged with live state to avoid transient badge regressions.
 
+## Viewer Bridge Marker Rules
+
+- Marker generation in `pdfexplore/assets/viewer_bridge.js` should remain document-key scoped.
+- Per-page extracted text should be cached and reused for repeated searches in the same open PDF.
+- Marker generation should run in bounded concurrent batches and publish partial results each batch.
+- Long builds should periodically yield to the event loop so input/paint are not starved.
+- Marker click navigation should be allowed to interrupt active marker builds, then resume automatically.
+- Do not block marker click handlers on build completion.
+
 ## UI Performance Guardrails
 
 - Avoid introducing filesystem `resolve()` loops inside frequently called marker-sync paths.
@@ -215,6 +228,7 @@ Recommended validation sequence:
 - Prefer sharing generic behavior through `mdexplore_app` for long-term parity.
 - Keep prefetch throttling interaction-first; regressions should bias toward smooth UI.
 - Treat marker badge continuity as correctness-critical: highlight and cache badges must survive tab switches, searches, and root navigation.
+- Treat marker click latency as correctness-critical in the viewer bridge: visual marker speed without click responsiveness is a regression.
 - Preserve current UX contracts:
   - scope-aware operations align with visible tree behavior,
   - copy metadata merge semantics match mdexplore expectations,

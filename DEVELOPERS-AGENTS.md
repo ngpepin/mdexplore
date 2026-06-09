@@ -1695,6 +1695,9 @@ When changing behavior:
 - Update `README.md` usage and examples.
 - Update `DEVELOPERS-AGENTS.md` when behavioral hierarchy, precedence, invariants,
   render/caching/PDF/diagram control flow, or agent-facing workflow changes.
+- If the change affects `pdfexplore` behavior (especially search-marker or
+  viewer-bridge interaction semantics), also update
+  `pdfexplore/README.md` and `pdfexplore/AGENTS.md` in the same change.
 - Update `UML.md` when extracted boundaries, architecture, or major control-flow
   ownership changes.
 

@@ -12,6 +12,8 @@ same habit of preserving work state without modifying source documents.
 - Text extraction uses layered cache (memory + disk) and badge visibility.
 - Tree marker state merges sidecar scan + live state to reduce stale badge drops.
 - Interaction-first throttling is in place (scroll and tree mutation pauses).
+- Viewer right-rail search markers now build progressively with document-scoped page-text caching.
+- Marker builds now include interaction-priority behavior so click-to-jump remains responsive during long scans.
 
 ## Roadmap (2026)
 
@@ -73,7 +75,8 @@ work without reinterpreting old phase notes.
 
 3. Search/marker performance tuning remains ongoing.
    - Search scope now follows visible-tree behavior.
-   - Remaining work is mostly responsiveness tuning for larger directories.
+   - Marker generation throughput and click responsiveness were both improved.
+   - Remaining work is mostly calibration/timing for very large PDFs and edge hardware.
 
 4. Visual consistency needs additional regression checks.
    - Badge coexistence (search pill + marker + cache badge) should be regression-tested more thoroughly.
@@ -131,5 +134,6 @@ work without reinterpreting old phase notes.
 
 - [ ] Add focused performance regression tests around root changes with medium-size directories.
 - [ ] Add deterministic marker-badge tests for transitions: add highlight -> switch file -> switch back.
+- [ ] Add viewer-bridge regression tests for marker click responsiveness during in-progress marker builds.
 - [ ] Add lightweight optional timing instrumentation hooks for hot paths
    (tree marker sync, visible-tree listing, search aggregation).

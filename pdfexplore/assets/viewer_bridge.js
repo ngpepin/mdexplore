@@ -23,6 +23,9 @@
   const MAX_ZOOM_SCALE = 10.0;
   const RESTORE_STABILIZE_MS = 2800;
 
+  // Bridge runtime state. Search-indicator fields intentionally track both
+  // completed and in-flight builds so marker rendering can stay progressive
+  // while still supporting cancellation and interaction-priority interrupts.
   const state = {
     installed: false,
     eventBusHooksInstalled: false,
@@ -445,6 +448,8 @@ html, body {
     return rail;
   }
 
+  // Keep the right-side indicator rail aligned to whichever scroll container
+  // currently owns the meaningful scroll range (document vs viewer internals).
   function syncSearchIndicatorRailBounds(rail) {
     const targetRail = rail || document.querySelector("body > .pdfexplore-search-indicator-rail");
     if (!targetRail) {
@@ -513,6 +518,8 @@ html, body {
     state.searchTextPromiseByPage = new Map();
   }
 
+  // User clicks should win over marker throughput. Interrupt the active build,
+  // allow navigation/rendering to settle, then resume using existing cache.
   function interruptSearchIndicatorBuildForInteraction() {
     if (!state.searchIndicatorPendingSignature) {
       return;
@@ -591,6 +598,8 @@ html, body {
     return `${documentKey}|${pagesCount}`;
   }
 
+  // A signature keys marker entries to document identity + normalized terms.
+  // Matching signatures let us reuse built entries and avoid needless rebuilds.
   function currentSearchIndicatorSignature(terms) {
     const normalizedTerms = normalizedSearchTerms(terms);
     if (!normalizedTerms.length) {
@@ -640,6 +649,8 @@ html, body {
     state.searchTextPromiseByPage = new Map();
   }
 
+  // The page-text cache is document scoped. Any root/document switch resets the
+  // cache key so stale text is never reused across different PDFs.
   function ensureSearchTextCacheForCurrentDocument() {
     const cacheKey = currentSearchDocumentKey();
     if (state.searchTextCacheKey !== cacheKey) {
@@ -663,6 +674,7 @@ html, body {
       return String(await existingPromise);
     }
 
+    // Deduplicate concurrent requests for the same page while a build is active.
     const task = (async () => {
       let pageText = "";
       try {
@@ -729,6 +741,8 @@ html, body {
     if (currentApp && currentViewer && Number.isFinite(pageNumber) && pageNumber > 0) {
       applyPageState(currentApp, currentViewer, pageNumber);
     }
+    // Retry a few times because pdf.js may need a brief render delay before
+    // search highlight rectangles exist on the target page.
     const tryFocus = () => {
       if (!Number.isFinite(pageNumber) || pageNumber <= 0) {
         return;
@@ -797,6 +811,8 @@ html, body {
 
     const cacheKey = ensureSearchTextCacheForCurrentDocument();
 
+    // Build markers progressively in page order so users get early, clickable
+    // coverage near the top of the document before full completion.
     const entries = [];
     const maxEntries = 2400;
     const concurrency = Math.max(2, Math.min(4, Number((navigator && navigator.hardwareConcurrency) || 4)));
@@ -850,6 +866,8 @@ html, body {
         }
       }
 
+      // Publish partial entries after each batch to keep the rail interactive
+      // throughout long scans.
       if (entries.length > 0) {
         state.searchIndicatorEntries = entries.slice();
         refreshSearchIndicators(state.searchIndicatorEntries);
@@ -857,6 +875,7 @@ html, body {
 
       processedBatches += 1;
       if (processedBatches % 3 === 0) {
+        // Yield periodically so input/paint events are not starved by scan work.
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
 
@@ -880,6 +899,7 @@ html, body {
       clearSearchIndicators();
       return;
     }
+    // Reuse completed entries when the query/document signature is unchanged.
     if (state.searchIndicatorSignature === signature && state.searchIndicatorEntries.length) {
       refreshSearchIndicators(state.searchIndicatorEntries);
       return;
@@ -894,6 +914,7 @@ html, body {
     state.searchIndicatorEntries = [];
     clearSearchIndicators();
 
+    // Build asynchronously so paint/input can continue while markers appear.
     collectSearchIndicatorEntriesForTerms(normalizedTerms, buildId, signature)
       .then((entries) => {
         if (
@@ -919,6 +940,8 @@ html, body {
   }
 
   function refreshSearchIndicators(entries) {
+    // Merge nearby marker pixels into thicker clusters so dense hit regions stay
+    // clickable and visually legible on long documents.
     const normalized = Array.isArray(entries)
       ? entries
         .map((entry) => {
@@ -1221,6 +1244,8 @@ html, body {
   function refreshSearchHighlights() {
     clearOverlayClass("search");
     const terms = Array.isArray(state.searchTerms) ? state.searchTerms : [];
+    // Fallback entries come from currently rendered highlight rects. They allow
+    // immediate marker feedback before full-text scanning completes.
     const renderedFallbackEntries = [];
     if (!terms.length) {
       clearSearchIndicatorBuildState();
@@ -1361,6 +1386,8 @@ html, body {
         }
       }, true);
       const onAnyScroll = (event) => {
+        // Track the dominant scroll host to avoid attaching marker semantics to
+        // short-range internal scroll containers created by pdf.js layouts.
         const source = event && event.currentTarget ? event.currentTarget : null;
         if (source) {
           const mappedSource = source === window

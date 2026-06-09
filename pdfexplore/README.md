@@ -35,6 +35,12 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - supports tokenized/quoted boolean queries via shared parser helpers,
   - searches non-recursively within direct-child PDFs of the selected directory,
   - highlights in-tree match counts and in-view search hits for matched files.
+- Right-rail search indicators in preview:
+  - markers are generated progressively from top pages to bottom pages,
+  - markers become clickable as soon as they appear,
+  - dense nearby markers are clustered into larger pills for easier click targets,
+  - clicking a marker temporarily prioritizes navigation/rendering over marker-build throughput,
+  - marker generation resumes automatically after the interaction settles.
 - Tree highlight colors and clear actions:
   - per-file color assignment via tree context menu,
   - `Clear in Directory` and `Clear All` with confirmation prompts,
@@ -103,6 +109,13 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - visible candidate set is built,
   - workers evaluate query in chunks,
   - model receives hit counts and filename match styling.
+- Search-indicator action (viewer bridge):
+  - term signature is computed from normalized query + current document key,
+  - per-page text extraction reuses document-scoped in-memory cache entries,
+  - pages are scanned in bounded concurrent batches,
+  - marker entries are published progressively after each batch,
+  - periodic event-loop yields keep input/paint responsive,
+  - click interactions can interrupt and resume builds to keep navigation immediate.
 - Prefetch action:
   - idle timer evaluates interaction/search pressure,
   - current document may be prioritized,
@@ -162,6 +175,9 @@ From repo root:
 - Search is worker-based and cancellation-aware.
 - Prefetch is low-priority and throttled by interaction detection.
 - Tree marker scans run in background workers and are merged with live state.
+- Viewer search-marker generation uses document-scoped page-text cache plus bounded concurrency.
+- Marker builds publish partial rails progressively so long documents become navigable early.
+- Marker clicks are interaction-prioritized: active builds can pause briefly so page jumps feel immediate.
 - Temporary reduced-paint mode may be used during tree mutation bursts, but marker sync forces full marker visibility when marker state is updated.
 
 ### Performance Tradeoffs
