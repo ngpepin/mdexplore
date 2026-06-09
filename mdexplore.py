@@ -93,6 +93,39 @@ from mdexplore_app.constants import (
     CONFIG_FILE_NAME,
     DIAGRAM_VIEW_STATE_JSON_TOKEN,
     MAX_PRINT_DIAGRAM_FONT_PT,
+    MDEXPLORE_CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY,
+    MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY,
+    MDEXPLORE_CONFIG_LOCK_STALE_SECONDS,
+    MDEXPLORE_CONFIG_RECENT_ROOTS_KEY,
+    MDEXPLORE_DEBUG_LOG_FILE_NAME,
+    MDEXPLORE_DEBUG_LOG_MAX_LINES,
+    MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS,
+    MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS,
+    MDEXPLORE_DIAGRAM_STATE_CAPTURE_INTERVAL_MS,
+    MDEXPLORE_FILE_CHANGE_WATCH_INTERVAL_MS,
+    MDEXPLORE_HIGHLIGHTING_FILE_NAME,
+    MDEXPLORE_HIGHLIGHT_COLORS,
+    MDEXPLORE_INLINE_DATA_IMAGE_POOL_THREADS,
+    MDEXPLORE_MATCH_TIMER_INTERVAL_MS,
+    MDEXPLORE_MAX_DOCUMENT_VIEWS,
+    MDEXPLORE_MAX_RECENT_ROOT_DIRECTORIES,
+    MDEXPLORE_MIN_RECENT_ROOT_DWELL_SECONDS,
+    MDEXPLORE_PDF_DIAGRAM_PROBE_INTERVAL_MS,
+    MDEXPLORE_PDF_POOL_MAX_THREADS,
+    MDEXPLORE_PLANTUML_POOL_MAX_THREADS,
+    MDEXPLORE_PREVIEW_ACTION_POLL_INTERVAL_MS,
+    MDEXPLORE_PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES,
+    MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES,
+    MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX,
+    MDEXPLORE_PREVIEW_HTTP_CACHE_MIN_BYTES,
+    MDEXPLORE_PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS,
+    MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT,
+    MDEXPLORE_RESTORE_OVERLAY_POLL_INTERVAL_MS,
+    MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS,
+    MDEXPLORE_STATUS_IDLE_INTERVAL_MS,
+    MDEXPLORE_TREE_MARKER_SCAN_POOL_THREADS,
+    MDEXPLORE_TREE_SEARCH_REFRESH_DEBOUNCE_MS,
+    MDEXPLORE_VIEWS_FILE_NAME,
     MERMAID_BACKEND_JS,
     MERMAID_BACKEND_RUST,
     MERMAID_CACHE_JSON_TOKEN,
@@ -1351,20 +1384,20 @@ class PreviewPage(QWebEnginePage):
 
 
 class MdExploreWindow(QMainWindow):
-    MAX_DOCUMENT_VIEWS = 8
-    MAX_RECENT_ROOT_DIRECTORIES = 35
-    RECENT_ROOT_MENU_MRU_COUNT = 10
-    MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
-    CONFIG_LOCK_STALE_SECONDS = 120.0
-    VIEWS_FILE_NAME = ".mdexplore-views.json"
-    HIGHLIGHTING_FILE_NAME = ".mdexplore-highlighting.json"
-    CONFIG_DEFAULT_ROOT_KEY = "default_root"
-    CONFIG_RECENT_ROOTS_KEY = "recent_roots"
-    CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY = "copy_base64_images_enabled"
+    MAX_DOCUMENT_VIEWS = MDEXPLORE_MAX_DOCUMENT_VIEWS
+    MAX_RECENT_ROOT_DIRECTORIES = MDEXPLORE_MAX_RECENT_ROOT_DIRECTORIES
+    RECENT_ROOT_MENU_MRU_COUNT = MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT
+    MIN_RECENT_ROOT_DWELL_SECONDS = MDEXPLORE_MIN_RECENT_ROOT_DWELL_SECONDS
+    CONFIG_LOCK_STALE_SECONDS = MDEXPLORE_CONFIG_LOCK_STALE_SECONDS
+    VIEWS_FILE_NAME = MDEXPLORE_VIEWS_FILE_NAME
+    HIGHLIGHTING_FILE_NAME = MDEXPLORE_HIGHLIGHTING_FILE_NAME
+    CONFIG_DEFAULT_ROOT_KEY = MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY
+    CONFIG_RECENT_ROOTS_KEY = MDEXPLORE_CONFIG_RECENT_ROOTS_KEY
+    CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY = MDEXPLORE_CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
-    DEBUG_LOG_FILE_NAME = "mdexplore.log"
-    DEBUG_LOG_MAX_LINES = 10_000
+    DEBUG_LOG_FILE_NAME = MDEXPLORE_DEBUG_LOG_FILE_NAME
+    DEBUG_LOG_MAX_LINES = MDEXPLORE_DEBUG_LOG_MAX_LINES
     INLINE_IMAGE_LINK_RE = re.compile(
         r"!\[(?P<alt>[^\]]*)\]\(\s*(?P<dest><[^>]+>|[^)\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"
     )
@@ -1376,24 +1409,15 @@ class MdExploreWindow(QMainWindow):
     REFERENCE_DEFINITION_RE = re.compile(
         r"(?m)^(?P<indent>\s{0,3})\[(?P<label>[^\]]+)\]:\s*(?P<dest><[^>]+>|[^\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'|\([^)]+\)))?\s*$"
     )
-    HIGHLIGHT_COLORS = [
-        ("Yellow", "#f5d34f"),
-        ("Green", "#78d389"),
-        ("Blue", "#7bb9ff"),
-        ("Orange", "#f6a05f"),
-        ("Purple", "#bb9df5"),
-        ("Light Gray", "#d1d5db"),
-        ("Medium Gray", "#9ca3af"),
-        ("Red", "#ef7d7d"),
-    ]
-    DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
+    HIGHLIGHT_COLORS = list(MDEXPLORE_HIGHLIGHT_COLORS)
+    DEFAULT_SEARCH_SCAN_MAX_THREADS = MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS
     # Keep BASE64 work parallel, but avoid saturating all cores by default.
-    DEFAULT_BASE64_IMAGE_WORKER_THREADS = max(2, min(24, (os.cpu_count() or 2) * 2))
-    PREVIEW_HTTP_CACHE_MAX_BYTES = 4096 * 1024 * 1024
-    PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX = (2**31) - 1
-    PREVIEW_HTTP_CACHE_MIN_BYTES = 64 * 1024 * 1024
-    PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES = 512 * 1024 * 1024
-    PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS = 2 * 24 * 60 * 60
+    DEFAULT_BASE64_IMAGE_WORKER_THREADS = MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS
+    PREVIEW_HTTP_CACHE_MAX_BYTES = MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES
+    PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX = MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX
+    PREVIEW_HTTP_CACHE_MIN_BYTES = MDEXPLORE_PREVIEW_HTTP_CACHE_MIN_BYTES
+    PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES = MDEXPLORE_PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES
+    PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS = MDEXPLORE_PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS
 
     def __init__(
         self,
@@ -1459,7 +1483,9 @@ class MdExploreWindow(QMainWindow):
         self._render_request_id = 0
         self._active_render_workers: set[PreviewRenderWorker] = set()
         self._inline_data_image_pool = QThreadPool(self)
-        self._inline_data_image_pool.setMaxThreadCount(1)
+        self._inline_data_image_pool.setMaxThreadCount(
+            max(1, int(MDEXPLORE_INLINE_DATA_IMAGE_POOL_THREADS))
+        )
         self._inline_data_image_request_id = 0
         self._active_inline_data_image_workers: set[InlineDataImageMaterializeWorker] = (
             set()
@@ -1480,7 +1506,9 @@ class MdExploreWindow(QMainWindow):
             str, dict[str, str]
         ] = {}
         self._tree_marker_scan_pool = QThreadPool(self)
-        self._tree_marker_scan_pool.setMaxThreadCount(1)
+        self._tree_marker_scan_pool.setMaxThreadCount(
+            max(1, int(MDEXPLORE_TREE_MARKER_SCAN_POOL_THREADS))
+        )
         self._tree_marker_scan_request_id = 0
         self._active_tree_marker_scan_workers: set[TreeMarkerScanWorker] = set()
         self._tree_marker_scan_dirty_paths: set[str] = set()
@@ -1499,9 +1527,11 @@ class MdExploreWindow(QMainWindow):
         self._plantuml_pool = QThreadPool(self)
         # Let independent PlantUML blocks render concurrently; keep a modest
         # upper bound to avoid CPU saturation on large documents.
-        self._plantuml_pool.setMaxThreadCount(max(2, min(6, os.cpu_count() or 2)))
+        self._plantuml_pool.setMaxThreadCount(
+            max(2, min(int(MDEXPLORE_PLANTUML_POOL_MAX_THREADS), os.cpu_count() or 2))
+        )
         self._pdf_pool = QThreadPool(self)
-        self._pdf_pool.setMaxThreadCount(1)
+        self._pdf_pool.setMaxThreadCount(max(1, int(MDEXPLORE_PDF_POOL_MAX_THREADS)))
         self._active_pdf_workers: set[PdfExportWorker] = set()
         self._pdf_export_in_progress = False
         self._pdf_export_source_key: str | None = None
@@ -1609,39 +1639,47 @@ class MdExploreWindow(QMainWindow):
         # keystroke while the user is still typing an expression.
         self.match_timer = QTimer(self)
         self.match_timer.setSingleShot(True)
-        self.match_timer.setInterval(3000)
+        self.match_timer.setInterval(int(MDEXPLORE_MATCH_TIMER_INTERVAL_MS))
         self.match_timer.timeout.connect(self._run_match_search)
         self._tree_search_refresh_timer = QTimer(self)
         self._tree_search_refresh_timer.setSingleShot(True)
-        self._tree_search_refresh_timer.setInterval(180)
+        self._tree_search_refresh_timer.setInterval(
+            int(MDEXPLORE_TREE_SEARCH_REFRESH_DEBOUNCE_MS)
+        )
         self._tree_search_refresh_timer.timeout.connect(
             self._rerun_active_search_for_scope
         )
         self._scroll_capture_timer = QTimer(self)
-        self._scroll_capture_timer.setInterval(200)
+        self._scroll_capture_timer.setInterval(int(MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS))
         self._scroll_capture_timer.timeout.connect(self._capture_current_preview_scroll)
         self._scroll_capture_timer.start()
         # Diagram view-state capture is kept separate from normal scroll capture
         # because Mermaid/PlantUML maintain their own zoom/pan state inside the
         # embedded page.
         self._diagram_state_capture_timer = QTimer(self)
-        self._diagram_state_capture_timer.setInterval(250)
+        self._diagram_state_capture_timer.setInterval(
+            int(MDEXPLORE_DIAGRAM_STATE_CAPTURE_INTERVAL_MS)
+        )
         self._diagram_state_capture_timer.timeout.connect(
             self._on_diagram_state_capture_tick
         )
         self._preview_action_poll_timer = QTimer(self)
-        self._preview_action_poll_timer.setInterval(220)
+        self._preview_action_poll_timer.setInterval(
+            int(MDEXPLORE_PREVIEW_ACTION_POLL_INTERVAL_MS)
+        )
         self._preview_action_poll_timer.timeout.connect(self._poll_preview_actions)
         self._preview_action_poll_timer.start()
         self._diagram_state_capture_timer.start()
         self._default_status_text = "Ready"
         self._gpu_context_available = bool(gpu_context_available)
         self._status_idle_timer = QTimer(self)
-        self._status_idle_timer.setInterval(900)
+        self._status_idle_timer.setInterval(int(MDEXPLORE_STATUS_IDLE_INTERVAL_MS))
         self._status_idle_timer.timeout.connect(self._ensure_non_empty_status_message)
         self._status_idle_timer.start()
         self._file_change_watch_timer = QTimer(self)
-        self._file_change_watch_timer.setInterval(1200)
+        self._file_change_watch_timer.setInterval(
+            int(MDEXPLORE_FILE_CHANGE_WATCH_INTERVAL_MS)
+        )
         self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
         self._file_change_watch_timer.start()
         # Centered overlay for long-running preview restore operations.
@@ -1655,7 +1693,9 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay_pending_show = False
         self._restore_overlay_shown_at = 0.0
         self._restore_overlay_poll_timer = QTimer(self)
-        self._restore_overlay_poll_timer.setInterval(170)
+        self._restore_overlay_poll_timer.setInterval(
+            int(MDEXPLORE_RESTORE_OVERLAY_POLL_INTERVAL_MS)
+        )
         self._restore_overlay_poll_timer.timeout.connect(
             self._check_restore_overlay_progress
         )
@@ -1664,7 +1704,9 @@ class MdExploreWindow(QMainWindow):
         self._restore_overlay_show_timer.setInterval(RESTORE_OVERLAY_SHOW_DELAY_MS)
         self._restore_overlay_show_timer.timeout.connect(self._show_restore_overlay_now)
         self._pdf_diagram_probe_timer = QTimer(self)
-        self._pdf_diagram_probe_timer.setInterval(220)
+        self._pdf_diagram_probe_timer.setInterval(
+            int(MDEXPLORE_PDF_DIAGRAM_PROBE_INTERVAL_MS)
+        )
         self._pdf_diagram_probe_timer.timeout.connect(
             self._probe_pdf_diagram_readiness
         )

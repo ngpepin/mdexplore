@@ -15,6 +15,29 @@ same shell philosophy as `mdexplore`.
 - Maintainer guide: [pdfexplore/AGENTS.md](/home/npepin/Projects/mdexplore/pdfexplore/AGENTS.md)
 - Launcher: `./pdfexplore.sh [PATH]`
 
+Runtime settings are JSON-externalized:
+
+- global/shared settings: `mdexplore.settings.json`
+- pdfexplore-specific settings: `pdfexplore.settings.json`
+
+The global file owns shared defaults used by both apps (colors, zoom defaults,
+print-layout constants, shared tokens), while the pdfexplore file owns only
+pdfexplore-specific behavior (worker/timer tuning, file names, viewer-bridge
+runtime settings).
+
+## Settings Cheat Sheet
+
+| What you want to change | File | Jump to details |
+| --- | --- | --- |
+| Performance and responsiveness (worker counts, cache caps, timer cadence) | [mdexplore.settings.json](mdexplore.settings.json) | [Thread pools, cache caps, and timer cadence](#thread-pools-cache-caps-and-timer-cadence) |
+| Rendering and preview behavior (zoom, highlight visuals) | [mdexplore.settings.json](mdexplore.settings.json) | [Preview highlights and zoom](#preview-highlights-and-zoom) |
+| Search behavior and NEAR window tuning | [mdexplore.settings.json](mdexplore.settings.json) | [Core paths and search tokens](#core-paths-and-search-tokens) |
+| Sidecar/session persistence keys and limits | [mdexplore.settings.json](mdexplore.settings.json) | [mdexplore app/session and sidecar keys](#mdexplore-appsession-and-sidecar-keys) |
+| PDF print geometry and diagram fit heuristics | [mdexplore.settings.json](mdexplore.settings.json) | [PDF print geometry and fitting heuristics](#pdf-print-geometry-and-fitting-heuristics) |
+| Auto-calculated thread/cache behavior (advanced) | [mdexplore.settings.json](mdexplore.settings.json) | [Derived and calculated behaviors](#derived-and-calculated-behaviors) |
+| Full mdexplore settings catalog | [mdexplore.settings.json](mdexplore.settings.json) | [Externalized Settings Reference](#externalized-settings-reference) |
+| pdfexplore-only runtime tuning | [pdfexplore.settings.json](pdfexplore.settings.json) | [pdfexplore Runtime Settings](pdfexplore/README.md#runtime-settings-json) |
+
 ## Code Layout
 
 The application still uses `mdexplore.py` as the main entrypoint and primary UI  
@@ -143,6 +166,170 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
   - Lock files older than 2 minutes are cleaned up automatically (silently).
   - If no directory is selected at quit time, the most recently selected/expanded  
   directory is used for `default_root`.
+
+## Externalized Settings Reference
+
+`mdexplore` runtime constants are externalized in `mdexplore.settings.json`.
+`mdexplore_app/constants.py` is the loader and type gate for this file.
+
+### Loading and override behavior
+
+- The loader reads `mdexplore.settings.json` at startup.
+- If the file is missing, unreadable, or not valid JSON, built-in defaults are used.
+- Only known keys are consumed; unknown keys are ignored.
+- Each key is type-checked against the built-in schema (`str`, `int/float`, `list`).
+- Numeric keys accept integer/float JSON values and are cast to the target runtime type.
+
+### Units and naming conventions
+
+- `_MS`: milliseconds.
+- `_SECONDS`: seconds.
+- `_BYTES`: bytes.
+- `_PX`: CSS/layout pixels.
+- `_PT`: print font points.
+- Ratio keys (for example `*_ASPECT_RATIO`) are unitless floats.
+
+### Key groups and defaults
+
+#### Core paths and search tokens
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `CONFIG_FILE_NAME` | `.mdexplore.cfg` | User config filename under home directory. |
+| `UI_ASSET_DIR_RELATIVE` | `assets/ui` | Relative path for UI/icon assets. |
+| `JS_ASSET_DIR_RELATIVE` | `assets/js` | Relative path for preview/PDF JS templates. |
+| `TEMPLATE_ASSET_DIR_RELATIVE` | `assets/templates` | Relative path for HTML templates. |
+| `SEARCH_CLOSE_WORD_GAP` | `50` | Word-distance threshold used by `NEAR(...)` matching. |
+| `SEARCH_HIT_COUNT_FONT_PATHS` | `assets/ui/LiberationSansNarrow-Regular.ttf`, `/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Regular.ttf` | Ordered fallback list for tree hit-count pill font. |
+
+#### Diagram state and restore controls
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `PDF_LANDSCAPE_PAGE_TOKEN` | `MDEXPLORE_LANDSCAPE_PAGE_TOKEN` | Marker token used in print layout processing. |
+| `PDF_EXPORT_PRECHECK_MAX_ATTEMPTS` | `60` | Max precheck polling attempts before PDF export proceeds/fails. |
+| `PDF_EXPORT_PRECHECK_INTERVAL_MS` | `140` | Delay between export precheck probes. |
+| `MERMAID_CACHE_JSON_TOKEN` | `__MDEXPLORE_MERMAID_CACHE_JSON__` | Placeholder token for Mermaid cache serialization. |
+| `DIAGRAM_VIEW_STATE_JSON_TOKEN` | `__MDEXPLORE_DIAGRAM_VIEW_STATE_JSON__` | Placeholder token for diagram view-state serialization. |
+| `MERMAID_SVG_CACHE_MAX_ENTRIES` | `256` | Max in-memory Mermaid SVG cache entries. |
+| `MERMAID_SVG_MAX_CHARS` | `250000` | Maximum Mermaid source size accepted for caching. |
+| `PLANTUML_RESTORE_BATCH_SIZE` | `2` | Number of PlantUML restore operations processed per batch. |
+| `MERMAID_CACHE_RESTORE_BATCH_SIZE` | `2` | Number of Mermaid restore operations processed per batch. |
+| `RESTORE_OVERLAY_TIMEOUT_SECONDS` | `25.0` | Upper bound for restore overlay lifecycle. |
+| `RESTORE_OVERLAY_SHOW_DELAY_MS` | `350` | Delay before showing restore overlay. |
+| `RESTORE_OVERLAY_MAX_VISIBLE_SECONDS` | `1.0` | Cap on visible overlay duration. |
+| `MERMAID_BACKEND_JS` | `js` | Canonical value for JS Mermaid backend selector. |
+| `MERMAID_BACKEND_RUST` | `rust` | Canonical value for Rust Mermaid backend selector. |
+
+#### Preview highlights and zoom
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `PREVIEW_PERSISTENT_HIGHLIGHT_COLOR` | `rgba(102, 86, 178, 0.36)` | Default persistent preview highlight color. |
+| `PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR` | `rgba(225, 214, 255, 0.76)` | Default persistent important-highlight color. |
+| `PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR` | `#170534` | Foreground text color used on important highlights. |
+| `PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR` | `rgba(112, 90, 188, 0.92)` | Scroll-marker color for normal highlights. |
+| `PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR` | `rgba(154, 132, 220, 0.96)` | Scroll-marker color for important highlights. |
+| `PREVIEW_HIGHLIGHT_KIND_NORMAL` | `normal` | Internal key name for normal highlight kind. |
+| `PREVIEW_HIGHLIGHT_KIND_IMPORTANT` | `important` | Internal key name for important highlight kind. |
+| `PREVIEW_ZOOM_STEP` | `0.1` | Zoom increment/decrement step per action. |
+| `PREVIEW_ZOOM_MIN` | `0.35` | Minimum preview zoom factor. |
+| `PREVIEW_ZOOM_MAX` | `3.0` | Maximum preview zoom factor. |
+| `PREVIEW_ZOOM_RESET` | `1.0` | Zoom factor used for reset action. |
+| `PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS` | `850` | Duration of transient zoom-percent overlay. |
+| `PREVIEW_SETHTML_MAX_BYTES` | `650000` | Guard rail for `setHtml` payload size paths. |
+
+#### SVG icon rendering controls
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `SVG_ICON_RENDER_OVERSAMPLE` | `4` | Oversample multiplier for SVG rasterization quality. |
+| `SVG_ICON_ALPHA_CUTOFF` | `1` | Alpha threshold used during icon post-processing. |
+
+#### PDF print geometry and fitting heuristics
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `MIN_PRINT_DIAGRAM_FONT_PT` | `3` | Minimum diagram font size used by print fitter. |
+| `MAX_PRINT_DIAGRAM_FONT_PT` | `12.0` | Maximum diagram font size used by print fitter. |
+| `PDF_PRINT_HEADING_TO_DIAGRAM_GAP_PX` | `16` | Vertical spacing between heading block and diagram. |
+| `PDF_PRINT_LAYOUT_SAFETY_PX` | `40` | Extra padding to avoid clipping at boundaries. |
+| `PDF_PRINT_KEEP_MIN_HEIGHT_PX` | `120` | Minimum element height considered keepable without split. |
+| `PDF_PRINT_PORTRAIT_LETTER_WIDTH_PX` | `1000` | Portrait page model width for fitting math. |
+| `PDF_PRINT_PORTRAIT_LETTER_HEIGHT_PX` | `1310` | Portrait page model height for fitting math. |
+| `PDF_PRINT_LANDSCAPE_LETTER_WIDTH_PX` | `1100` | Landscape page model width for fitting math. |
+| `PDF_PRINT_LANDSCAPE_LETTER_HEIGHT_PX` | `860` | Landscape page model height for fitting math. |
+| `PDF_PRINT_HORIZONTAL_MARGIN_PX` | `80` | Horizontal margin budget in print layout solver. |
+| `PDF_PRINT_VERTICAL_MARGIN_PX` | `130` | Vertical margin budget in print layout solver. |
+| `PDF_PRINT_PORTRAIT_MIN_WIDTH_PX` | `320` | Minimum accepted portrait diagram width. |
+| `PDF_PRINT_PORTRAIT_MIN_HEIGHT_PX` | `320` | Minimum accepted portrait diagram height. |
+| `PDF_PRINT_LANDSCAPE_MIN_WIDTH_PX` | `360` | Minimum accepted landscape diagram width. |
+| `PDF_PRINT_LANDSCAPE_MIN_HEIGHT_PX` | `260` | Minimum accepted landscape diagram height. |
+| `PDF_PRINT_WIDE_DIAGRAM_ASPECT_RATIO` | `1.19` | Aspect-ratio threshold used to classify diagrams as wide. |
+| `PDF_PRINT_WIDE_DIAGRAM_LANDSCAPE_GAIN` | `1.06` | Gain factor favoring landscape for wide diagrams. |
+| `PDF_PRINT_PLANTUML_LANDSCAPE_ASPECT_RATIO` | `1.18` | PlantUML-specific landscape threshold. |
+
+#### mdexplore app/session and sidecar keys
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `MDEXPLORE_MAX_DOCUMENT_VIEWS` | `8` | Maximum tabs/views per document. |
+| `MDEXPLORE_MAX_RECENT_ROOT_DIRECTORIES` | `35` | Persistent recent-root history capacity. |
+| `MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT` | `10` | MRU block size shown first in `Recent` menu. |
+| `MDEXPLORE_MIN_RECENT_ROOT_DWELL_SECONDS` | `30.0` | Minimum time a root must stay active before being persisted as recent. |
+| `MDEXPLORE_CONFIG_LOCK_STALE_SECONDS` | `120.0` | Age threshold for lock-file stale cleanup. |
+| `MDEXPLORE_VIEWS_FILE_NAME` | `.mdexplore-views.json` | Sidecar file for per-document multi-view sessions. |
+| `MDEXPLORE_HIGHLIGHTING_FILE_NAME` | `.mdexplore-highlighting.json` | Sidecar file for persistent text highlights. |
+| `MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY` | `default_root` | Config JSON key for default root path. |
+| `MDEXPLORE_CONFIG_RECENT_ROOTS_KEY` | `recent_roots` | Config JSON key for recent-root list. |
+| `MDEXPLORE_CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY` | `copy_base64_images_enabled` | Config JSON key for BASE64 copy toggle state. |
+| `MDEXPLORE_DEBUG_LOG_FILE_NAME` | `mdexplore.log` | Debug log filename under cache/log area. |
+| `MDEXPLORE_DEBUG_LOG_MAX_LINES` | `10000` | In-memory cap for retained debug log lines. |
+| `MDEXPLORE_HIGHLIGHT_COLORS` | `Yellow, Green, Blue, Orange, Purple, Light Gray, Medium Gray, Red` | Default file-highlight color palette and order. |
+
+#### Thread pools, cache caps, and timer cadence
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS` | `0` | Search worker thread override. `0` means auto (see formula below). |
+| `MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS` | `0` | BASE64 materialization worker override. `0` means auto (see formula below). |
+| `MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES` | `4294967296` | Desired per-instance preview HTTP cache cap before clamping. |
+| `MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX` | `2147483647` | Qt-safe upper cap applied to HTTP cache size. |
+| `MDEXPLORE_PREVIEW_HTTP_CACHE_MIN_BYTES` | `67108864` | Lower bound for reduced cache cap. |
+| `MDEXPLORE_PREVIEW_HTTP_CACHE_FREE_SPACE_RESERVE_BYTES` | `536870912` | Free-space reserve that must remain after cache assignment. |
+| `MDEXPLORE_PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS` | `172800` | Stale age for preview profile cleanup (48h). |
+| `MDEXPLORE_INLINE_DATA_IMAGE_POOL_THREADS` | `1` | Worker pool size for inline data-image tasks. |
+| `MDEXPLORE_TREE_MARKER_SCAN_POOL_THREADS` | `1` | Worker pool size for tree marker scans. |
+| `MDEXPLORE_PLANTUML_POOL_MAX_THREADS` | `6` | PlantUML render worker max threads. |
+| `MDEXPLORE_PDF_POOL_MAX_THREADS` | `1` | PDF write/stamp worker max threads. |
+| `MDEXPLORE_MATCH_TIMER_INTERVAL_MS` | `3000` | Search trigger timer cadence. |
+| `MDEXPLORE_TREE_SEARCH_REFRESH_DEBOUNCE_MS` | `180` | Debounce delay for tree-change search reruns. |
+| `MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS` | `200` | Scroll state capture timer cadence. |
+| `MDEXPLORE_DIAGRAM_STATE_CAPTURE_INTERVAL_MS` | `250` | Diagram state snapshot timer cadence. |
+| `MDEXPLORE_PREVIEW_ACTION_POLL_INTERVAL_MS` | `220` | Preview action/pending-state poll cadence. |
+| `MDEXPLORE_STATUS_IDLE_INTERVAL_MS` | `900` | Idle-status update cadence. |
+| `MDEXPLORE_FILE_CHANGE_WATCH_INTERVAL_MS` | `1200` | Poll interval for source-file change detection. |
+| `MDEXPLORE_RESTORE_OVERLAY_POLL_INTERVAL_MS` | `170` | Overlay lifecycle poll cadence. |
+| `MDEXPLORE_PDF_DIAGRAM_PROBE_INTERVAL_MS` | `220` | PDF diagram readiness probe cadence. |
+
+### Derived and calculated behaviors
+
+- `MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS`
+  - if `> 0`: used as-is.
+  - if `0`: computed as `max(4, min(24, (cpu_count or 2) * 3))`.
+- `MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS`
+  - if `> 0`: used as-is.
+  - if `0`: computed as `max(2, min(24, (cpu_count or 2) * 2))`.
+- Preview HTTP cache cap
+  - initial target is `min(MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES, MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX)`.
+  - with multiple live mdexplore processes, cache cap can be halved repeatedly until free-space reserve and minimum bounds are both satisfied.
+
+### Practical tuning notes
+
+- Prefer changing one setting at a time and validating with one known-problem and one known-good document.
+- Keep related values consistent (for example zoom min/max/reset and search debounce/timer pairs).
+- For portability, keep absolute paths (`SEARCH_HIT_COUNT_FONT_PATHS`) as fallbacks after repository-relative entries.
+- When changing sidecar/config key names, migrate existing files or preserve backward compatibility.
 
 ## Requirements
 
@@ -536,8 +723,8 @@ Recommended workflow when tuning:
 4. Prefer small adjustments; many of these settings interact.
 
 The hidden PDF preflight logic consumes these constants through a Python-to-JS  
-configuration handoff, so changing the constants in `mdexplore.py` is the  
-intended way to tune print behavior.
+configuration handoff, so tuning values in `mdexplore.settings.json` is the  
+intended way to adjust print behavior.
 
 ## Known TODOs
 

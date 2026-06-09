@@ -74,16 +74,61 @@ from mdexplore_app.search import (
 )
 from mdexplore_app.tabs import ViewTabBar
 
+from .settings import APP_SETTINGS, VIEWER_BRIDGE_SETTINGS
 from .tree import ColorizedPdfModel, PdfTreeItemDelegate
 from .workers import PdfSearchWorker, PdfTextPrefetchWorker, PdfTreeMarkerScanWorker
 
 
-CONFIG_FILE_NAME = ".pdfexplore.cfg"
-VIEWS_FILE_NAME = ".pdfexplore-views.json"
-HIGHLIGHTING_FILE_NAME = ".pdfexplore-highlighting.json"
-VIEWER_HTML = Path(__file__).resolve().parent / "vendor" / "pdfjs" / "web" / "viewer.html"
-VIEWER_BRIDGE_JS = Path(__file__).resolve().parent / "assets" / "viewer_bridge.js"
-OKULAR_EDIT_LAUNCHER = Path("/home/npepin/.local/share/applications-scripts/run-okular.sh")
+def _app_setting(name: str, default):
+    return APP_SETTINGS.get(name, default)
+
+
+def _normalize_highlight_colors(raw_value) -> list[tuple[str, str]]:
+    if not isinstance(raw_value, list):
+        return []
+    normalized: list[tuple[str, str]] = []
+    for entry in raw_value:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        value = str(entry.get("value") or "").strip()
+        if not name or not value:
+            continue
+        normalized.append((name, value))
+    return normalized
+
+
+_DEFAULT_HIGHLIGHT_COLORS = [
+    ("Yellow", "#f5d34f"),
+    ("Green", "#78d389"),
+    ("Blue", "#7bb9ff"),
+    ("Orange", "#f6a05f"),
+    ("Purple", "#bb9df5"),
+    ("Light Gray", "#d1d5db"),
+    ("Medium Gray", "#9ca3af"),
+    ("Red", "#ef7d7d"),
+]
+
+_PROJECT_DIR = Path(__file__).resolve().parent
+CONFIG_FILE_NAME = str(_app_setting("config_file_name", ".pdfexplore.cfg"))
+VIEWS_FILE_NAME = str(_app_setting("views_file_name", ".pdfexplore-views.json"))
+HIGHLIGHTING_FILE_NAME = str(
+    _app_setting("highlighting_file_name", ".pdfexplore-highlighting.json")
+)
+VIEWER_HTML = _PROJECT_DIR / str(
+    _app_setting("viewer_html_relative", "vendor/pdfjs/web/viewer.html")
+)
+VIEWER_BRIDGE_JS = _PROJECT_DIR / str(
+    _app_setting("viewer_bridge_js_relative", "assets/viewer_bridge.js")
+)
+OKULAR_EDIT_LAUNCHER = Path(
+    str(
+        _app_setting(
+            "okular_edit_launcher",
+            "/home/npepin/.local/share/applications-scripts/run-okular.sh",
+        )
+    )
+)
 
 
 class PdfPreviewWebView(QWebEngineView):
@@ -108,39 +153,43 @@ class PdfPreviewWebView(QWebEngineView):
 class PdfExploreWindow(QMainWindow):
     """Main window for browsing and highlighting PDFs."""
 
-    MAX_DOCUMENT_VIEWS = 8
-    MAX_RECENT_ROOT_DIRECTORIES = 35
-    RECENT_ROOT_MENU_MRU_COUNT = 10
-    MIN_RECENT_ROOT_DWELL_SECONDS = 30.0
-    CONFIG_DEFAULT_ROOT_KEY = "default_root"
-    CONFIG_RECENT_ROOTS_KEY = "recent_roots"
+    MAX_DOCUMENT_VIEWS = int(_app_setting("max_document_views", 8))
+    MAX_RECENT_ROOT_DIRECTORIES = int(_app_setting("max_recent_root_directories", 35))
+    RECENT_ROOT_MENU_MRU_COUNT = int(_app_setting("recent_root_menu_mru_count", 10))
+    MIN_RECENT_ROOT_DWELL_SECONDS = float(_app_setting("min_recent_root_dwell_seconds", 30.0))
+    CONFIG_DEFAULT_ROOT_KEY = str(_app_setting("config_default_root_key", "default_root"))
+    CONFIG_RECENT_ROOTS_KEY = str(_app_setting("config_recent_roots_key", "recent_roots"))
+    CONFIG_LOCK_STALE_SECONDS = float(_app_setting("config_lock_stale_seconds", 120.0))
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
-    PDF_TEXT_CACHE_MAX_ENTRIES = 384
-    PDF_TEXT_CACHE_MAX_CHARS = 96 * 1024 * 1024
-    PDF_TEXT_DISK_CACHE_MAX_FILES = 1200
-    PDF_TEXT_DISK_CACHE_MAX_BYTES = 384 * 1024 * 1024
-    PDF_TEXT_DISK_CACHE_TRIM_INTERVAL = 24
-    PREFETCH_BATCH_SIZE = 1
-    PREFETCH_IDLE_SECONDS = 0.8
-    PREFETCH_HEAVY_USE_WINDOW_SECONDS = 1.2
-    PREFETCH_HEAVY_USE_EVENT_THRESHOLD = 14
-    PREFETCH_HEAVY_USE_PAUSE_SECONDS = 1.2
-    PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS = 1.6
-    PREFETCH_TREE_MUTATION_PAUSE_SECONDS = 0.85
-    TREE_SEARCH_REFRESH_DEBOUNCE_MS = 300
-    TREE_INTERACTION_VISUAL_RELAX_MS = 320
-    CACHED_BADGE_SYNC_INTERVAL_MS = 200
-    HIGHLIGHT_COLORS = [
-        ("Yellow", "#f5d34f"),
-        ("Green", "#78d389"),
-        ("Blue", "#7bb9ff"),
-        ("Orange", "#f6a05f"),
-        ("Purple", "#bb9df5"),
-        ("Light Gray", "#d1d5db"),
-        ("Medium Gray", "#9ca3af"),
-        ("Red", "#ef7d7d"),
-    ]
+    PDF_TEXT_CACHE_MAX_ENTRIES = int(_app_setting("pdf_text_cache_max_entries", 384))
+    PDF_TEXT_CACHE_MAX_CHARS = int(_app_setting("pdf_text_cache_max_chars", 96 * 1024 * 1024))
+    PDF_TEXT_DISK_CACHE_MAX_FILES = int(_app_setting("pdf_text_disk_cache_max_files", 1200))
+    PDF_TEXT_DISK_CACHE_MAX_BYTES = int(_app_setting("pdf_text_disk_cache_max_bytes", 384 * 1024 * 1024))
+    PDF_TEXT_DISK_CACHE_TRIM_INTERVAL = int(_app_setting("pdf_text_disk_cache_trim_interval", 24))
+    PREFETCH_BATCH_SIZE = int(_app_setting("prefetch_batch_size", 1))
+    PREFETCH_IDLE_SECONDS = float(_app_setting("prefetch_idle_seconds", 0.8))
+    PREFETCH_HEAVY_USE_WINDOW_SECONDS = float(_app_setting("prefetch_heavy_use_window_seconds", 1.2))
+    PREFETCH_HEAVY_USE_EVENT_THRESHOLD = int(_app_setting("prefetch_heavy_use_event_threshold", 14))
+    PREFETCH_HEAVY_USE_PAUSE_SECONDS = float(_app_setting("prefetch_heavy_use_pause_seconds", 1.2))
+    PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS = float(_app_setting("prefetch_viewer_activity_pause_seconds", 1.6))
+    PREFETCH_TREE_MUTATION_PAUSE_SECONDS = float(_app_setting("prefetch_tree_mutation_pause_seconds", 0.85))
+    TREE_SEARCH_REFRESH_DEBOUNCE_MS = int(_app_setting("tree_search_refresh_debounce_ms", 300))
+    TREE_INTERACTION_VISUAL_RELAX_MS = int(_app_setting("tree_interaction_visual_relax_ms", 320))
+    CACHED_BADGE_SYNC_INTERVAL_MS = int(_app_setting("cached_badge_sync_interval_ms", 200))
+    MATCH_TIMER_INTERVAL_MS = int(_app_setting("match_timer_interval_ms", 320))
+    SCOPE_PREFETCH_TIMER_INTERVAL_MS = int(_app_setting("scope_prefetch_timer_interval_ms", 550))
+    VIEWER_READY_TIMER_INTERVAL_MS = int(_app_setting("viewer_ready_timer_interval_ms", 160))
+    VIEW_STATE_POLL_TIMER_INTERVAL_MS = int(_app_setting("view_state_poll_timer_interval_ms", 900))
+    FILE_CHANGE_WATCH_INTERVAL_MS = int(_app_setting("file_change_watch_interval_ms", 1200))
+    SEARCH_THREAD_POOL_MAX_THREADS = int(_app_setting("search_thread_pool_max_threads", 2))
+    PREFETCH_THREAD_POOL_MAX_THREADS = int(_app_setting("prefetch_thread_pool_max_threads", 1))
+    TREE_MARKER_SCAN_THREAD_POOL_MAX_THREADS = int(
+        _app_setting("tree_marker_scan_thread_pool_max_threads", 1)
+    )
+    HIGHLIGHT_COLORS = _normalize_highlight_colors(
+        _app_setting("highlight_colors", [])
+    ) or list(_DEFAULT_HIGHLIGHT_COLORS)
 
     def __init__(
         self,
@@ -194,7 +243,11 @@ class PdfExploreWindow(QMainWindow):
         self._visible_tree_pdf_cache: list[Path] = []
         self._visible_tree_pdf_cache_dirty = True
         self._visible_tree_pdf_cache_fetch_more_complete = False
-        self._viewer_bridge_source = VIEWER_BRIDGE_JS.read_text(encoding="utf-8")
+        viewer_bridge_payload = VIEWER_BRIDGE_JS.read_text(encoding="utf-8")
+        self._viewer_bridge_source = (
+            f"window.__pdfexploreBridgeConfig = {json.dumps(VIEWER_BRIDGE_SETTINGS, ensure_ascii=False)};\n"
+            + viewer_bridge_payload
+        )
         self._preview_widgets_by_path: dict[str, QWebEngineView] = {}
         self._viewer_bridge_ready_by_path: dict[str, bool] = {}
         self._viewer_pending_restore_state_by_path: dict[str, dict | None] = {}
@@ -206,7 +259,7 @@ class PdfExploreWindow(QMainWindow):
         # pypdf text extraction is Python-heavy; keeping search concurrency low
         # avoids GIL thrash that can make the GUI feel blocked during searches.
         self.thread_pool.setMaxThreadCount(
-            max(1, min(2, self.thread_pool.maxThreadCount()))
+            max(1, min(self.SEARCH_THREAD_POOL_MAX_THREADS, self.thread_pool.maxThreadCount()))
         )
         self._search_request_id = 0
         self._active_search_workers: set[PdfSearchWorker] = set()
@@ -219,17 +272,19 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_filename_match_paths: set[str] = set()
         self._search_scan_error_count = 0
         self._prefetch_pool = QThreadPool(self)
-        self._prefetch_pool.setMaxThreadCount(1)
+        self._prefetch_pool.setMaxThreadCount(max(1, self.PREFETCH_THREAD_POOL_MAX_THREADS))
         self._prefetch_request_id = 0
         self._active_prefetch_workers: set[PdfTextPrefetchWorker] = set()
         self._tree_marker_scan_pool = QThreadPool(self)
-        self._tree_marker_scan_pool.setMaxThreadCount(1)
+        self._tree_marker_scan_pool.setMaxThreadCount(
+            max(1, self.TREE_MARKER_SCAN_THREAD_POOL_MAX_THREADS)
+        )
         self._tree_marker_scan_request_id = 0
         self._active_tree_marker_scan_workers: set[PdfTreeMarkerScanWorker] = set()
         self._tree_marker_cache_root_key: str | None = None
 
         self.match_timer = QTimer(self)
-        self.match_timer.setInterval(320)
+        self.match_timer.setInterval(int(self.MATCH_TIMER_INTERVAL_MS))
         self.match_timer.setSingleShot(True)
         self.match_timer.timeout.connect(self._run_match_search)
 
@@ -242,7 +297,7 @@ class PdfExploreWindow(QMainWindow):
 
         self._scope_prefetch_timer = QTimer(self)
         self._scope_prefetch_timer.setSingleShot(True)
-        self._scope_prefetch_timer.setInterval(550)
+        self._scope_prefetch_timer.setInterval(int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS))
         self._scope_prefetch_timer.timeout.connect(self._start_scope_prefetch)
 
         self._cached_badge_sync_timer = QTimer(self)
@@ -260,16 +315,16 @@ class PdfExploreWindow(QMainWindow):
         )
 
         self._viewer_ready_timer = QTimer(self)
-        self._viewer_ready_timer.setInterval(160)
+        self._viewer_ready_timer.setInterval(int(self.VIEWER_READY_TIMER_INTERVAL_MS))
         self._viewer_ready_timer.timeout.connect(self._ensure_viewer_bridge_ready)
 
         self._view_state_poll_timer = QTimer(self)
-        self._view_state_poll_timer.setInterval(900)
+        self._view_state_poll_timer.setInterval(int(self.VIEW_STATE_POLL_TIMER_INTERVAL_MS))
         self._view_state_poll_timer.timeout.connect(self._poll_current_view_state)
         self._view_state_poll_timer.start()
 
         self._file_change_watch_timer = QTimer(self)
-        self._file_change_watch_timer.setInterval(1200)
+        self._file_change_watch_timer.setInterval(int(self.FILE_CHANGE_WATCH_INTERVAL_MS))
         self._file_change_watch_timer.timeout.connect(self._on_file_change_watch_tick)
         self._file_change_watch_timer.start()
 
@@ -1308,7 +1363,7 @@ class PdfExploreWindow(QMainWindow):
             if not lock_path.exists():
                 return
             age_seconds = time.time() - lock_path.stat().st_mtime
-            if age_seconds > 120.0:
+            if age_seconds > float(self.CONFIG_LOCK_STALE_SECONDS):
                 lock_path.unlink()
         except Exception:
             pass

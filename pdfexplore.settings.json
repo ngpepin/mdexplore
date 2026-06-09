@@ -1,0 +1,94 @@
+{
+  "app": {
+    "config_file_name": ".pdfexplore.cfg",
+    "views_file_name": ".pdfexplore-views.json",
+    "highlighting_file_name": ".pdfexplore-highlighting.json",
+    "viewer_html_relative": "vendor/pdfjs/web/viewer.html",
+    "viewer_bridge_js_relative": "assets/viewer_bridge.js",
+    "okular_edit_launcher": "/home/npepin/.local/share/applications-scripts/run-okular.sh",
+    "max_document_views": 8,
+    "max_recent_root_directories": 35,
+    "recent_root_menu_mru_count": 10,
+    "min_recent_root_dwell_seconds": 30.0,
+    "config_default_root_key": "default_root",
+    "config_recent_roots_key": "recent_roots",
+    "config_lock_stale_seconds": 120.0,
+    "pdf_text_cache_max_entries": 384,
+    "pdf_text_cache_max_chars": 100663296,
+    "pdf_text_disk_cache_max_files": 1200,
+    "pdf_text_disk_cache_max_bytes": 402653184,
+    "pdf_text_disk_cache_trim_interval": 24,
+    "prefetch_batch_size": 1,
+    "prefetch_idle_seconds": 0.8,
+    "prefetch_heavy_use_window_seconds": 1.2,
+    "prefetch_heavy_use_event_threshold": 14,
+    "prefetch_heavy_use_pause_seconds": 1.2,
+    "prefetch_viewer_activity_pause_seconds": 1.6,
+    "prefetch_tree_mutation_pause_seconds": 0.85,
+    "tree_search_refresh_debounce_ms": 300,
+    "tree_interaction_visual_relax_ms": 320,
+    "cached_badge_sync_interval_ms": 200,
+    "match_timer_interval_ms": 320,
+    "scope_prefetch_timer_interval_ms": 550,
+    "viewer_ready_timer_interval_ms": 160,
+    "view_state_poll_timer_interval_ms": 900,
+    "file_change_watch_interval_ms": 1200,
+    "search_thread_pool_max_threads": 2,
+    "prefetch_thread_pool_max_threads": 1,
+    "tree_marker_scan_thread_pool_max_threads": 1,
+    "highlight_colors": [
+      {
+        "name": "Yellow",
+        "value": "#f5d34f"
+      },
+      {
+        "name": "Green",
+        "value": "#78d389"
+      },
+      {
+        "name": "Blue",
+        "value": "#7bb9ff"
+      },
+      {
+        "name": "Orange",
+        "value": "#f6a05f"
+      },
+      {
+        "name": "Purple",
+        "value": "#bb9df5"
+      },
+      {
+        "name": "Light Gray",
+        "value": "#d1d5db"
+      },
+      {
+        "name": "Medium Gray",
+        "value": "#9ca3af"
+      },
+      {
+        "name": "Red",
+        "value": "#ef7d7d"
+      }
+    ]
+  },
+  "viewer_bridge": {
+    "three_up_divisor": 3,
+    "min_zoom_scale": 0.1,
+    "max_zoom_scale": 10.0,
+    "restore_stabilize_ms": 2800,
+    "search_indicator_resume_delay_ms": 180,
+    "search_indicator_click_retry_delay_ms": 80,
+    "search_indicator_click_final_retry_delay_ms": 180,
+    "search_indicator_max_entries": 2400,
+    "search_indicator_concurrency_min": 2,
+    "search_indicator_concurrency_max": 4,
+    "search_indicator_markers_per_page_max": 48,
+    "search_indicator_yield_every_batches": 3
+  },
+  "tree": {
+    "color_file_name": ".pdfexplore-colors.json",
+    "target_extension": ".pdf",
+    "primary_icon_name": "pdf.svg",
+    "primary_icon_color": "#e86060"
+  }
+}

@@ -1,6 +1,6 @@
 # DEVELOPERS-AGENTS.md
 
-Canonical maintenance, behavior, and render-architecture guide for developers and automated
+Canonical maintenance, behavior, and render-architecture guide for developers and automated  
 coding agents that add features or maintain `mdexplore`.
 
 ## Table Of Contents
@@ -57,66 +57,66 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Markdown-only file listing (`*.md`).
 - Right-pane rendered preview with math and diagram support.
 - `^`, `Refresh`, `PDF`, `Add View`, and `Edit` actions.
-- Top-right copy controls with destination mode (`Clipboard` or `Directory`)
-  plus color/pin copy actions.
-- In `Directory` mode, copy actions must copy file content and merge
-  copied-file metadata into destination sidecars.
+- Top-right copy controls with destination mode (`Clipboard` or `Directory`)  
+plus color/pin copy actions.
+- In `Directory` mode, copy actions must copy file content and merge  
+copied-file metadata into destination sidecars.
 
 ## Repository Map
 
-- `mdexplore.py`: large main application module (roughly 15k lines) containing
-  `MarkdownRenderer`, `MdExploreWindow`, preview/PDF orchestration, caching,
-  file watching, search, and the direct Python CLI entrypoint.
+- `mdexplore.py`: large main application module (roughly 15k lines) containing  
+`MarkdownRenderer`, `MdExploreWindow`, preview/PDF orchestration, caching,  
+file watching, search, and the direct Python CLI entrypoint.
 - `mdexplore_app/constants.py`: shared constants used by the main app and support modules.
-- `mdexplore_app/js.py`: startup JS-asset registry and template renderer for
-  externalized preview/PDF page scripts under `assets/js/preview/` and
-  `assets/js/pdf/`.
-- `mdexplore_app/templates.py`: startup HTML-template asset registry and renderer
-  for externalized preview document shells under `assets/templates/`.
+- `mdexplore_app/js.py`: startup JS-asset registry and template renderer for  
+externalized preview/PDF page scripts under `assets/js/preview/` and  
+`assets/js/pdf/`.
+- `mdexplore_app/templates.py`: startup HTML-template asset registry and renderer  
+for externalized preview document shells under `assets/templates/`.
 - `mdexplore_app/runtime.py`: runtime/config/GPU-print helper functions.
-- `mdexplore_app/search.py`: extracted pure search query helpers for tokenization,
-  predicate compilation, `NEAR(...)` parsing, legacy `CLOSE(...)` alias
-  normalization, NEAR-window selection, and per-file hit counting.
-- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, TOC-aware
-  landscape-page classification, and PlantUML stderr helpers.
+- `mdexplore_app/search.py`: extracted pure search query helpers for tokenization,  
+predicate compilation, `NEAR(...)` parsing, legacy `CLOSE(...)` alias  
+normalization, NEAR-window selection, and per-file hit counting.
+- `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, TOC-aware  
+landscape-page classification, and PlantUML stderr helpers.
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers used by the tree and tab UI.
 - `mdexplore_app/tree.py`: extracted tree/model classes (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: extracted custom tab-bar class (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF export.
-- `mdexplore_app/fast_base64.py`: shared BASE64 encode/decode helpers with
-  adaptive routing between vendored `fastbase64` and `pybase64`, plus stdlib
-  fallback.
+- `mdexplore_app/fast_base64.py`: shared BASE64 encode/decode helpers with  
+adaptive routing between vendored `fastbase64` and `pybase64`, plus stdlib  
+fallback.
 - `mdexplore.sh`: launcher (venv lifecycle + dependency install + app run).
 - `setup-mdexplore.sh`: full bootstrap helper for local setup (venv, vendored assets, Rust Mermaid renderer).
 - `requirements.txt`: Python runtime dependencies.
-- `assets/ui/`: local UI icon/font assets (tree badges, tab actions, copy pin,
-  and search-hit pill font).
+- `assets/ui/`: local UI icon/font assets (tree badges, tab actions, copy pin,  
+and search-hit pill font).
 - `assets/js/`: externalized JavaScript templates used by preview/search/PDF flows.
   - `assets/js/preview/`: preview search/highlight/selection/context-menu DOM scripts.
   - `assets/js/pdf/`: PDF preflight, DOM normalization, and restore scripts.
 - `assets/templates/`: externalized HTML template assets used by preview/document rendering.
   - `assets/templates/preview/`: preview document shell/template assets.
-- `vendor/`: vendored local runtime assets (Mermaid JS, MathJax, PlantUML jar,
-  and related renderer sources/binaries when bootstrapped).
+- `vendor/`: vendored local runtime assets (Mermaid JS, MathJax, PlantUML jar,  
+and related renderer sources/binaries when bootstrapped).
 - `test/`: sample Markdown/PDF fixtures used for manual smoke testing.
 - `README.md`: user-facing setup and usage documentation.
 - `UML.md`: higher-level architecture, class, and activity diagrams.
 - `mdexplore.desktop.sample`: user-adaptable `.desktop` launcher template.
 - `mdexplor-icon.png`: primary app icon asset kept at repo root for desktop launchers.
-- `tests/`: unit/headless regressions for preview restore/markers, search syntax,
-  search module behavior, template assets, UI assets, highlight confirmations,
-  and tab-bar layout.
+- `tests/`: unit/headless regressions for preview restore/markers, search syntax,  
+search module behavior, template assets, UI assets, highlight confirmations,  
+and tab-bar layout.
 - `LICENSE`: MIT license text.
 - Runtime config file: `~/.mdexplore.cfg` (persisted last effective root).
-- Runtime startup icon cache: `~/.cache/mdexplore/icon-cache` (persisted generated
-  app icon normalization and two-tone icon recolor results).
-- Runtime color sidecars: per-directory `.mdexplore-colors.json` files for
-  persisted tree highlight colors where writable.
-- Runtime view sidecars: per-directory `.mdexplore-views.json` files for
-  persisted view-tab state (multi-view sessions and custom tab labels).
-- Runtime preview-highlight sidecars: per-directory
-  `.mdexplore-highlighting.json` files for persistent text highlights created
-  from the preview pane.
+- Runtime startup icon cache: `~/.cache/mdexplore/icon-cache` (persisted generated  
+app icon normalization and two-tone icon recolor results).
+- Runtime color sidecars: per-directory `.mdexplore-colors.json` files for  
+persisted tree highlight colors where writable.
+- Runtime view sidecars: per-directory `.mdexplore-views.json` files for  
+persisted view-tab state (multi-view sessions and custom tab labels).
+- Runtime preview-highlight sidecars: per-directory  
+`.mdexplore-highlighting.json` files for persistent text highlights created  
+from the preview pane.
 
 ## Runtime Assumptions
 
@@ -124,41 +124,41 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
 - Linux desktop with GUI support.
 - `PySide6` and `QtWebEngine` available via pip dependencies.
 - `pypdf` and `reportlab` available for PDF page-number stamping.
-- `cmarkgfm` is preferred for fast markdown rendering and should be present in
-  runtime dependencies.
-- BASE64 decode path should prefer `pybase64`, opportunistically route to
-  vendored `fastbase64` for tuned payload-size sweet spots, and keep stdlib
-  fallback functional when accelerated backends are unavailable.
-- BASE64 encode path should validate vendored `fastbase64` output before use
-  (length/padding/alphabet sanity) and fall back to `pybase64`/stdlib when
-  vendor output is malformed.
+- `cmarkgfm` is preferred for fast markdown rendering and should be present in  
+runtime dependencies.
+- BASE64 decode path should prefer `pybase64`, opportunistically route to  
+vendored `fastbase64` for tuned payload-size sweet spots, and keep stdlib  
+fallback functional when accelerated backends are unavailable.
+- BASE64 encode path should validate vendored `fastbase64` output before use  
+(length/padding/alphabet sanity) and fall back to `pybase64`/stdlib when  
+vendor output is malformed.
 - Mermaid should prefer a local bundle when available and only use CDN fallback.
 - Rust Mermaid backend is optional and uses `mmdr` when `--mermaid-backend rust` is selected.
 - MathJax should prefer a local bundle when available and only use CDN fallback.
 - Java runtime is expected for local PlantUML rendering.
-- MarkText at `/usr/bin/marktext` may or may not be installed; app should fail
-  gracefully when missing.
-- The direct Python entrypoint and the shell launcher do not currently default
-  to the same Mermaid backend:
+- MarkText at `/usr/bin/marktext` may or may not be installed; app should fail  
+gracefully when missing.
+- The direct Python entrypoint and the shell launcher do not currently default  
+to the same Mermaid backend:
   - `mdexplore.py` defaults `--mermaid-backend` to `js`.
   - `mdexplore.sh` injects `--mermaid-backend rust` unless explicitly overridden.
 
 ## Entry Points And Hotspots
 
-- `mdexplore.sh` is the primary launcher path. It handles `.desktop` `%u`
-  arguments, venv bootstrapping, runtime import self-heal, local asset
-  discovery, backend defaulting, and one retry with software-render fallback.
-- `mdexplore.py` remains the direct Python entrypoint. `main()` parses `PATH`,
-  `--mermaid-backend`, and `--debug`, resolves the effective root, creates
-  `QApplication`, probes GPU availability, and constructs `MdExploreWindow`.
-- `MarkdownRenderer` in `mdexplore.py` owns markdown engine selection
-  (`cmarkgfm` fast path with markdown-it fallback), fenced syntax handling,
-  MathJax/Mermaid source selection, PlantUML integration, and the Rust Mermaid
-  preview-vs-PDF SVG fork.
-- `MdExploreWindow` in `mdexplore.py` is the main orchestration boundary and
-  highest-blast-radius edit surface.
-- Before changing preview/render/PDF flow, inspect these methods in
-  `mdexplore.py`:
+- `mdexplore.sh` is the primary launcher path. It handles `.desktop` `%u`  
+arguments, venv bootstrapping, runtime import self-heal, local asset  
+discovery, backend defaulting, and one retry with software-render fallback.
+- `mdexplore.py` remains the direct Python entrypoint. `main()` parses `PATH`,  
+`--mermaid-backend`, and `--debug`, resolves the effective root, creates  
+`QApplication`, probes GPU availability, and constructs `MdExploreWindow`.
+- `MarkdownRenderer` in `mdexplore.py` owns markdown engine selection  
+(`cmarkgfm` fast path with markdown-it fallback), fenced syntax handling,  
+MathJax/Mermaid source selection, PlantUML integration, and the Rust Mermaid  
+preview-vs-PDF SVG fork.
+- `MdExploreWindow` in `mdexplore.py` is the main orchestration boundary and  
+highest-blast-radius edit surface.
+- Before changing preview/render/PDF flow, inspect these methods in  
+`mdexplore.py`:
   - `_merge_renderer_pdf_mermaid_cache_seed()`
   - `_inject_mermaid_cache_seed()`
   - `_on_preview_render_finished()`
@@ -166,216 +166,218 @@ Maintain a fast, reliable Markdown explorer for Ubuntu/Linux desktop with:
   - `_restore_preview_mermaid_palette()`
 - `_set_preview_html()` in `mdexplore.py` has two preview load paths:
   - direct `setHtml(..., base_url)` for normal-sized documents
-  - temp-file `load()` fallback for oversized HTML
-  Changes to base URLs, asset injection, JS boot order, or page-load timing
+  - temp-file `load()` fallback for oversized HTML  
+  Changes to base URLs, asset injection, JS boot order, or page-load timing  
   must be tested on both paths.
-- `TreeMarkerScanWorker` in `mdexplore_app/workers.py` shares sidecar read
-  contracts with the main window code. Keep `.mdexplore-colors.json`,
-  `.mdexplore-views.json`, and `.mdexplore-highlighting.json` formats
-  compatible across both readers/writers.
+- `TreeMarkerScanWorker` in `mdexplore_app/workers.py` shares sidecar read  
+contracts with the main window code. Keep `.mdexplore-colors.json`,  
+`.mdexplore-views.json`, and `.mdexplore-highlighting.json` formats  
+compatible across both readers/writers.
 
 ## Core Behavior You Must Preserve
 
-- Without a path arg, default root is loaded from `~/.mdexplore.cfg` if valid;
-  otherwise home directory is used.
+- Without a path arg, default root is loaded from `~/.mdexplore.cfg` if valid;  
+otherwise home directory is used.
 - Both entrypoints support optional root path argument:
   - `mdexplore.sh [PATH]`
   - `mdexplore.py [PATH]`
 - Tree shows directories and `.md` files only.
 - Selecting a Markdown file updates preview quickly.
-- GitHub/Obsidian-style markdown callouts (`> [!TYPE]`) should render as styled
-  callout boxes in preview and PDF output.
-- Navigating to a previously cached file must still stat-check mtime/size;
-  if changed, it must re-render instead of showing stale cached HTML.
+- GitHub/Obsidian-style markdown callouts (`> [!TYPE]`) should render as styled  
+callout boxes in preview and PDF output.
+- Navigating to a previously cached file must still stat-check mtime/size;  
+if changed, it must re-render instead of showing stale cached HTML.
 - PlantUML rendering jobs must run off the UI thread to keep the window responsive.
-- PlantUML blocks should not block markdown preview; show placeholders first,
-  then progressively replace each diagram as local render jobs complete.
-- PlantUML progressive updates should be applied in-place so the preview scroll
-  location is preserved.
-- PlantUML progress should persist across file navigation so returning to a
-  file shows completed diagrams without restarting work.
-- Preview scroll position should be remembered per markdown file for the
-  current application run.
-- While dragging the preview pane's vertical scrollbar, the preview should show
-  an approximate `current line / total lines` indicator beside the scrollbar handle.
-- `Ctrl++`, `Ctrl+-`, and `Ctrl+0` should adjust only the preview pane zoom
-  factor, not the tree pane or overall UI scale.
-- Preview zoom changes should briefly show a top-center percentage overlay inside
-  the preview area.
+- PlantUML blocks should not block markdown preview; show placeholders first,  
+then progressively replace each diagram as local render jobs complete.
+- PlantUML progressive updates should be applied in-place so the preview scroll  
+location is preserved.
+- PlantUML progress should persist across file navigation so returning to a  
+file shows completed diagrams without restarting work.
+- Preview scroll position should be remembered per markdown file for the  
+current application run.
+- While dragging the preview pane's vertical scrollbar, the preview should show  
+an approximate `current line / total lines` indicator beside the scrollbar handle.
+- `Ctrl++`, `Ctrl+-`, and `Ctrl+0` should adjust only the preview pane zoom  
+factor, not the tree pane or overall UI scale.
+- Preview zoom changes should briefly show a top-center percentage overlay inside  
+the preview area.
 - `^` navigates one directory level up and re-roots the tree.
-- User-adjusted splitter width between tree and preview should persist across
-  root changes for the current application run.
+- User-adjusted splitter width between tree and preview should persist across  
+root changes for the current application run.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - Effective-root directory row in the tree should stay bold and use:
-  - aqua-blue text (`#7fdfe8`) when no active-search hits are under the
-    effective scope,
-  - yellow text plus an appended hit-count pill when active search has hits
-    under the effective scope (`1..99`, then `++`).
+  - aqua-blue text (`#7fdfe8`) when no active-search hits are under the  
+  effective scope,
+  - yellow text plus an appended hit-count pill when active search has hits  
+  under the effective scope (`1..99`, then `++`).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.
-- Linux desktop identity should remain `mdexplore` so launcher icon matching
-  works (`QApplication.setDesktopFileName("mdexplore")` + desktop
-  `StartupWMClass=mdexplore`).
+- Linux desktop identity should remain `mdexplore` so launcher icon matching  
+works (`QApplication.setDesktopFileName("mdexplore")` + desktop  
+`StartupWMClass=mdexplore`).
 - `Edit` opens currently selected file with `/usr/bin/marktext`.
-- `Add View` creates another tabbed view of the same current document, starting
-  from the current top-visible line/scroll position.
-- View tabs default to top-visible source line numbers, are closeable, and are
-  capped at 8 tabs per document.
-- View tabs include a left-side mini bargraph indicating each view's position in
-  the current document.
+- `Add View` creates another tabbed view of the same current document, starting  
+from the current top-visible line/scroll position.
+- View tabs default to top-visible source line numbers, are closeable, and are  
+capped at 8 tabs per document.
+- View tabs include a left-side mini bargraph indicating each view's position in  
+the current document.
 - View tabs should keep a stable soft-pastel color sequence based on open order.
-- View tabs are draggable/reorderable; moving tabs must not change their assigned
-  color.
-- Right-clicking a view tab should allow editing a custom tab label up to
-  48 characters, including spaces.
-- If a longer tab label is entered, it should be truncated to the first
-  48 characters rather than rejected.
-- If a custom tab label is cleared back to blank, that tab should resume using
-  the default dynamic line-number label.
-- When a tab receives a custom label, the app should capture that tab's current
-  scroll position and top visible source line as the saved label-time beginning.
-- Right-clicking a custom-labeled tab should also offer `Return to beginning`,
-  which restores that saved label-time location for the tab.
-- Custom-labeled tabs should also show a refresh icon beside the close button;
-  clicking it should reset the saved label-time beginning to the tab's current
-  scroll position/top line.
-- Relabeling a custom-labeled tab with different text should reset the saved
-  beginning to the tab's current scroll position/top line at relabel time.
-- When assigning a new tab color and wrapping the palette, skip any color already
-  used by open tabs.
-- Per-document tabs should persist for the app run: switching to another markdown
-  file and back must restore prior tabs, their order, and the previously selected
-  tab.
-- View-tab state should also persist across app restarts via per-directory
-  `.mdexplore-views.json`, keyed by markdown filename.
-- For custom-labeled tabs, `.mdexplore-views.json` should also persist the
-  saved label-time beginning location used by `Return to beginning`.
-- If custom labels make the tab strip wider than the available space, the tab
-  bar should scroll rather than truncating the tab set.
-- Only documents with explicit multi-view state or custom tab labels should be
-  written to `.mdexplore-views.json`; untouched single-view documents should
-  fall back to the default one-tab state without sidecar entries.
-- The tab strip should remain hidden when there is only one unlabeled default
-  view.
-- If only one view remains and it has a custom label, its tab should stay
-  visible so the custom label and `Return to beginning` action remain
-  available.
-- Closing that sole remaining custom-labeled tab should clear the custom label
-  and saved beginning, then fall back to the hidden default single-view state.
-- `Refresh` button and `F5` both refresh the current directory tree view
-  (new files appear, deleted files disappear) without requiring app restart.
-- `PDF` exports the currently previewed markdown rendering to
-  `<source-basename>.pdf` beside the source file, with centered `N of M`
-  numbering at the bottom of each page.
-- PDF export should preflight preview readiness (MathJax/Mermaid/fonts) before
-  snapshotting, and apply print-focused math styling to avoid cramped glyphs.
-- `MIN_PRINT_DIAGRAM_FONT_PT` in `mdexplore.py` is the tweakable PDF
-  one-page shrink floor for diagram sizing decisions. Lowering it allows tall
-  diagrams (for example Mermaid activity/flowcharts) to stay on one page more
-  aggressively before the exporter falls back to multi-page spill.
-- In PDF mode, headed Mermaid and PlantUML sections should attach the heading
-  to the diagram fence itself for pagination purposes, so Chromium cannot leave
-  the heading on one page and push the diagram to the next.
-- If the currently previewed markdown file changes on disk, preview should
-  auto-refresh and report that via status bar message.
-- Status bar should show progress during long-running operations (preview
-  loading/rendering, PlantUML completion, PDF export) and should not remain
-  blank during idle gaps.
-- Search input uses label `Search and highlight:` and includes an explicit in-field `X`
-  clear action.
+- View tabs are draggable/reorderable; moving tabs must not change their assigned  
+color.
+- Right-clicking a view tab should allow editing a custom tab label up to  
+48 characters, including spaces.
+- If a longer tab label is entered, it should be truncated to the first  
+48 characters rather than rejected.
+- If a custom tab label is cleared back to blank, that tab should resume using  
+the default dynamic line-number label.
+- When a tab receives a custom label, the app should capture that tab's current  
+scroll position and top visible source line as the saved label-time beginning.
+- Right-clicking a custom-labeled tab should also offer `Return to beginning`,  
+which restores that saved label-time location for the tab.
+- Custom-labeled tabs should also show a refresh icon beside the close button;  
+clicking it should reset the saved label-time beginning to the tab's current  
+scroll position/top line.
+- Relabeling a custom-labeled tab with different text should reset the saved  
+beginning to the tab's current scroll position/top line at relabel time.
+- When assigning a new tab color and wrapping the palette, skip any color already  
+used by open tabs.
+- Per-document tabs should persist for the app run: switching to another markdown  
+file and back must restore prior tabs, their order, and the previously selected  
+tab.
+- View-tab state should also persist across app restarts via per-directory  
+`.mdexplore-views.json`, keyed by markdown filename.
+- For custom-labeled tabs, `.mdexplore-views.json` should also persist the  
+saved label-time beginning location used by `Return to beginning`.
+- If custom labels make the tab strip wider than the available space, the tab  
+bar should scroll rather than truncating the tab set.
+- Only documents with explicit multi-view state or custom tab labels should be  
+written to `.mdexplore-views.json`; untouched single-view documents should  
+fall back to the default one-tab state without sidecar entries.
+- The tab strip should remain hidden when there is only one unlabeled default  
+view.
+- If only one view remains and it has a custom label, its tab should stay  
+visible so the custom label and `Return to beginning` action remain  
+available.
+- Closing that sole remaining custom-labeled tab should clear the custom label  
+and saved beginning, then fall back to the hidden default single-view state.
+- `Refresh` button and `F5` both refresh the current directory tree view  
+(new files appear, deleted files disappear) without requiring app restart.
+- `PDF` exports the currently previewed markdown rendering to  
+`<source-basename>.pdf` beside the source file, with centered `N of M`  
+numbering at the bottom of each page.
+- PDF export should preflight preview readiness (MathJax/Mermaid/fonts) before  
+snapshotting, and apply print-focused math styling to avoid cramped glyphs.
+- `MIN_PRINT_DIAGRAM_FONT_PT` in `mdexplore.py` is the tweakable PDF  
+one-page shrink floor for diagram sizing decisions. Lowering it allows tall  
+diagrams (for example Mermaid activity/flowcharts) to stay on one page more  
+aggressively before the exporter falls back to multi-page spill.
+- In PDF mode, headed Mermaid and PlantUML sections should attach the heading  
+to the diagram fence itself for pagination purposes, so Chromium cannot leave  
+the heading on one page and push the diagram to the next.
+- If the currently previewed markdown file changes on disk, preview should  
+auto-refresh and report that via status bar message.
+- Status bar should show progress during long-running operations (preview  
+loading/rendering, PlantUML completion, PDF export) and should not remain  
+blank during idle gaps.
+- Search input uses label `Search and highlight:` and includes an explicit in-field `X`  
+clear action.
 - Pressing `Enter` in search should bypass debounce and run search immediately.
 - Non-quoted and double-quoted search terms should be case-insensitive.
 - Single-quoted search terms should be case-sensitive.
-- Only the opening quote delimiter should terminate a quoted search term; the
-  other quote character should remain literal inside the term.
-- `NEAR(...)` should be supported in search queries and require all listed
-  terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
-- Legacy `CLOSE(...)` should remain accepted as a backward-compatible alias and
-  normalize to canonical `NEAR(...)` parsing/evaluation internally.
-- `NEAR(...)` should require distinct qualifying occurrences per listed term;
-  the same text start should not satisfy multiple required terms.
-- Single-word `NEAR(...)` terms should match on word boundaries for proximity
-  evaluation rather than as substrings inside larger words.
-- Search hit-count pills for `NEAR(...)` queries should count qualifying NEAR
-  windows, not the number of highlighted term spans inside the chosen window.
-- Function-style operators should accept both no-space and spaced forms before
-  `(` (for example `OR(...)` and `OR (...)`).
-- `AND(...)`, `OR(...)`, and `NEAR(...)` should accept comma-delimited,
-  space-delimited, or mixed argument lists.
+- Only the opening quote delimiter should terminate a quoted search term; the  
+other quote character should remain literal inside the term.
+- `NEAR(...)` should be supported in search queries and require all listed  
+terms to occur within `SEARCH_CLOSE_WORD_GAP` content words.
+- Legacy `CLOSE(...)` should remain accepted as a backward-compatible alias and  
+normalize to canonical `NEAR(...)` parsing/evaluation internally.
+- `NEAR(...)` should require distinct qualifying occurrences per listed term;  
+the same text start should not satisfy multiple required terms.
+- Single-word `NEAR(...)` terms should match on word boundaries for proximity  
+evaluation rather than as substrings inside larger words.
+- Search hit-count pills for `NEAR(...)` queries should count qualifying NEAR  
+windows, not the number of highlighted term spans inside the chosen window.
+- Function-style operators should accept both no-space and spaced forms before  
+`(` (for example `OR(...)` and `OR (...)`).
+- `AND(...)`, `OR(...)`, and `NEAR(...)` should accept comma-delimited,  
+space-delimited, or mixed argument lists.
 - `AND(...)` and `OR(...)` should be variadic (2+ arguments).
-- If search is active and visible-tree scope changes (expand/collapse, selected
-  scope change, or root change), search should rerun against the newly visible
-  markdown set.
+- If search is active and visible-tree scope changes (expand/collapse, selected  
+scope change, or root change), search should rerun against the newly visible  
+markdown set.
 - File highlight colors are assigned from tree context menu and persisted per directory.
-- File-highlight palette includes Yellow, Green, Blue, Orange, Purple, Light Gray,
-  Medium Gray, and Red.
+- File-highlight palette includes Yellow, Green, Blue, Orange, Purple, Light Gray,  
+Medium Gray, and Red.
 - Highlight state persists in `.mdexplore-colors.json` files where writable.
-- `Clear in Directory` in the context menu clears highlight metadata
-  non-recursively for the selected directory scope after confirmation.
+- `Clear in Directory` in the context menu clears highlight metadata  
+non-recursively for the selected directory scope after confirmation.
 - `Clear All` in the context menu recursively removes highlight metadata after confirmation.
-- Copy/Clear scope resolves in this order: selected directory, then most
-  recently selected/expanded directory, then current root.
-- Copy controls should be labeled `Copy to: () Clipboard () Directory`, with
-  `Clipboard` selected by default.
-- Clipboard-mode copy must preserve Nemo/Nautilus compatibility
-  (`text/uri-list` plus `x-special/gnome-copied-files`).
-- Clipboard-mode pin action should copy exactly the currently previewed markdown file
-  using the same clipboard MIME compatibility guarantees.
-- Directory-mode copy should open a destination-folder chooser defaulted to
-  the last selected destination or current effective root.
-- Directory-mode copy should merge copied-file metadata into destination
-  `.mdexplore-colors.json`, `.mdexplore-views.json`, and
-  `.mdexplore-highlighting.json` sidecars (create when missing, update/append by filename when present).
-- Preview context menu should offer persistent `Highlight`,
-  `Highlight Important`, and `Remove Highlight` actions for rendered text
-  selections and existing highlighted blocks.
-- Preview text highlights should persist per directory in
-  `.mdexplore-highlighting.json`.
-- Persistent preview text highlights should support at least two visual kinds:
-  normal and important. Entries in `.mdexplore-highlighting.json` should carry
-  enough metadata to preserve that distinction across runs.
-- Persistent preview text highlights should also surface as left-gutter markers
-  in the preview; clicking a marker should jump to the corresponding
-  highlighted block, and taller markers should reflect highlights that span
-  more lines.
-- Important-highlight markers should be visually lighter than normal-highlight
-  markers, and selecting part of an existing block should allow converting that
-  selected subrange between normal and important highlighting.
-- Preview context menu should keep standard actions and add
-  `Copy Rendered Text` and `Copy Source Markdown` when there is a text
-  selection.
+- Copy/Clear scope resolves in this order: selected directory, then most  
+recently selected/expanded directory, then current root.
+- Copy controls should be labeled `Copy to: () Clipboard () Directory`, with  
+`Clipboard` selected by default.
+- Clipboard-mode copy must preserve Nemo/Nautilus compatibility  
+(`text/uri-list` plus `x-special/gnome-copied-files`).
+- Clipboard-mode pin action should copy exactly the currently previewed markdown file  
+using the same clipboard MIME compatibility guarantees.
+- Directory-mode copy should open a destination-folder chooser defaulted to  
+the last selected destination or current effective root.
+- Directory-mode copy should merge copied-file metadata into destination  
+`.mdexplore-colors.json`, `.mdexplore-views.json`, and  
+`.mdexplore-highlighting.json` sidecars (create when missing, update/append by filename when present).
+- Preview context menu should offer persistent `Highlight`,  
+`Highlight Important`, and `Remove Highlight` actions for rendered text  
+selections and existing highlighted blocks.
+- Preview text highlights should persist per directory in  
+`.mdexplore-highlighting.json`.
+- Persistent preview text highlights should support at least two visual kinds:  
+normal and important. Entries in `.mdexplore-highlighting.json` should carry  
+enough metadata to preserve that distinction across runs.
+- Persistent preview text highlights should also surface as left-gutter markers  
+in the preview; clicking a marker should jump to the corresponding  
+highlighted block, and taller markers should reflect highlights that span  
+more lines.
+- Important-highlight markers should be visually lighter than normal-highlight  
+markers, and selecting part of an existing block should allow converting that  
+selected subrange between normal and important highlighting.
+- Preview context menu should keep standard actions and add  
+`Copy Rendered Text` and `Copy Source Markdown` when there is a text  
+selection.
 - `Copy Rendered Text` should copy the selected preview text as plain text.
-- `Copy Source Markdown` should map preview selection to source markdown line
-  ranges and copy source text (not rendered plain text).
-  If direct mapping fails, it should use selected-text matching and first/last
-  line fuzzy matching against source markdown lines, then fall back to copying
-  the full source file.
-- While search is active, opening a matched markdown file should highlight
-  matched terms in yellow in preview and scroll to the first match.
-- While search is active, the preview should show yellow scrollbar-side markers
-  for highlighted hits, and clicking a marker should jump to the nearest
-  underlying hit represented by that marker cluster.
-- While search is active, matching markdown files in the tree should show a
-  yellow hit-count pill in the left gutter rather than the older triangle badge.
-- Markdown files that currently have more than the default single view should
-  show a small light-gray tab badge beside the markdown icon in the tree.
-- Markdown files with persisted preview text highlights should also show a
-  separate marker badge in the tree.
-- Tree gutter badge order for markdown files is:
-  search hit-count pill, highlight marker, views badge, markdown file icon.
-- The markdown file icon and filename must stay horizontally aligned across all
-  markdown rows by using a fixed-width gutter strip and packing only the active
-  badges inside it.
-- Named views with saved `Return to beginning` anchors should also appear as
-  color-matched left-side preview gutter markers positioned by their saved home
-  line number. These markers must render above persistent-highlight markers
-  when their positions overlap.
-- Clicking a named-view gutter marker should restore the same saved location as
-  selecting that named view's tab.
+- `Copy Source Markdown` should map preview selection to source markdown line  
+ranges and copy source text (not rendered plain text).  
+If direct mapping fails, it should use selected-text matching and first/last  
+line fuzzy matching against source markdown lines, then fall back to copying  
+the full source file.
+- While search is active, opening a matched markdown file should highlight  
+matched terms in yellow in preview and scroll to the first match.
+- While search is active, the preview should show yellow scrollbar-side markers  
+for highlighted hits, and clicking a marker should jump to the nearest  
+underlying hit represented by that marker cluster.
+- While search is active, matching markdown files in the tree should show a  
+yellow hit-count pill in the left gutter rather than the older triangle badge.
+- Markdown files that currently have more than the default single view should  
+show a small light-gray tab badge beside the markdown icon in the tree.
+- Markdown files with persisted preview text highlights should also show a  
+separate marker badge in the tree.
+- Tree gutter badge order for markdown files is:  
+search hit-count pill, highlight marker, views badge, markdown file icon.
+- The markdown file icon and filename must stay horizontally aligned across all  
+markdown rows by using a fixed-width gutter strip and packing only the active  
+badges inside it.
+- Named views with saved `Return to beginning` anchors should also appear as  
+color-matched left-side preview gutter markers positioned by their saved home  
+line number. These markers must render above persistent-highlight markers  
+when their positions overlap.
+- Clicking a named-view gutter marker should restore the same saved location as  
+selecting that named view's tab.
 
 ## Formal Behavior Rules Model
 
-This section consolidates the former `RULES.md` content into the canonical
+This section consolidates the former `RULES.md` content into the canonical  
 agent guide. It is a behavioral specification, not a user guide.
+
+NOTE THAT THIS IS A BIT OF AN EXPERIMENT AND MAY GET DROPPED IN FUTURE RELEASES IF THE MAINTENANCE HEADACHE IS TOO GREAT.
 
 Use it with:
 
@@ -596,11 +598,11 @@ R.SCOPE.04 :: [directory copy mode folder chooser opened] => O(default chooser p
 
 #### 6.3 Scope resolution table
 
-| Selected dir | Last dir | Root | Result |
-|---|---|---|---|
-| yes | any | any | selected dir |
-| no | yes | any | last selected/expanded dir |
-| no | no | yes | current root |
+| Selected dir | Last dir | Root | Result                     |
+| ------------ | -------- | ---- | -------------------------- |
+| yes          | any      | any  | selected dir               |
+| no           | yes      | any  | last selected/expanded dir |
+| no           | no       | yes  | current root               |
 
 ### 7. Preview, Render, and Cache Rules
 
@@ -848,29 +850,29 @@ R.QA.03 :: [render behavior changed] => O(re-test GUI and PDF for JS and Rust br
 
 #### 13.1 Root resolution
 
-| CLI path valid | Config root valid | Result |
-|---|---|---|
-| yes | any | CLI path |
-| no/absent | yes | config root |
-| no/absent | no | HOME |
+| CLI path valid | Config root valid | Result      |
+| -------------- | ----------------- | ----------- |
+| yes            | any               | CLI path    |
+| no/absent      | yes               | config root |
+| no/absent      | no                | HOME        |
 
 #### 13.2 Mermaid backend default
 
-| Entry path | Explicit backend supplied | Effective default |
-|---|---|---|
-| `mdexplore.sh` | yes | explicit value |
-| `mdexplore.sh` | no | `rust` |
-| `mdexplore.py` | yes | explicit value |
-| `mdexplore.py` | no | `js` |
+| Entry path     | Explicit backend supplied | Effective default |
+| -------------- | ------------------------- | ----------------- |
+| `mdexplore.sh` | yes                       | explicit value    |
+| `mdexplore.sh` | no                        | `rust`            |
+| `mdexplore.py` | yes                       | explicit value    |
+| `mdexplore.py` | no                        | `js`              |
 
 #### 13.3 View-session persistence
 
 | Multi-view | Custom label | Persist to `.mdexplore-views.json` |
-|---|---|---|
-| no | no | no |
-| yes | no | yes |
-| no | yes | yes |
-| yes | yes | yes |
+| ---------- | ------------ | ---------------------------------- |
+| no         | no           | no                                 |
+| yes        | no           | yes                                |
+| no         | yes          | yes                                |
+| yes        | yes          | yes                                |
 
 ### 14. Rule Summary
 
@@ -904,17 +906,17 @@ R.PRIME.01 :: [always] => O(preserve correctness and responsiveness without cros
 - Preserve cache semantics unless changing performance behavior intentionally.
 - Treat `mdexplore_app/` as the extraction boundary for low-risk support code:
   - leaf helpers belong there first,
-  - reusable UI support classes that do not own application orchestration may
-    also move there (`tree.py`, `tabs.py`),
-  - keep `mdexplore.py` responsible for main-window orchestration and UI state
-    unless a second-stage refactor is explicitly intended,
-  - do not duplicate helpers or support classes between `mdexplore.py` and
-    `mdexplore_app/*`.
+  - reusable UI support classes that do not own application orchestration may  
+  also move there (`tree.py`, `tabs.py`),
+  - keep `mdexplore.py` responsible for main-window orchestration and UI state  
+  unless a second-stage refactor is explicitly intended,
+  - do not duplicate helpers or support classes between `mdexplore.py` and  
+  `mdexplore_app/*`.
 
 ## Rendering Rules
 
-- Markdown rendering defaults to `cmarkgfm` fast path when available and the
-  document is compatible with the fast renderer.
+- Markdown rendering defaults to `cmarkgfm` fast path when available and the  
+document is compatible with the fast renderer.
 - `markdown-it-py` remains the compatibility fallback and can be forced.
 - `MDEXPLORE_MARKDOWN_ENGINE` controls parser selection:
   - `cmark` (default): prefer cmark fast path and fall back when needed.
@@ -925,50 +927,50 @@ R.PRIME.01 :: [always] => O(preserve correctness and responsiveness without cros
   - `--mermaid-backend js` (default)
   - `--mermaid-backend rust` (renders SVG with `mmdr`)
 - Mermaid loading order is local-first, then CDN fallback.
-- Mermaid rendering should use a dark-theme-friendly high-contrast palette when
-  preview background is dark.
-- Mermaid SVG render results should be cached in-memory (by diagram hash and
-  render mode) for the current app run so revisiting documents avoids rerender.
+- Mermaid rendering should use a dark-theme-friendly high-contrast palette when  
+preview background is dark.
+- Mermaid SVG render results should be cached in-memory (by diagram hash and  
+render mode) for the current app run so revisiting documents avoids rerender.
 - Mermaid cache modes are:
   - `auto`: GUI/interactive preview mode.
   - `pdf`: print/export mode.
 - PDF Mermaid behavior is backend-specific:
   - JS backend: uses PDF clean render + print-safe monochrome/grayscale transform.
-  - Rust backend: uses separate PDF SVGs rendered by `mmdr` with default theming,
-    then applies print-safe grayscale normalization (with gradation and readable text).
-    GUI preview post-processing must not leak into Rust PDF source SVG selection.
+  - Rust backend: uses separate PDF SVGs rendered by `mmdr` with default theming,  
+  then applies print-safe grayscale normalization (with gradation and readable text).  
+  GUI preview post-processing must not leak into Rust PDF source SVG selection.
 - `MDEXPLORE_MERMAID_JS` can be used to force a specific local Mermaid script path.
 - `MDEXPLORE_MERMAID_RS_BIN` can be used to force a specific `mmdr` executable path.
 - MathJax loading order is local-first, then CDN fallback.
 - `MDEXPLORE_MATHJAX_JS` can be used to force a specific local MathJax script path.
-- Callout syntax is parsed from blockquotes using `[!TYPE]` markers and rendered
-  as non-collapsible callout containers.
-- PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`),
-  defaulting to `vendor/plantuml/plantuml.jar` unless `PLANTUML_JAR` is set.
-- PlantUML failures should render inline as:
-  `PlantUML render failed with error ...`, including detailed stderr context
-  (line numbers when available).
-- Inline preview BASE64 data-image materialization should stay parallelized and
-  deduplicated by payload hash.
-- Copy-time markdown image-link BASE64 conversion should keep parallel prefetch
-  behavior so large copy/export operations do not regress.
-- `MDEXPLORE_BASE64_IMAGE_THREADS` can be used to tune BASE64 worker-pool size
-  for both preview materialization and copy-time prefetch.
-- BASE64 helper routing should keep adaptive vendored `fastbase64` vs
-  `pybase64` selection with persisted tuning state (`fastbase64-adaptive.json`);
-  benchmark logging must remain optional and non-disruptive.
-- BASE64 encode helper behavior must preserve data-URI safety for diagram/image
-  consumers (notably PlantUML): reject malformed vendor-encoded payloads and
-  auto-fallback instead of propagating broken BASE64.
+- Callout syntax is parsed from blockquotes using `[!TYPE]` markers and rendered  
+as non-collapsible callout containers.
+- PlantUML fences are rendered locally through `plantuml.jar` (`java -jar ...`),  
+defaulting to `vendor/plantuml/plantuml.jar` unless `PLANTUML_JAR` is set.
+- PlantUML failures should render inline as:  
+`PlantUML render failed with error ...`, including detailed stderr context  
+(line numbers when available).
+- Inline preview BASE64 data-image materialization should stay parallelized and  
+deduplicated by payload hash.
+- Copy-time markdown image-link BASE64 conversion should keep parallel prefetch  
+behavior so large copy/export operations do not regress.
+- `MDEXPLORE_BASE64_IMAGE_THREADS` can be used to tune BASE64 worker-pool size  
+for both preview materialization and copy-time prefetch.
+- BASE64 helper routing should keep adaptive vendored `fastbase64` vs  
+`pybase64` selection with persisted tuning state (`fastbase64-adaptive.json`);  
+benchmark logging must remain optional and non-disruptive.
+- BASE64 encode helper behavior must preserve data-URI safety for diagram/image  
+consumers (notably PlantUML): reject malformed vendor-encoded payloads and  
+auto-fallback instead of propagating broken BASE64.
 - Maintain base URL behavior (`setHtml(..., base_url)`) so relative links/images resolve.
 - If adding new embedded syntaxes, implement via fenced code handling and document it.
-- Debug logging to project-root `mdexplore.log` must remain disabled unless the
-  app is launched with `--debug`.
+- Debug logging to project-root `mdexplore.log` must remain disabled unless the  
+app is launched with `--debug`.
 
 ## Mermaid Render/Caching Architecture (Read Before Changes)
 
-This code has multiple render forks. Preserve these boundaries.
-For practical, symptom-driven troubleshooting, also read section
+This code has multiple render forks. Preserve these boundaries.  
+For practical, symptom-driven troubleshooting, also read section  
 `Render Triage, Architecture, And Debugging` below.
 
 ### Python-side responsibilities
@@ -976,12 +978,12 @@ For practical, symptom-driven troubleshooting, also read section
 - `MarkdownRenderer` parses markdown fences and renders Mermaid differently by backend.
 - When backend is `rust`:
   - Preview SVG is rendered using Rust preview profile and embedded in HTML.
-  - A second PDF-profile SVG (default `mmdr` theming) is rendered per Mermaid hash and
-    stored in `env["mermaid_pdf_svg_by_hash"]`.
-- `render_document()` captures this per-document Rust PDF map and exposes it through
-  `take_last_mermaid_pdf_svg_by_hash()`.
-- `MdExploreWindow._merge_renderer_pdf_mermaid_cache_seed()` merges that map into
-  runtime Mermaid cache mode `pdf`.
+  - A second PDF-profile SVG (default `mmdr` theming) is rendered per Mermaid hash and  
+  stored in `env["mermaid_pdf_svg_by_hash"]`.
+- `render_document()` captures this per-document Rust PDF map and exposes it through  
+`take_last_mermaid_pdf_svg_by_hash()`.
+- `MdExploreWindow._merge_renderer_pdf_mermaid_cache_seed()` merges that map into  
+runtime Mermaid cache mode `pdf`.
 - `_inject_mermaid_cache_seed()` injects the full mode cache (`auto` + `pdf`) into page JS.
 
 ### In-page JS responsibilities
@@ -989,21 +991,21 @@ For practical, symptom-driven troubleshooting, also read section
 - `window.__mdexploreMermaidSvgCacheByMode` stores mode-specific SVG caches.
 - GUI path:
   - JS backend renders Mermaid through Mermaid JS and stores SVGs in `auto`.
-  - Rust backend prefers pre-rendered Rust SVG already in DOM; if missing, may fallback
-    to Mermaid JS (unless explicitly disabled for that operation).
+  - Rust backend prefers pre-rendered Rust SVG already in DOM; if missing, may fallback  
+  to Mermaid JS (unless explicitly disabled for that operation).
   - GUI post-processing/tuning is applied only in GUI mode.
 - PDF preflight path:
   - JS backend runs PDF-mode Mermaid render and then monochrome/grayscale transform.
-  - Rust backend swaps `.mermaid` blocks to cached Rust `pdf` SVGs and then applies
-    the same print-safe monochrome/grayscale normalization pass.
+  - Rust backend swaps `.mermaid` blocks to cached Rust `pdf` SVGs and then applies  
+  the same print-safe monochrome/grayscale normalization pass.
 
 ### Critical invariant
 
 - Never reuse GUI-adjusted Mermaid SVG as Rust PDF output.
 - Never select Mermaid cache mode `auto` during Rust PDF export.
 - Never leave PDF-mode Rust SVG in place after export completes.
-- Restore path (`_restore_preview_mermaid_palette`) must force mode `auto` reapplication.
-  For Rust, this means replacing with cached `auto` SVGs (or regenerating if unavailable).
+- Restore path (`_restore_preview_mermaid_palette`) must force mode `auto` reapplication.  
+For Rust, this means replacing with cached `auto` SVGs (or regenerating if unavailable).
 
 ### Practical maintenance guidance
 
@@ -1017,41 +1019,41 @@ For practical, symptom-driven troubleshooting, also read section
 
 ## Render Triage, Architecture, And Debugging
 
-This section consolidates the former `RENDER-PATHS.md` content into the
+This section consolidates the former `RENDER-PATHS.md` content into the  
 canonical agent guide.
 
-Use this section before changing Mermaid, PlantUML, preview caching, or PDF
+Use this section before changing Mermaid, PlantUML, preview caching, or PDF  
 export.
 
-Support code has been split into `mdexplore_app/`, but render orchestration
+Support code has been split into `mdexplore_app/`, but render orchestration  
 still lives primarily in `mdexplore.py`. In practice:
 
-- `mdexplore.py` still owns preview HTML generation, cache injection, and all
-  preview orchestration, cache injection, and in-page JavaScript orchestration,
-  while the document shell itself now lives in `assets/templates/preview/document.html`
-  and is rendered through `mdexplore_app/templates.py`.
-- `mdexplore_app/tree.py` and `mdexplore_app/tabs.py` now own the extracted
-  tree-pane and tab-bar UI support classes, but not render control flow.
-- `mdexplore_app/pdf.py` owns PDF footer stamping and related PDF post-pass
-  helpers.
-- `mdexplore_app/search.py` owns the extracted search tokenizer/parser and
-  canonical `NEAR(...)` query semantics (including legacy `CLOSE(...)` aliasing).
-- `mdexplore_app/workers.py` owns the background worker classes used by the
-  window.
+- `mdexplore.py` still owns preview HTML generation, cache injection, and all  
+preview orchestration, cache injection, and in-page JavaScript orchestration,  
+while the document shell itself now lives in `assets/templates/preview/document.html`  
+and is rendered through `mdexplore_app/templates.py`.
+- `mdexplore_app/tree.py` and `mdexplore_app/tabs.py` now own the extracted  
+tree-pane and tab-bar UI support classes, but not render control flow.
+- `mdexplore_app/pdf.py` owns PDF footer stamping and related PDF post-pass  
+helpers.
+- `mdexplore_app/search.py` owns the extracted search tokenizer/parser and  
+canonical `NEAR(...)` query semantics (including legacy `CLOSE(...)` aliasing).
+- `mdexplore_app/workers.py` owns the background worker classes used by the  
+window.
 
-When tracing a render bug, start in `mdexplore.py` for control flow and then
+When tracing a render bug, start in `mdexplore.py` for control flow and then  
 drop into `mdexplore_app/*` only for leaf helpers.
 
-Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is intentionally outside the
-diagram render/cache forks described below. It is implemented as a
-`QWebEngineView.setZoomFactor()` adjustment in `mdexplore.py`, so it scales the
-entire preview surface after HTML/diagram rendering rather than creating a
+Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) is intentionally outside the  
+diagram render/cache forks described below. It is implemented as a  
+`QWebEngineView.setZoomFactor()` adjustment in `mdexplore.py`, so it scales the  
+entire preview surface after HTML/diagram rendering rather than creating a  
 separate render branch or cache namespace.
 
-Preview overlay markers are also intentionally outside the diagram render/cache
-forks. Search-hit markers, persistent-highlight markers, and named-view home
-markers are lightweight in-page overlays driven from already-known match spans
-or persisted source-line anchors. They should be maintained as post-render UI
+Preview overlay markers are also intentionally outside the diagram render/cache  
+forks. Search-hit markers, persistent-highlight markers, and named-view home  
+markers are lightweight in-page overlays driven from already-known match spans  
+or persisted source-line anchors. They should be maintained as post-render UI  
 navigation aids, not as renderer outputs or cache buckets.
 
 ### 0. One-Page Triage Card
@@ -1062,25 +1064,25 @@ Use this as the fast incident-response path before going deep.
 
 1. Reproduce on one file with Mermaid diagrams.
 2. Run the 4-case matrix in order:
-   - JS GUI
-   - JS PDF
-   - Rust GUI
-   - Rust PDF
+  - JS GUI
+  - JS PDF
+  - Rust GUI
+  - Rust PDF
 3. Classify failure scope:
-   - only GUI,
-   - only PDF,
-   - only Rust,
-   - only JS,
-   - all branches.
+  - only GUI,
+  - only PDF,
+  - only Rust,
+  - only JS,
+  - all branches.
 4. Jump directly to the matching code waypoints in section `10.3`.
 5. Verify fix with both:
-   - one small-diagram file,
-   - one large multi-diagram file.
+  - one small-diagram file,
+  - one large multi-diagram file.
 
 #### Command Checklist (Copy/Paste)
 
-Use these commands from the project root (`/home/npepin/Projects/mdexplore`).
-For launcher commands rooted at a directory, select the named file in the tree
+Use these commands from the project root (`/home/npepin/Projects/mdexplore`).  
+For launcher commands rooted at a directory, select the named file in the tree  
 after launch.
 
 ```bash
@@ -1190,7 +1192,7 @@ flowchart TD
 - Mermaid JS backend vs Rust Mermaid backend (`mmdr`).
 - Python-side render/cache responsibilities vs in-page JavaScript responsibilities.
 
-The main maintenance risk is crossing these concerns and accidentally reusing
+The main maintenance risk is crossing these concerns and accidentally reusing  
 the wrong SVG variant (for example reusing GUI-adjusted SVGs in PDF mode).
 
 This section does not treat the following as render branches:
@@ -1199,17 +1201,17 @@ This section does not treat the following as render branches:
 - preview overlay markers for search hits / persistent highlights / named views,
 - tree gutter badge composition (search pill, highlight marker, views badge).
 
-Those features consume render outputs, but they do not create alternate HTML,
+Those features consume render outputs, but they do not create alternate HTML,  
 diagram SVG, or cache namespaces.
 
 ### 2. Render Mode Matrix
 
-| Mode | Mermaid Backend | SVG Source | Post-processing | Primary Cache Bucket |
-|---|---|---|---|---|
-| GUI | JS | Mermaid JS runtime (`mermaid.render`) | GUI contrast/style tuning | `auto` |
-| GUI | Rust | `mmdr` preview profile (Python) | GUI contrast/style tuning | `auto` |
-| PDF | JS | Mermaid JS runtime in PDF preflight | print monochrome/grayscale transform | `pdf` |
-| PDF | Rust | `mmdr` PDF profile (default theme, Python) | print-safe grayscale normalization (multi-shade) | `pdf` |
+| Mode | Mermaid Backend | SVG Source                                 | Post-processing                                  | Primary Cache Bucket |
+| ---- | --------------- | ------------------------------------------ | ------------------------------------------------ | -------------------- |
+| GUI  | JS              | Mermaid JS runtime (`mermaid.render`)      | GUI contrast/style tuning                        | `auto`               |
+| GUI  | Rust            | `mmdr` preview profile (Python)            | GUI contrast/style tuning                        | `auto`               |
+| PDF  | JS              | Mermaid JS runtime in PDF preflight        | print monochrome/grayscale transform             | `pdf`                |
+| PDF  | Rust            | `mmdr` PDF profile (default theme, Python) | print-safe grayscale normalization (multi-shade) | `pdf`                |
 
 ### 3. End-to-End Ownership
 
@@ -1276,21 +1278,21 @@ sequenceDiagram
 
 #### 4.1 Preview Overlay Layers (Non-Render)
 
-After the HTML is already loaded, mdexplore may add three navigation overlays
+After the HTML is already loaded, mdexplore may add three navigation overlays  
 inside the preview viewport:
 
 - right-side yellow search-hit markers derived from the active search result DOM,
-- left-side persistent-highlight markers derived from persisted text
-  highlight spans, with separate normal and important visual styles,
+- left-side persistent-highlight markers derived from persisted text  
+highlight spans, with separate normal and important visual styles,
 - left-side named-view markers derived from saved tab home line numbers.
 
 These overlays are intentionally kept outside the diagram render branches:
 
 - search markers are rebuilt from existing highlighted-match DOM,
-- persistent-highlight markers are rebuilt only when persisted highlight spans
-  exist,
-- named-view markers are pushed from Python as a compact line-anchor payload and
-  do not scan the DOM.
+- persistent-highlight markers are rebuilt only when persisted highlight spans  
+exist,
+- named-view markers are pushed from Python as a compact line-anchor payload and  
+do not scan the DOM.
 
 The layering order is significant:
 
@@ -1356,7 +1358,7 @@ flowchart TD
   WEB -->|harvest snapshot| A3
 ```
 
-Oversized preview HTML uses `_set_preview_html()` temp-file transport instead of
+Oversized preview HTML uses `_set_preview_html()` temp-file transport instead of  
 direct `setHtml()`, but that is only a load path and not a separate cache bucket.
 
 ### 7. Critical Invariants
@@ -1364,12 +1366,12 @@ direct `setHtml()`, but that is only a load path and not a separate cache bucket
 - Keep Mermaid cache separation by mode (`auto` vs `pdf`).
 - Rust PDF output must come from the dedicated Rust PDF render profile, not GUI SVG.
 - GUI Mermaid post-processing must not run on Rust PDF SVGs.
-- For PDF pagination, headed Mermaid and PlantUML sections are classified on
-  the diagram fence itself rather than on an outer wrapper. This avoids the
-  Chromium behavior where a heading can be left behind on the prior page while
-  the diagram starts on the next page.
-- Rust PDF path may apply print-safe grayscale normalization after selecting
-  the dedicated Rust PDF SVG source.
+- For PDF pagination, headed Mermaid and PlantUML sections are classified on  
+the diagram fence itself rather than on an outer wrapper. This avoids the  
+Chromium behavior where a heading can be left behind on the prior page while  
+the diagram starts on the next page.
+- Rust PDF path may apply print-safe grayscale normalization after selecting  
+the dedicated Rust PDF SVG source.
 - PDF preflight must hide interactive controls (toolbars/scrollbars) before snapshot.
 - Post-export restore must force a GUI-mode reapply.
 
@@ -1387,15 +1389,15 @@ direct `setHtml()`, but that is only a load path and not a separate cache bucket
 
 ### 9. Known TODO
 
-- Diagram zoom/pan state restore across document switches is still not fully reliable
-  for all Mermaid/PlantUML navigation sequences in one app run.
+- Diagram zoom/pan state restore across document switches is still not fully reliable  
+for all Mermaid/PlantUML navigation sequences in one app run.
 - See `DEVELOPERS-AGENTS.md` for attempted approaches and constraints.
-- Preview-only zoom factor is intentionally session-local and is not persisted
-  per file, per view, or into any render cache bucket.
+- Preview-only zoom factor is intentionally session-local and is not persisted  
+per file, per view, or into any render cache bucket.
 
 ### 10. Debugging Playbook (Human + Agent)
 
-This section is a practical troubleshooting guide for render regressions.
+This section is a practical troubleshooting guide for render regressions.  
 Use it when behavior deviates from expectations.
 
 #### 10.1 First Principles
@@ -1415,12 +1417,12 @@ Use it when behavior deviates from expectations.
 
 Run these four cases on the same markdown file with Mermaid:
 
-| Case | Backend | Path | Expected |
-|---|---|---|---|
-| A | JS | GUI | dark-theme tuned Mermaid in preview |
-| B | JS | PDF | monochrome/grayscale Mermaid in PDF |
-| C | Rust | GUI | dark-theme tuned Mermaid in preview |
-| D | Rust | PDF | dedicated Rust PDF SVG + print-safe grayscale normalization |
+| Case | Backend | Path | Expected                                                    |
+| ---- | ------- | ---- | ----------------------------------------------------------- |
+| A    | JS      | GUI  | dark-theme tuned Mermaid in preview                         |
+| B    | JS      | PDF  | monochrome/grayscale Mermaid in PDF                         |
+| C    | Rust    | GUI  | dark-theme tuned Mermaid in preview                         |
+| D    | Rust    | PDF  | dedicated Rust PDF SVG + print-safe grayscale normalization |
 
 If only one case fails, debug that branch first.  
 If all fail, suspect shared setup (asset loading, cache seed injection, or broken JS runtime).
@@ -1452,15 +1454,15 @@ Use these anchors in `mdexplore.py` while debugging:
 
 #### 10.4 Symptom -> Likely Cause -> Next Check
 
-| Symptom | Likely Cause | Next Check |
-|---|---|---|
-| Rust PDF still shows GUI colors | wrong SVG source reused | verify Rust PDF path is pulling cache mode `pdf`, not current DOM |
-| GUI stays white after PDF (Rust) | restore did not reapply `auto` SVG | verify `_restore_preview_mermaid_palette` forces mode `auto` and Rust branch honors `force` |
-| PDF Mermaid tiny on page | width/height attrs not normalized | verify print preflight strips width/height attrs and sets width/max-width/height |
-| GUI Mermaid labels too dark | post-style function missed selector class | inspect `__mdexploreApplyMermaidPostStyles` for diagram-kind-specific logic |
-| Random “Preview load failed” on heavy files | `setHtml` payload too large / transient web load issue | verify temp-file fallback path in `_set_preview_html` and check status/log output |
-| Rust fallback unexpectedly using JS in PDF | fallback guard missing in PDF stage | verify Rust PDF branch does not trigger JS fallback render path |
-| Sequence diagram labels invisible in PDF | label content not normalized to dark text | verify grayscale pass handles both SVG text and foreignObject HTML labels |
+| Symptom                                     | Likely Cause                                           | Next Check                                                                                  |
+| ------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| Rust PDF still shows GUI colors             | wrong SVG source reused                                | verify Rust PDF path is pulling cache mode `pdf`, not current DOM                           |
+| GUI stays white after PDF (Rust)            | restore did not reapply `auto` SVG                     | verify `_restore_preview_mermaid_palette` forces mode `auto` and Rust branch honors `force` |
+| PDF Mermaid tiny on page                    | width/height attrs not normalized                      | verify print preflight strips width/height attrs and sets width/max-width/height            |
+| GUI Mermaid labels too dark                 | post-style function missed selector class              | inspect `__mdexploreApplyMermaidPostStyles` for diagram-kind-specific logic                 |
+| Random “Preview load failed” on heavy files | `setHtml` payload too large / transient web load issue | verify temp-file fallback path in `_set_preview_html` and check status/log output           |
+| Rust fallback unexpectedly using JS in PDF  | fallback guard missing in PDF stage                    | verify Rust PDF branch does not trigger JS fallback render path                             |
+| Sequence diagram labels invisible in PDF    | label content not normalized to dark text              | verify grayscale pass handles both SVG text and foreignObject HTML labels                   |
 
 #### 10.5 Runtime Inspection Steps (Inside Running App)
 
@@ -1533,10 +1535,10 @@ A Mermaid/PDF fix is complete only when all are true:
 
 ## Known TODO: Diagram View State Restore
 
-- Open issue: Mermaid and PlantUML zoom/pan state is not yet reliably restored
-  when switching away from a document and then returning during the same app run.
-- Treat this as a known TODO. Do not remove this note until behavior is
-  verified end-to-end and documented with a reproducible test.
+- Open issue: Mermaid and PlantUML zoom/pan state is not yet reliably restored  
+when switching away from a document and then returning during the same app run.
+- Treat this as a known TODO. Do not remove this note until behavior is  
+verified end-to-end and documented with a reproducible test.
 
 ### Attempts Tried That Did Not Fully Resolve It
 
@@ -1546,7 +1548,7 @@ A Mermaid/PDF fix is complete only when all are true:
 - Reapplying restore after Mermaid palette reset and after async renderer completion.
 - Forcing PDF-mode normalization/reset before print and restoring interaction state afterward.
 
-These approaches improved behavior in some cases but did not make restore reliable
+These approaches improved behavior in some cases but did not make restore reliable  
 across all navigation sequences.
 
 ## Launcher Rules
@@ -1563,24 +1565,24 @@ across all navigation sequences.
   - `file://` URIs should be decoded
   - file arguments should resolve to parent directory
 - Launcher must pass through supported app switches (for example `--mermaid-backend`).
-- Launcher `DEBUG_MODE=true` should append `--debug` so application debug logging
-  can be enabled without editing desktop launchers or shell aliases.
-- Non-interactive launcher runs should log to
-  `~/.cache/mdexplore/launcher.log` for desktop troubleshooting.
-  Log retention is capped to the most recent 1000 lines.
-- Launcher should maintain a runtime import-check stamp at
-  `.venv/.runtime-import-check.sha256`.
-  - Trigger full runtime import verification only when `.venv` is newly
-    created, `requirements.txt` hash changes, or stamp/hash mismatch occurs.
-  - Runtime import set remains:
-    `cmarkgfm`, `markdown_it`, `mdit_py_plugins.dollarmath`, `linkify_it`,
-    `pybase64`, `PySide6.QtWebEngineWidgets`, `pypdf`,
-    `reportlab.pdfgen.canvas`.
-  - If verification fails, launcher should self-heal by reinstalling
-    requirements and then refresh the stamp.
-- Startup icon generation in `mdexplore_app/icons.py` should persist generated
-  outputs in `~/.cache/mdexplore/icon-cache`, keyed by source-asset identity
-  and render parameters, so expensive per-pixel transforms are paid once.
+- Launcher `DEBUG_MODE=true` should append `--debug` so application debug logging  
+can be enabled without editing desktop launchers or shell aliases.
+- Non-interactive launcher runs should log to  
+`~/.cache/mdexplore/launcher.log` for desktop troubleshooting.  
+Log retention is capped to the most recent 1000 lines.
+- Launcher should maintain a runtime import-check stamp at  
+`.venv/.runtime-import-check.sha256`.
+  - Trigger full runtime import verification only when `.venv` is newly  
+  created, `requirements.txt` hash changes, or stamp/hash mismatch occurs.
+  - Runtime import set remains:  
+  `cmarkgfm`, `markdown_it`, `mdit_py_plugins.dollarmath`, `linkify_it`,  
+  `pybase64`, `PySide6.QtWebEngineWidgets`, `pypdf`,  
+  `reportlab.pdfgen.canvas`.
+  - If verification fails, launcher should self-heal by reinstalling  
+  requirements and then refresh the stamp.
+- Startup icon generation in `mdexplore_app/icons.py` should persist generated  
+outputs in `~/.cache/mdexplore/icon-cache`, keyed by source-asset identity  
+and render parameters, so expensive per-pixel transforms are paid once.
 - `--help` should stay lightweight and not require venv activation.
 
 ## Setup Script Rules
@@ -1594,12 +1596,12 @@ across all navigation sequences.
   - ensure the Rust Mermaid renderer source exists under `vendor/mermaid-rs-renderer`
   - build `mmdr` into the path already probed by the launcher/app
 - If the vendored Rust renderer source already exists, prefer it over recloning.
-- If `cargo` is missing, the setup script may install a minimal Rust toolchain
-  through `rustup` so bootstrap can complete non-interactively.
-- The setup script should not silently apt-install arbitrary system packages.
-  Missing optional system runtime pieces (for example Java or
-  `/usr/bin/marktext`) should
-  produce clear warnings instead.
+- If `cargo` is missing, the setup script may install a minimal Rust toolchain  
+through `rustup` so bootstrap can complete non-interactively.
+- The setup script should not silently apt-install arbitrary system packages.  
+Missing optional system runtime pieces (for example Java or  
+`/usr/bin/marktext`) should  
+produce clear warnings instead.
 
 ## Quality Gates Before Finishing
 
@@ -1627,79 +1629,82 @@ xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
 
 The `tests/` directory currently contains these suites:
 
-- `tests/test_preview_regressions.py`: headless `QWebEngineView` regressions for
-  saved view-tab round trips, named-view marker restore parity with tab
-  selection, selection-time restore snapshot races during tab switches,
-  persistent-highlight marker navigation, right-gutter search marker
-  navigation/placement, same-document preview search highlighting, revisit
-  highlight-drift checks, and preview context-menu/live-highlight probes. Uses
-  `test/testdoc.md` plus persisted sidecars copied into a temp fixture root,
-  and also creates synthetic documents for targeted NEAR/search/marker cases.
-- `tests/test_search_query_module.py`: pure `mdexplore_app.search` unit tests for
-  tokenization, quote/case handling, trailing-space preservation, NEAR-window
-  selection, hit counting, invalid-query fallback, and legacy `CLOSE(...)`
-  alias normalization to canonical `NEAR(...)`.
-- `tests/test_search_query_syntax.py`: `MdExploreWindow` wrapper tests that
-  verify the window-facing search helper methods (`_tokenize_match_query`,
-  `_current_search_terms`, `_current_near_term_groups`,
-  `_compile_match_predicate`, `_compile_match_hit_counter`,
-  `_best_near_focus_window`) stay aligned with the extracted module behavior.
-- `tests/test_fast_base64.py`: BASE64 helper regressions for canonical encoded
-  length/round-trip correctness across varied payload sizes and tolerant decode
-  handling (whitespace/missing padding) via `b64decode_loose()`.
-- `tests/test_js_assets.py`: startup registry/template tests for all externalized
-  JavaScript assets under `assets/js/preview/` and `assets/js/pdf/`, including
-  preload coverage and placeholder-substitution validation for preview search,
-  live selection, context-menu probing, marker updates, persistent highlights,
-  and PDF precheck/restore scripts.
-- `tests/test_template_assets.py`: startup registry/template tests for external
-  HTML assets under `assets/templates/preview/`, including unresolved-placeholder
-  validation and integration coverage that `MarkdownRenderer.render_document()`
-  uses the external `preview/document.html` shell correctly.
-- `tests/test_tab_bar_layout.py`: focused `ViewTabBar` widget regressions for
-  custom-label text budgeting and fallback handling when Qt reports stale
-  close-button geometry, covering the class of bugs where an inactive tab label
-  appears clipped until a later relayout/selection.
-- `tests/test_window_layout.py`: main-window Qt layout regression for the top
-  path label, covering the case where a long document path would otherwise
-  raise the window minimum width and make the app feel unshrinkable.
-- `tests/test_ui_assets.py`: repository-layout checks that tracked UI
-  `.svg`/`.png`/`.ttf` assets live under `assets/ui/` while `mdexplor-icon.png`
-  remains at the repo root.
-- `tests/test_highlight_clear_confirmations.py`: confirmation-dialog coverage
-  for non-recursive `Clear in Directory` and recursive `Clear All` tree actions,
-  including “No”/“Yes” flows and status-message assertions.
-- `tests/test_pdf_layout_hints.py`: pure PDF post-pass unit tests for TOC
-  detection and landscape/diagram page-flag classification, covering the case
-  where a TOC page mentions a landscape diagram heading but must remain portrait.
+- `tests/test_preview_regressions.py`: headless `QWebEngineView` regressions for  
+saved view-tab round trips, named-view marker restore parity with tab  
+selection, selection-time restore snapshot races during tab switches,  
+persistent-highlight marker navigation, right-gutter search marker  
+navigation/placement, same-document preview search highlighting, revisit  
+highlight-drift checks, and preview context-menu/live-highlight probes. Uses  
+`test/testdoc.md` plus persisted sidecars copied into a temp fixture root,  
+and also creates synthetic documents for targeted NEAR/search/marker cases.
+- `tests/test_search_query_module.py`: pure `mdexplore_app.search` unit tests for  
+tokenization, quote/case handling, trailing-space preservation, NEAR-window  
+selection, hit counting, invalid-query fallback, and legacy `CLOSE(...)`  
+alias normalization to canonical `NEAR(...)`.
+- `tests/test_search_query_syntax.py`: `MdExploreWindow` wrapper tests that  
+verify the window-facing search helper methods (`_tokenize_match_query`,  
+`_current_search_terms`, `_current_near_term_groups`,  
+`_compile_match_predicate`, `_compile_match_hit_counter`,  
+`_best_near_focus_window`) stay aligned with the extracted module behavior.
+- `tests/test_fast_base64.py`: BASE64 helper regressions for canonical encoded  
+length/round-trip correctness across varied payload sizes and tolerant decode  
+handling (whitespace/missing padding) via `b64decode_loose()`.
+- `tests/test_js_assets.py`: startup registry/template tests for all externalized  
+JavaScript assets under `assets/js/preview/` and `assets/js/pdf/`, including  
+preload coverage and placeholder-substitution validation for preview search,  
+live selection, context-menu probing, marker updates, persistent highlights,  
+and PDF precheck/restore scripts.
+- `tests/test_template_assets.py`: startup registry/template tests for external  
+HTML assets under `assets/templates/preview/`, including unresolved-placeholder  
+validation and integration coverage that `MarkdownRenderer.render_document()`  
+uses the external `preview/document.html` shell correctly.
+- `tests/test_tab_bar_layout.py`: focused `ViewTabBar` widget regressions for  
+custom-label text budgeting and fallback handling when Qt reports stale  
+close-button geometry, covering the class of bugs where an inactive tab label  
+appears clipped until a later relayout/selection.
+- `tests/test_window_layout.py`: main-window Qt layout regression for the top  
+path label, covering the case where a long document path would otherwise  
+raise the window minimum width and make the app feel unshrinkable.
+- `tests/test_ui_assets.py`: repository-layout checks that tracked UI  
+`.svg`/`.png`/`.ttf` assets live under `assets/ui/` while `mdexplor-icon.png`  
+remains at the repo root.
+- `tests/test_highlight_clear_confirmations.py`: confirmation-dialog coverage  
+for non-recursive `Clear in Directory` and recursive `Clear All` tree actions,  
+including “No”/“Yes” flows and status-message assertions.
+- `tests/test_pdf_layout_hints.py`: pure PDF post-pass unit tests for TOC  
+detection and landscape/diagram page-flag classification, covering the case  
+where a TOC page mentions a landscape diagram heading but must remain portrait.
 
 Recommended execution patterns:
 
-- Fast parser-only check:
-  `.venv/bin/python -m unittest tests.test_search_query_module tests.test_search_query_syntax -v`
-- Asset/template loader check:
-  `.venv/bin/python -m unittest tests.test_js_assets tests.test_template_assets tests.test_ui_assets tests.test_pdf_layout_hints -v`
-- Tab-bar layout check:
-  `xvfb-run -a .venv/bin/python -m unittest tests.test_tab_bar_layout -v`
-- Window layout check:
-  `xvfb-run -a .venv/bin/python -m unittest tests.test_window_layout -v`
-- Preview/marker/search integration check:
-  `xvfb-run -a .venv/bin/python -m unittest tests.test_preview_regressions -v`
-- Full regression sweep:
-  `xvfb-run -a .venv/bin/python -m unittest discover -s tests -v`
+- Fast parser-only check:  
+`.venv/bin/python -m unittest tests.test_search_query_module tests.test_search_query_syntax -v`
+- Asset/template loader check:  
+`.venv/bin/python -m unittest tests.test_js_assets tests.test_template_assets tests.test_ui_assets tests.test_pdf_layout_hints -v`
+- Tab-bar layout check:  
+`xvfb-run -a .venv/bin/python -m unittest tests.test_tab_bar_layout -v`
+- Window layout check:  
+`xvfb-run -a .venv/bin/python -m unittest tests.test_window_layout -v`
+- Preview/marker/search integration check:  
+`xvfb-run -a .venv/bin/python -m unittest tests.test_preview_regressions -v`
+- Full regression sweep:  
+`xvfb-run -a .venv/bin/python -m unittest discover -s tests -v`
 
 ## Documentation Requirements
 
 When changing behavior:
 
 - Update `README.md` usage and examples.
-- Update `DEVELOPERS-AGENTS.md` when behavioral hierarchy, precedence, invariants,
-  render/caching/PDF/diagram control flow, or agent-facing workflow changes.
-- If the change affects `pdfexplore` behavior (especially search-marker or
-  viewer-bridge interaction semantics), also update
-  `pdfexplore/README.md` and `pdfexplore/AGENTS.md` in the same change.
-- Update `UML.md` when extracted boundaries, architecture, or major control-flow
-  ownership changes.
+- Update `DEVELOPERS-AGENTS.md` when behavioral hierarchy, precedence, invariants,  
+render/caching/PDF/diagram control flow, or agent-facing workflow changes.
+- If the change affects `pdfexplore` behavior (especially search-marker or  
+viewer-bridge interaction semantics), also update  
+`pdfexplore/README.md` and `pdfexplore/AGENTS.md` in the same change.
+- Keep runtime settings externalized in JSON:
+  - shared/global defaults in `mdexplore.settings.json`,
+  - pdfexplore-only defaults in `pdfexplore.settings.json`.
+- Update `UML.md` when extracted boundaries, architecture, or major control-flow  
+ownership changes.
 
 ## Common Feature Patterns
 

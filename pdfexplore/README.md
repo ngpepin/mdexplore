@@ -4,6 +4,19 @@
 
 It is designed for people who review many PDFs and need stable annotation/session context without touching source documents. `pdfexplore` treats the PDF file as immutable input and stores user state in sidecars so workflows remain reproducible and reversible.
 
+## Settings Cheat Sheet
+
+| What you want to change | File | Jump to details |
+| --- | --- | --- |
+| Performance and responsiveness (cache, prefetch, timer cadence, thread pools) | [pdfexplore.settings.json](../pdfexplore.settings.json) | [app section key reference](#app-section-key-reference) |
+| Viewer search-marker behavior and bridge tuning | [pdfexplore.settings.json](../pdfexplore.settings.json) | [viewer_bridge section key reference](#viewer_bridge-section-key-reference) |
+| Sidecar/session behavior and file naming | [pdfexplore.settings.json](../pdfexplore.settings.json) | [app section key reference](#app-section-key-reference) |
+| Tree extension/icon/color sidecar constants | [pdfexplore.settings.json](../pdfexplore.settings.json) | [tree section key reference](#tree-section-key-reference) |
+| Disk-cache trim cadence and retention policy details | [pdfexplore.settings.json](../pdfexplore.settings.json) | [pdf_text_disk_cache_trim_interval deep dive](#pdf_text_disk_cache_trim_interval-deep-dive) |
+| Cache-size number derivations (MiB to bytes) | [pdfexplore.settings.json](../pdfexplore.settings.json) | [Runtime value derivation notes](#runtime-value-derivation-notes) |
+| Full pdfexplore runtime defaults (all sections) | [pdfexplore.settings.json](../pdfexplore.settings.json) | [Runtime Settings (JSON)](#runtime-settings-json) |
+| Shared cross-app constants imported from mdexplore | [mdexplore.settings.json](../mdexplore.settings.json) | [shared global settings file note](#runtime-settings-json) |
+
 ## What This Tool Prioritizes
 
 - Read-only handling of source PDFs.
@@ -144,6 +157,166 @@ From repo root:
 - Supports modern JSON payload with default root/recent roots.
 - Includes compatibility handling for legacy single-path config payloads.
 - Recent roots are maintained using short lock-based writes for safer multi-instance behavior.
+
+### Runtime Settings (JSON)
+
+- Shared global settings file: `mdexplore.settings.json`
+  - contains shared defaults used by both apps (for example zoom and highlight-related constants imported from `mdexplore_app.constants`).
+- pdfexplore-specific settings file: `pdfexplore.settings.json`
+  - contains pdfexplore-only settings in three sections:
+    - `app`: timers, worker limits, file/session/cache behavior.
+    - `viewer_bridge`: in-view marker/search tuning and progressive marker controls.
+    - `tree`: PDF tree model constants (sidecar file name, extension target, icon name/color).
+
+This split keeps shared/global behavior in one place while preserving a
+separate, app-local tuning surface for pdfexplore.
+
+#### Loading and fallback behavior
+
+- `pdfexplore/settings.py` reads `pdfexplore.settings.json` from repo root.
+- If the file is missing or invalid, each section (`app`, `viewer_bridge`, `tree`) starts empty.
+- `pdfexplore/app.py` applies per-key defaults with `_app_setting(...)` for missing `app` values.
+- `pdfexplore/assets/viewer_bridge.js` applies numeric defaults and clamp ranges for missing or out-of-range `viewer_bridge` values.
+- `pdfexplore/tree.py` reads `tree` values with per-key fallback defaults.
+
+#### Units and naming conventions
+
+- `_ms`: milliseconds.
+- `_seconds`: seconds.
+- `_bytes`: bytes.
+- `_max_threads`: thread count.
+- Ratio/divisor keys are unitless numbers.
+
+#### `app` section key reference
+
+##### Files, sidecars, and root/session behavior
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `config_file_name` | `.pdfexplore.cfg` | User config filename in home directory. |
+| `views_file_name` | `.pdfexplore-views.json` | Sidecar filename for per-document view sessions. |
+| `highlighting_file_name` | `.pdfexplore-highlighting.json` | Sidecar filename for persistent text highlights. |
+| `viewer_html_relative` | `vendor/pdfjs/web/viewer.html` | Relative path to embedded pdf.js viewer HTML. |
+| `viewer_bridge_js_relative` | `assets/viewer_bridge.js` | Relative path to bridge script injected into viewer. |
+| `okular_edit_launcher` | `/home/npepin/.local/share/applications-scripts/run-okular.sh` | External launcher script path for edit/open integration. |
+| `max_document_views` | `8` | Maximum number of tabs/views per document. |
+| `max_recent_root_directories` | `35` | Recent-roots persistence cap. |
+| `recent_root_menu_mru_count` | `10` | Number of MRU roots shown first in menu. |
+| `min_recent_root_dwell_seconds` | `30.0` | Minimum active-root dwell before history retention. |
+| `config_default_root_key` | `default_root` | Config JSON key for default root. |
+| `config_recent_roots_key` | `recent_roots` | Config JSON key for recent roots. |
+| `config_lock_stale_seconds` | `120.0` | Lock-file stale threshold for cleanup. |
+
+##### Text cache, prefetch, and search cadence
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `pdf_text_cache_max_entries` | `384` | Max in-memory text cache entries. |
+| `pdf_text_cache_max_chars` | `100663296` | Max total characters in memory text cache. |
+| `pdf_text_disk_cache_max_files` | `1200` | Max disk cache files before trim pressure. |
+| `pdf_text_disk_cache_max_bytes` | `402653184` | Max disk cache byte budget before trim pressure. |
+| `pdf_text_disk_cache_trim_interval` | `24` | Disk-cache trim trigger interval measured in successful store operations (every Nth store runs a trim pass). |
+| `prefetch_batch_size` | `1` | Number of PDFs prefetched per idle cycle. |
+| `prefetch_idle_seconds` | `0.8` | Idle-delay threshold before prefetch can run. |
+| `prefetch_heavy_use_window_seconds` | `1.2` | Sliding window for interaction-pressure checks. |
+| `prefetch_heavy_use_event_threshold` | `14` | Interaction count threshold that triggers temporary prefetch pause. |
+| `prefetch_heavy_use_pause_seconds` | `1.2` | Pause duration after heavy interaction threshold is exceeded. |
+| `prefetch_viewer_activity_pause_seconds` | `1.6` | Pause duration after active viewer interaction. |
+| `prefetch_tree_mutation_pause_seconds` | `0.85` | Pause duration after tree mutation/expand/collapse activity. |
+| `tree_search_refresh_debounce_ms` | `300` | Debounce delay for tree-driven search refreshes. |
+| `tree_interaction_visual_relax_ms` | `320` | UI relax window after interaction bursts. |
+| `cached_badge_sync_interval_ms` | `200` | Cadence for cache badge synchronization. |
+| `match_timer_interval_ms` | `320` | Match worker dispatch cadence. |
+| `scope_prefetch_timer_interval_ms` | `550` | Prefetch timer cadence for current scope. |
+| `viewer_ready_timer_interval_ms` | `160` | Viewer-ready polling cadence. |
+| `view_state_poll_timer_interval_ms` | `900` | View-state synchronization polling cadence. |
+| `file_change_watch_interval_ms` | `1200` | Poll interval for source PDF signature changes. |
+
+##### Thread pools and palettes
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `search_thread_pool_max_threads` | `2` | Search/extraction worker pool max thread count. |
+| `prefetch_thread_pool_max_threads` | `1` | Prefetch worker pool max thread count. |
+| `tree_marker_scan_thread_pool_max_threads` | `1` | Tree marker scan worker pool max thread count. |
+| `highlight_colors` | `Yellow, Green, Blue, Orange, Purple, Light Gray, Medium Gray, Red` | File-highlight palette entries (`name`, `value`). |
+
+##### pdf_text_disk_cache_trim_interval deep dive
+
+`pdf_text_disk_cache_trim_interval` controls how often the on-disk text cache is
+trimmed after writes.
+
+- A counter increments after each successful compressed cache write.
+- When `store_count % pdf_text_disk_cache_trim_interval == 0`, a trim pass runs.
+- Default `24` means trim runs on the 24th, 48th, 72nd, ... successful store.
+- Trim pass ordering is recency-first (newest `mtime` kept first).
+- A file is kept only if both limits remain satisfied:
+  - `pdf_text_disk_cache_max_files`
+  - `pdf_text_disk_cache_max_bytes`
+- Any remaining older entries are deleted.
+- Cache reads update file `mtime`, so recently used entries are less likely to
+  be removed during future trims.
+
+Tuning guidance:
+
+- Lower interval (for example `8` to `16`):
+  - more frequent trim work,
+  - tighter disk-footprint control,
+  - slightly higher background IO overhead.
+- Higher interval (for example `48` to `96`):
+  - less frequent trim work,
+  - larger transient disk growth between trims,
+  - occasional larger cleanup bursts.
+- Keep this value as an integer >= `1`.
+  - `0` or negative values are invalid for modulo-trigger logic.
+
+#### `viewer_bridge` section key reference
+
+These values are consumed in browser context by `viewer_bridge.js`.
+Each numeric value is validated with clamp bounds before use.
+
+| Key | Default | Clamp | Purpose |
+| --- | --- | --- | --- |
+| `three_up_divisor` | `3` | `1..12` | Divisor used to scale three-up layout width. |
+| `min_zoom_scale` | `0.1` | `0.01..100` | Minimum allowed zoom scale in bridge operations. |
+| `max_zoom_scale` | `10.0` | `min_zoom_scale..100` | Maximum allowed zoom scale in bridge operations. |
+| `restore_stabilize_ms` | `2800` | `50..30000` | Stabilization window after restore actions. |
+| `search_indicator_resume_delay_ms` | `180` | `1..5000` | Delay before paused marker generation resumes. |
+| `search_indicator_click_retry_delay_ms` | `80` | `1..5000` | First retry delay for click-driven marker navigation. |
+| `search_indicator_click_final_retry_delay_ms` | `180` | `1..5000` | Final retry delay for click-driven marker navigation. |
+| `search_indicator_max_entries` | `2400` | `50..50000` | Upper cap of marker entries rendered in right rail. |
+| `search_indicator_concurrency_min` | `2` | `1..64` | Minimum page-scan concurrency for marker build. |
+| `search_indicator_concurrency_max` | `4` | `search_indicator_concurrency_min..64` | Maximum page-scan concurrency for marker build. |
+| `search_indicator_markers_per_page_max` | `48` | `1..500` | Per-page marker cap before clustering/pruning pressure. |
+| `search_indicator_yield_every_batches` | `3` | `1..50` | Event-loop yield cadence for responsive progressive builds. |
+
+#### `tree` section key reference
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `color_file_name` | `.pdfexplore-colors.json` | Sidecar filename for per-directory tree color assignments. |
+| `target_extension` | `.pdf` | Extension filter used by PDF tree model. |
+| `primary_icon_name` | `pdf.svg` | Primary icon asset used for target rows. |
+| `primary_icon_color` | `#e86060` | Tint color applied to primary icon. |
+
+#### Runtime value derivation notes
+
+Some cache limits were previously expressed in code as MiB formulas and are
+now explicit integers in JSON.
+
+- `app.pdf_text_cache_max_chars = 100663296`
+  - derived from `96 * 1024 * 1024` (96 MiB).
+- `app.pdf_text_disk_cache_max_bytes = 402653184`
+  - derived from `384 * 1024 * 1024` (384 MiB).
+
+General conversion rule: `MiB * 1024 * 1024`.
+
+#### Practical tuning notes
+
+- Change one setting group at a time (cache, prefetch, bridge markers) and verify interaction responsiveness after each change.
+- Keep `viewer_bridge` concurrency and entry limits balanced: high values increase throughput but can delay interaction-priority jumps.
+- For low-memory systems, reduce `pdf_text_cache_max_chars` first, then `pdf_text_disk_cache_max_bytes`.
+- For heavy-doc navigation responsiveness, lower `prefetch_batch_size` and/or increase pause-related seconds values.
 
 ## Sidecars
 

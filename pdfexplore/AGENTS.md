@@ -49,6 +49,20 @@ The system should feel predictable under stress: opening a new root, expanding f
 - `.pdfexplore-views.json`: per-document multi-view tab sessions.
 - `.pdfexplore-highlighting.json`: persistent in-document text highlight ranges.
 
+## Settings Files
+
+- Global/shared settings: `mdexplore.settings.json`
+- pdfexplore-specific settings: `pdfexplore.settings.json`
+
+Rule: keep shared constants in `mdexplore.settings.json`; keep pdfexplore-only
+runtime settings in `pdfexplore.settings.json`.
+
+`pdfexplore.settings.json` sections currently include:
+
+- `app`: window/runtime/cache/search/prefetch settings
+- `viewer_bridge`: right-rail marker/search behavior tuning
+- `tree`: file-tree PDF constants (`.pdfexplore-colors.json`, extension/icon config)
+
 ### Sidecar Philosophy
 
 - Sidecars store intent/state, not source transformations.

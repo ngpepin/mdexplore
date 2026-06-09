@@ -18,10 +18,58 @@
     EVEN: 2,
   });
 
-  const THREE_UP_DIVISOR = 3;
-  const MIN_ZOOM_SCALE = 0.1;
-  const MAX_ZOOM_SCALE = 10.0;
-  const RESTORE_STABILIZE_MS = 2800;
+  const bridgeConfig = (
+    window.__pdfexploreBridgeConfig
+    && typeof window.__pdfexploreBridgeConfig === "object"
+  )
+    ? window.__pdfexploreBridgeConfig
+    : {};
+
+  function configNumber(name, fallback, minValue, maxValue) {
+    const raw = Number(bridgeConfig[name]);
+    let value = Number.isFinite(raw) ? raw : fallback;
+    if (Number.isFinite(minValue)) {
+      value = Math.max(minValue, value);
+    }
+    if (Number.isFinite(maxValue)) {
+      value = Math.min(maxValue, value);
+    }
+    return value;
+  }
+
+  const THREE_UP_DIVISOR = configNumber("three_up_divisor", 3, 1, 12);
+  const MIN_ZOOM_SCALE = configNumber("min_zoom_scale", 0.1, 0.01, 100);
+  const MAX_ZOOM_SCALE = configNumber("max_zoom_scale", 10.0, MIN_ZOOM_SCALE, 100);
+  const RESTORE_STABILIZE_MS = Math.round(configNumber("restore_stabilize_ms", 2800, 50, 30000));
+  const SEARCH_INDICATOR_RESUME_DELAY_MS = Math.round(
+    configNumber("search_indicator_resume_delay_ms", 180, 1, 5000)
+  );
+  const SEARCH_INDICATOR_CLICK_RETRY_DELAY_MS = Math.round(
+    configNumber("search_indicator_click_retry_delay_ms", 80, 1, 5000)
+  );
+  const SEARCH_INDICATOR_CLICK_FINAL_RETRY_DELAY_MS = Math.round(
+    configNumber("search_indicator_click_final_retry_delay_ms", 180, 1, 5000)
+  );
+  const SEARCH_INDICATOR_MAX_ENTRIES = Math.round(
+    configNumber("search_indicator_max_entries", 2400, 50, 50000)
+  );
+  const SEARCH_INDICATOR_CONCURRENCY_MIN = Math.round(
+    configNumber("search_indicator_concurrency_min", 2, 1, 64)
+  );
+  const SEARCH_INDICATOR_CONCURRENCY_MAX = Math.round(
+    configNumber(
+      "search_indicator_concurrency_max",
+      4,
+      SEARCH_INDICATOR_CONCURRENCY_MIN,
+      64
+    )
+  );
+  const SEARCH_INDICATOR_MARKERS_PER_PAGE_MAX = Math.round(
+    configNumber("search_indicator_markers_per_page_max", 48, 1, 500)
+  );
+  const SEARCH_INDICATOR_YIELD_EVERY_BATCHES = Math.round(
+    configNumber("search_indicator_yield_every_batches", 3, 1, 50)
+  );
 
   // Bridge runtime state. Search-indicator fields intentionally track both
   // completed and in-flight builds so marker rendering can stay progressive
@@ -538,7 +586,7 @@ html, body {
     state.searchIndicatorResumeHandle = window.setTimeout(() => {
       state.searchIndicatorResumeHandle = 0;
       scheduleSearchIndicatorBuild(state.searchTerms);
-    }, 180);
+    }, SEARCH_INDICATOR_RESUME_DELAY_MS);
   }
 
   function normalizedSearchTerms(rawTerms) {
@@ -757,8 +805,8 @@ html, body {
         if (tryCenterOnRenderedSearchHit(pageNumber, intraRatio)) {
           return;
         }
-        window.setTimeout(tryFocus, 180);
-      }, 80);
+        window.setTimeout(tryFocus, SEARCH_INDICATOR_CLICK_FINAL_RETRY_DELAY_MS);
+      }, SEARCH_INDICATOR_CLICK_RETRY_DELAY_MS);
     });
   }
 
@@ -814,8 +862,14 @@ html, body {
     // Build markers progressively in page order so users get early, clickable
     // coverage near the top of the document before full completion.
     const entries = [];
-    const maxEntries = 2400;
-    const concurrency = Math.max(2, Math.min(4, Number((navigator && navigator.hardwareConcurrency) || 4)));
+    const maxEntries = SEARCH_INDICATOR_MAX_ENTRIES;
+    const concurrency = Math.max(
+      SEARCH_INDICATOR_CONCURRENCY_MIN,
+      Math.min(
+        SEARCH_INDICATOR_CONCURRENCY_MAX,
+        Number((navigator && navigator.hardwareConcurrency) || 4)
+      )
+    );
     let processedBatches = 0;
     for (let batchStart = 1; batchStart <= pagesCount; batchStart += concurrency) {
       if (
@@ -850,7 +904,10 @@ html, body {
         if (pageHitCount <= 0 || pageNumber <= 0) {
           continue;
         }
-        const markersForPage = Math.max(1, Math.min(pageHitCount, 48));
+        const markersForPage = Math.max(
+          1,
+          Math.min(pageHitCount, SEARCH_INDICATOR_MARKERS_PER_PAGE_MAX)
+        );
         for (let index = 0; index < markersForPage; index += 1) {
           if (entries.length >= maxEntries) {
             break;
@@ -874,7 +931,7 @@ html, body {
       }
 
       processedBatches += 1;
-      if (processedBatches % 3 === 0) {
+      if (processedBatches % SEARCH_INDICATOR_YIELD_EVERY_BATCHES === 0) {
         // Yield periodically so input/paint events are not starved by scan work.
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
