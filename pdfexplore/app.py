@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict, deque
 import fcntl
+import gzip
+import hashlib
 import json
 import os
 import subprocess
 import sys
+from threading import Lock
 import time
 from pathlib import Path
 
@@ -71,7 +75,7 @@ from mdexplore_app.search import (
 from mdexplore_app.tabs import ViewTabBar
 
 from .tree import ColorizedPdfModel, PdfTreeItemDelegate
-from .workers import PdfSearchWorker, PdfTreeMarkerScanWorker
+from .workers import PdfSearchWorker, PdfTextPrefetchWorker, PdfTreeMarkerScanWorker
 
 
 CONFIG_FILE_NAME = ".pdfexplore.cfg"
@@ -86,10 +90,12 @@ class PdfPreviewWebView(QWebEngineView):
     """WebEngine view that lets the app intercept hotkeys before pdf.js consumes them."""
 
     def __init__(self, key_handler, parent=None) -> None:
+        """Initialize instance state."""
         super().__init__(parent)
         self._key_handler = key_handler
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Handle keyPressEvent."""
         try:
             if callable(self._key_handler) and self._key_handler(event):
                 event.accept()
@@ -110,6 +116,21 @@ class PdfExploreWindow(QMainWindow):
     CONFIG_RECENT_ROOTS_KEY = "recent_roots"
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
+    PDF_TEXT_CACHE_MAX_ENTRIES = 384
+    PDF_TEXT_CACHE_MAX_CHARS = 96 * 1024 * 1024
+    PDF_TEXT_DISK_CACHE_MAX_FILES = 1200
+    PDF_TEXT_DISK_CACHE_MAX_BYTES = 384 * 1024 * 1024
+    PDF_TEXT_DISK_CACHE_TRIM_INTERVAL = 24
+    PREFETCH_BATCH_SIZE = 1
+    PREFETCH_IDLE_SECONDS = 0.8
+    PREFETCH_HEAVY_USE_WINDOW_SECONDS = 1.2
+    PREFETCH_HEAVY_USE_EVENT_THRESHOLD = 14
+    PREFETCH_HEAVY_USE_PAUSE_SECONDS = 1.2
+    PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS = 1.6
+    PREFETCH_TREE_MUTATION_PAUSE_SECONDS = 0.85
+    TREE_SEARCH_REFRESH_DEBOUNCE_MS = 300
+    TREE_INTERACTION_VISUAL_RELAX_MS = 320
+    CACHED_BADGE_SYNC_INTERVAL_MS = 200
     HIGHLIGHT_COLORS = [
         ("Yellow", "#f5d34f"),
         ("Green", "#78d389"),
@@ -130,6 +151,7 @@ class PdfExploreWindow(QMainWindow):
         gpu_context_available: bool = False,
         debug_mode: bool = False,
     ) -> None:
+        """Initialize instance state."""
         super().__init__()
         self.root = root.resolve()
         self.config_path = config_path
@@ -141,7 +163,21 @@ class PdfExploreWindow(QMainWindow):
         self.last_directory_selection: Path | None = self.root
         self.current_match_files: list[Path] = []
         self._current_match_counts: dict[Path, int] = {}
-        self._pdf_text_cache: dict[str, tuple[int, int, str]] = {}
+        self._pdf_text_cache: OrderedDict[str, tuple[int, int, str]] = OrderedDict()
+        self._pdf_text_cache_total_chars = 0
+        self._pdf_text_cache_lock = Lock()
+        self._cached_pdf_path_keys: set[str] = set()
+        self._cached_pdf_path_keys_lock = Lock()
+        self._cached_pdf_path_keys_revision = 0
+        self._cached_pdf_path_keys_synced_revision = -1
+        self._pdf_text_disk_cache_lock = Lock()
+        self._pdf_text_disk_cache_store_count = 0
+        self._pdf_text_disk_cache_dir = self._build_pdf_text_disk_cache_dir()
+        self._prefetch_scope_key = ""
+        self._prefetch_cursor = 0
+        self._last_user_interaction_at = time.monotonic()
+        self._recent_interaction_timestamps: deque[float] = deque(maxlen=96)
+        self._prefetch_paused_until = 0.0
         self._persisted_view_sessions_by_dir: dict[str, dict[str, dict]] = {}
         self._document_view_sessions: dict[str, dict] = {}
         self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
@@ -157,6 +193,7 @@ class PdfExploreWindow(QMainWindow):
         self._pending_search_terms: list[tuple[str, bool]] = []
         self._visible_tree_pdf_cache: list[Path] = []
         self._visible_tree_pdf_cache_dirty = True
+        self._visible_tree_pdf_cache_fetch_more_complete = False
         self._viewer_bridge_source = VIEWER_BRIDGE_JS.read_text(encoding="utf-8")
         self._preview_widgets_by_path: dict[str, QWebEngineView] = {}
         self._viewer_bridge_ready_by_path: dict[str, bool] = {}
@@ -166,6 +203,11 @@ class PdfExploreWindow(QMainWindow):
         self._global_shortcuts: list[QShortcut] = []
 
         self.thread_pool = QThreadPool(self)
+        # pypdf text extraction is Python-heavy; keeping search concurrency low
+        # avoids GIL thrash that can make the GUI feel blocked during searches.
+        self.thread_pool.setMaxThreadCount(
+            max(1, min(2, self.thread_pool.maxThreadCount()))
+        )
         self._search_request_id = 0
         self._active_search_workers: set[PdfSearchWorker] = set()
         self._search_scan_expected_workers = 0
@@ -176,6 +218,10 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_match_counts: dict[str, int] = {}
         self._search_scan_filename_match_paths: set[str] = set()
         self._search_scan_error_count = 0
+        self._prefetch_pool = QThreadPool(self)
+        self._prefetch_pool.setMaxThreadCount(1)
+        self._prefetch_request_id = 0
+        self._active_prefetch_workers: set[PdfTextPrefetchWorker] = set()
         self._tree_marker_scan_pool = QThreadPool(self)
         self._tree_marker_scan_pool.setMaxThreadCount(1)
         self._tree_marker_scan_request_id = 0
@@ -183,14 +229,35 @@ class PdfExploreWindow(QMainWindow):
         self._tree_marker_cache_root_key: str | None = None
 
         self.match_timer = QTimer(self)
-        self.match_timer.setInterval(220)
+        self.match_timer.setInterval(320)
         self.match_timer.setSingleShot(True)
         self.match_timer.timeout.connect(self._run_match_search)
 
         self._tree_search_refresh_timer = QTimer(self)
         self._tree_search_refresh_timer.setSingleShot(True)
-        self._tree_search_refresh_timer.setInterval(180)
+        self._tree_search_refresh_timer.setInterval(
+            int(self.TREE_SEARCH_REFRESH_DEBOUNCE_MS)
+        )
         self._tree_search_refresh_timer.timeout.connect(self._run_match_search)
+
+        self._scope_prefetch_timer = QTimer(self)
+        self._scope_prefetch_timer.setSingleShot(True)
+        self._scope_prefetch_timer.setInterval(550)
+        self._scope_prefetch_timer.timeout.connect(self._start_scope_prefetch)
+
+        self._cached_badge_sync_timer = QTimer(self)
+        self._cached_badge_sync_timer.setSingleShot(True)
+        self._cached_badge_sync_timer.setInterval(int(self.CACHED_BADGE_SYNC_INTERVAL_MS))
+        self._cached_badge_sync_timer.timeout.connect(self._sync_cached_tree_badges)
+
+        self._tree_visual_relax_timer = QTimer(self)
+        self._tree_visual_relax_timer.setSingleShot(True)
+        self._tree_visual_relax_timer.setInterval(
+            int(self.TREE_INTERACTION_VISUAL_RELAX_MS)
+        )
+        self._tree_visual_relax_timer.timeout.connect(
+            self._on_tree_interaction_visual_relax_timeout
+        )
 
         self._viewer_ready_timer = QTimer(self)
         self._viewer_ready_timer.setInterval(160)
@@ -220,6 +287,8 @@ class PdfExploreWindow(QMainWindow):
         self.tree.setItemDelegate(PdfTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedPdfModel.decorated_icon_size())
         self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setAnimated(False)
         self.tree.setHeaderHidden(True)
         self.tree.hideColumn(1)
         self.tree.hideColumn(2)
@@ -555,8 +624,484 @@ class PdfExploreWindow(QMainWindow):
         self._update_window_title()
         self._update_up_button_state()
         self.installEventFilter(self)
+        self.tree.installEventFilter(self)
+        self.tree.viewport().installEventFilter(self)
+        self.match_input.installEventFilter(self)
+
+    def _lookup_cached_pdf_text(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+    ) -> str | None:
+        """Handle lookup cached pdf text."""
+        with self._pdf_text_cache_lock:
+            cached = self._pdf_text_cache.get(path_key)
+            if cached is None:
+                return None
+            cached_mtime_ns, cached_size, cached_text = cached
+            if cached_mtime_ns != mtime_ns or cached_size != size:
+                return None
+            self._pdf_text_cache.move_to_end(path_key)
+            return cached_text
+
+    def _store_cached_pdf_text(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+        searchable_text: str,
+    ) -> None:
+        """Handle store cached pdf text."""
+        with self._pdf_text_cache_lock:
+            previous = self._pdf_text_cache.pop(path_key, None)
+            if previous is not None:
+                self._pdf_text_cache_total_chars -= len(previous[2])
+
+            self._pdf_text_cache[path_key] = (mtime_ns, size, searchable_text)
+            self._pdf_text_cache_total_chars += len(searchable_text)
+
+            while (
+                len(self._pdf_text_cache) > int(self.PDF_TEXT_CACHE_MAX_ENTRIES)
+                or self._pdf_text_cache_total_chars > int(self.PDF_TEXT_CACHE_MAX_CHARS)
+            ):
+                _evicted_key, evicted = self._pdf_text_cache.popitem(last=False)
+                self._pdf_text_cache_total_chars -= len(evicted[2])
+
+    def _invalidate_cached_pdf_text(self, path_key: str) -> None:
+        """Handle invalidate cached pdf text."""
+        with self._pdf_text_cache_lock:
+            removed = self._pdf_text_cache.pop(path_key, None)
+            if removed is not None:
+                self._pdf_text_cache_total_chars -= len(removed[2])
+
+    def _record_cached_pdf_path_key(self, path_key: str) -> None:
+        """Handle record cached pdf path key."""
+        if not path_key:
+            return
+        normalized = str(path_key)
+        with self._cached_pdf_path_keys_lock:
+            if normalized in self._cached_pdf_path_keys:
+                return
+            self._cached_pdf_path_keys.add(normalized)
+            self._cached_pdf_path_keys_revision += 1
+
+    def _snapshot_cached_pdf_path_keys(self) -> tuple[int, set[str]]:
+        """Handle snapshot cached pdf path keys."""
+        with self._cached_pdf_path_keys_lock:
+            return self._cached_pdf_path_keys_revision, set(self._cached_pdf_path_keys)
+
+    def _sync_cached_tree_badges(self) -> None:
+        """Handle sync cached tree badges."""
+        if self._prefetch_temporarily_paused():
+            self._cached_badge_sync_timer.start()
+            return
+        model = getattr(self, "model", None)
+        if model is None:
+            return
+        revision, path_keys = self._snapshot_cached_pdf_path_keys()
+        if revision <= self._cached_pdf_path_keys_synced_revision:
+            return
+        changed = model.set_cached_path_keys(path_keys)
+        self._cached_pdf_path_keys_synced_revision = revision
+        if changed:
+            self.tree.viewport().update()
+
+    def _request_cached_badge_sync(self) -> None:
+        """Request cached badge sync."""
+        with self._cached_pdf_path_keys_lock:
+            needs_sync = (
+                self._cached_pdf_path_keys_revision
+                > self._cached_pdf_path_keys_synced_revision
+            )
+        if not needs_sync:
+            return
+        self._cached_badge_sync_timer.start()
+
+    def _mark_user_interaction(self) -> None:
+        """Handle mark user interaction."""
+        now = time.monotonic()
+        self._last_user_interaction_at = now
+        self._recent_interaction_timestamps.append(now)
+
+        window_seconds = float(self.PREFETCH_HEAVY_USE_WINDOW_SECONDS)
+        cutoff = now - window_seconds
+        while self._recent_interaction_timestamps and self._recent_interaction_timestamps[0] < cutoff:
+            self._recent_interaction_timestamps.popleft()
+
+        threshold = max(1, int(self.PREFETCH_HEAVY_USE_EVENT_THRESHOLD))
+        if len(self._recent_interaction_timestamps) >= threshold:
+            self._prefetch_paused_until = max(
+                self._prefetch_paused_until,
+                now + float(self.PREFETCH_HEAVY_USE_PAUSE_SECONDS),
+            )
+
+    def _set_tree_interaction_visual_mode(self, enabled: bool) -> None:
+        """Set tree interaction visual mode."""
+        model = getattr(self, "model", None)
+        tree = getattr(self, "tree", None)
+        if model is None or tree is None:
+            return
+        setter = getattr(model, "set_reduce_paint_cost", None)
+        if not callable(setter):
+            return
+        try:
+            changed = bool(setter(enabled))
+        except Exception:
+            changed = False
+        if changed:
+            tree.viewport().update()
+
+    def _on_tree_interaction_visual_relax_timeout(self) -> None:
+        """Handle tree interaction visual relax timeout."""
+        self._set_tree_interaction_visual_mode(False)
+
+    def _prefetch_temporarily_paused(self) -> bool:
+        """Handle prefetch temporarily paused."""
+        return time.monotonic() < float(self._prefetch_paused_until)
+
+    def _is_object_within_current_preview(self, watched) -> bool:
+        """Return whether object within current preview."""
+        try:
+            preview = self._current_preview_widget()
+        except Exception:
+            return False
+        if preview is None or watched is None:
+            return False
+        return watched is preview
+
+    def _pause_prefetch_for_user_input(self, watched, event_type) -> None:
+        """Pause prefetch while direct user input is active.
+
+        This method intentionally treats wheel input as a high-priority signal to
+        protect preview scroll smoothness, and treats preview-local pointer/key
+        input as interaction that should temporarily suppress background parsing.
+        """
+        interactive_types = {
+            QEvent.Type.Wheel,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseMove,
+            QEvent.Type.KeyPress,
+            QEvent.Type.KeyRelease,
+        }
+        if event_type not in interactive_types:
+            return
+
+        within_preview = False
+        if event_type != QEvent.Type.Wheel:
+            try:
+                within_preview = self._is_object_within_current_preview(watched)
+            except Exception:
+                within_preview = False
+
+        if event_type == QEvent.Type.Wheel or within_preview:
+            self._pause_prefetch_temporarily(
+                self.PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS,
+                cancel_inflight=True,
+            )
+
+    def _is_pdf_text_cached_for_path(
+        self,
+        path: Path,
+        *,
+        mark_cached_badge: bool = False,
+    ) -> bool:
+        """Return whether current text cache contains a valid entry for `path`.
+
+        Lookup order:
+        1) bounded in-memory cache,
+        2) on-disk compressed cache.
+
+        When `mark_cached_badge` is true, cache hits also update tree badge
+        state so the UI reflects already-cached files even when no extraction is
+        needed.
+        """
+        try:
+            stat = path.stat()
+        except Exception:
+            return False
+        path_key = self._path_key(path)
+        cached = self._lookup_cached_pdf_text(path_key, stat.st_mtime_ns, stat.st_size)
+        if cached is not None:
+            if mark_cached_badge:
+                self._record_cached_pdf_path_key(path_key)
+            return True
+        cache_path = self._pdf_text_disk_cache_file_path(
+            path_key,
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
+        with self._pdf_text_disk_cache_lock:
+            try:
+                exists = cache_path.is_file()
+            except Exception:
+                return False
+        if exists and mark_cached_badge:
+            self._record_cached_pdf_path_key(path_key)
+        return exists
+
+    @staticmethod
+    def _build_pdf_text_disk_cache_dir() -> Path:
+        """Build pdf text disk cache dir."""
+        xdg_cache_home = os.environ.get("XDG_CACHE_HOME", "").strip()
+        if xdg_cache_home:
+            cache_root = Path(xdg_cache_home).expanduser()
+        else:
+            cache_root = Path.home() / ".cache"
+        return cache_root / "mdexplore" / "pdfexplore-text-cache"
+
+    @staticmethod
+    def _pdf_text_disk_cache_file_name(path_key: str, mtime_ns: int, size: int) -> str:
+        """Handle pdf text disk cache file name."""
+        material = f"{path_key}|{int(mtime_ns)}|{int(size)}"
+        digest = hashlib.sha256(material.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return f"{digest}.txt.gz"
+
+    def _pdf_text_disk_cache_file_path(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+    ) -> Path:
+        """Handle pdf text disk cache file path."""
+        file_name = self._pdf_text_disk_cache_file_name(path_key, mtime_ns, size)
+        return self._pdf_text_disk_cache_dir / file_name
+
+    def _load_pdf_text_from_disk_cache(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+    ) -> str | None:
+        """Load pdf text from disk cache."""
+        cache_path = self._pdf_text_disk_cache_file_path(path_key, mtime_ns, size)
+        with self._pdf_text_disk_cache_lock:
+            try:
+                if not cache_path.is_file():
+                    return None
+            except Exception:
+                return None
+
+            try:
+                with gzip.open(cache_path, mode="rt", encoding="utf-8") as handle:
+                    cached_text = handle.read()
+            except Exception:
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return None
+
+            try:
+                os.utime(cache_path, None)
+            except Exception:
+                pass
+            return cached_text
+
+    def _trim_pdf_text_disk_cache_locked(self) -> None:
+        """Handle trim pdf text disk cache locked."""
+        cache_dir = self._pdf_text_disk_cache_dir
+        try:
+            entries = list(cache_dir.glob("*.txt.gz"))
+        except Exception:
+            return
+        if not entries:
+            return
+
+        files_with_stats: list[tuple[Path, float, int]] = []
+        for entry in entries:
+            try:
+                stat = entry.stat()
+            except Exception:
+                continue
+            size_bytes = int(stat.st_size)
+            files_with_stats.append((entry, float(stat.st_mtime), size_bytes))
+
+        files_with_stats.sort(key=lambda payload: payload[1], reverse=True)
+        max_files = int(self.PDF_TEXT_DISK_CACHE_MAX_FILES)
+        max_bytes = int(self.PDF_TEXT_DISK_CACHE_MAX_BYTES)
+        kept_count = 0
+        kept_bytes = 0
+        for path, _mtime, size_bytes in files_with_stats:
+            keep_for_count = kept_count < max_files
+            keep_for_size = (kept_bytes + size_bytes) <= max_bytes
+            if keep_for_count and keep_for_size:
+                kept_count += 1
+                kept_bytes += size_bytes
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _store_pdf_text_to_disk_cache(
+        self,
+        path_key: str,
+        mtime_ns: int,
+        size: int,
+        searchable_text: str,
+    ) -> None:
+        """Handle store pdf text to disk cache."""
+        cache_dir = self._pdf_text_disk_cache_dir
+        cache_path = self._pdf_text_disk_cache_file_path(path_key, mtime_ns, size)
+        with self._pdf_text_disk_cache_lock:
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                return
+
+            temp_path = cache_path.with_name(
+                f".{cache_path.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+            )
+            try:
+                with gzip.open(temp_path, mode="wt", encoding="utf-8") as handle:
+                    handle.write(searchable_text)
+                temp_path.replace(cache_path)
+            except Exception:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return
+
+            self._pdf_text_disk_cache_store_count += 1
+            if (
+                self._pdf_text_disk_cache_store_count
+                % int(self.PDF_TEXT_DISK_CACHE_TRIM_INTERVAL)
+            ) == 0:
+                self._trim_pdf_text_disk_cache_locked()
+
+    def _cancel_scope_prefetch(self) -> None:
+        """Handle cancel scope prefetch."""
+        self._prefetch_request_id += 1
+        self._prefetch_pool.clear()
+
+    def _request_scope_prefetch(self) -> None:
+        """Schedule one prefetch pass through the scope timer."""
+        self._scope_prefetch_timer.start()
+
+    def _start_scope_prefetch(self) -> None:
+        """Start one low-priority cache-warming batch for visible PDFs.
+
+        The scheduler is intentionally conservative:
+        - pauses during interaction/search pressure,
+        - prioritizes the currently open document first,
+        - advances with a cursor so warmup progresses across the visible set.
+        """
+        if self._prefetch_temporarily_paused():
+            self._scope_prefetch_timer.start()
+            return
+
+        if (time.monotonic() - self._last_user_interaction_at) < float(
+            self.PREFETCH_IDLE_SECONDS
+        ):
+            self._scope_prefetch_timer.start()
+            return
+
+        if (
+            self._search_scan_expected_workers > 0
+            and self._search_scan_completed_workers < self._search_scan_expected_workers
+        ):
+            self._scope_prefetch_timer.start()
+            return
+
+        candidates = self._list_visible_pdf_files_in_tree()
+        if not candidates:
+            return
+
+        current_scope_key = self._path_key(self._highlight_scope_directory())
+        if current_scope_key != self._prefetch_scope_key:
+            self._prefetch_scope_key = current_scope_key
+            self._prefetch_cursor = 0
+
+        total_candidates = len(candidates)
+        if total_candidates <= 0:
+            return
+
+        cursor = self._prefetch_cursor % total_candidates
+        batch: list[Path] = []
+        visited = 0
+        target_batch_size = max(1, int(self.PREFETCH_BATCH_SIZE))
+
+        prioritized_current_key: str | None = None
+        current = self.current_file
+        if (
+            isinstance(current, Path)
+            and current.suffix.lower() == ".pdf"
+            and current.is_file()
+            and not self._is_pdf_text_cached_for_path(
+                current,
+                mark_cached_badge=True,
+            )
+        ):
+            try:
+                prioritized_current = current.resolve()
+            except Exception:
+                prioritized_current = current
+            batch.append(prioritized_current)
+            prioritized_current_key = self._path_key(prioritized_current)
+
+        while visited < total_candidates and len(batch) < target_batch_size:
+            candidate = candidates[cursor]
+            candidate_key = self._path_key(candidate)
+            if prioritized_current_key and candidate_key == prioritized_current_key:
+                # Skip duplicate insertion when the current file is also in the
+                # regular rotating candidate stream.
+                cursor = (cursor + 1) % total_candidates
+                visited += 1
+                continue
+            if not self._is_pdf_text_cached_for_path(
+                candidate,
+                mark_cached_badge=True,
+            ):
+                batch.append(candidate)
+            cursor = (cursor + 1) % total_candidates
+            visited += 1
+        self._prefetch_cursor = cursor
+        if not batch:
+            self._request_cached_badge_sync()
+            return
+
+        self._cancel_scope_prefetch()
+        request_id = self._prefetch_request_id
+        worker = PdfTextPrefetchWorker(
+            request_id,
+            batch,
+            self._read_pdf_text,
+            should_abort=lambda req=request_id: (
+                req != self._prefetch_request_id
+                or (
+                    self._search_scan_expected_workers > 0
+                    and self._search_scan_completed_workers
+                    < self._search_scan_expected_workers
+                )
+            ),
+        )
+        self._active_prefetch_workers.add(worker)
+        worker.signals.finished.connect(self._on_scope_prefetch_finished)
+        self._prefetch_pool.start(worker, -1)
+
+    def _on_scope_prefetch_finished(
+        self,
+        request_id: int,
+        _prefetched_count: int,
+        _skipped_count: int,
+        _error_text: str,
+    ) -> None:
+        """Handle scope prefetch finished."""
+        worker_to_remove = None
+        for worker in self._active_prefetch_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_prefetch_workers.remove(worker_to_remove)
+        self._request_cached_badge_sync()
+        self._request_scope_prefetch()
 
     def _register_global_shortcut(self, sequence: QKeySequence, callback) -> None:
+        """Handle register global shortcut."""
         shortcut = QShortcut(sequence, self)
         shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         shortcut.activated.connect(callback)
@@ -564,6 +1109,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _has_ctrl_without_alt_meta(modifiers: Qt.KeyboardModifiers) -> bool:
+        """Return whether ctrl without alt meta."""
         if not (modifiers & Qt.KeyboardModifier.ControlModifier):
             return False
         if modifiers & Qt.KeyboardModifier.AltModifier:
@@ -574,6 +1120,7 @@ class PdfExploreWindow(QMainWindow):
 
     @classmethod
     def _is_ctrl_left_paren_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether ctrl left paren key event."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
             return False
         modifiers = event.modifiers()
@@ -594,6 +1141,7 @@ class PdfExploreWindow(QMainWindow):
 
     @classmethod
     def _is_ctrl_bar_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether ctrl bar key event."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
             return False
         modifiers = event.modifiers()
@@ -609,6 +1157,7 @@ class PdfExploreWindow(QMainWindow):
 
     @classmethod
     def _is_ctrl_right_paren_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether ctrl right paren key event."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
             return False
         modifiers = event.modifiers()
@@ -626,6 +1175,7 @@ class PdfExploreWindow(QMainWindow):
         return False
 
     def _handle_custom_shortcut_key_event(self, event: QKeyEvent) -> bool:
+        """Handle handle custom shortcut key event."""
         is_toggle = self._is_ctrl_bar_key_event(event) or self._is_ctrl_left_paren_key_event(event)
         is_zoom_100 = self._is_ctrl_right_paren_key_event(event)
         if not (is_toggle or is_zoom_100):
@@ -642,6 +1192,25 @@ class PdfExploreWindow(QMainWindow):
         return False
 
     def eventFilter(self, watched, event) -> bool:
+        """Global event hook used for interaction tracking and hotkeys.
+
+        The filter is intentionally lightweight: it records user activity,
+        updates prefetch throttling, and handles custom preview shortcuts.
+        """
+        event_type = event.type() if event is not None else None
+        if event_type in {
+            QEvent.Type.KeyPress,
+            QEvent.Type.KeyRelease,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.Wheel,
+        }:
+            self._mark_user_interaction()
+        try:
+            self._pause_prefetch_for_user_input(watched, event_type)
+        except Exception:
+            pass
+
         if isinstance(event, QKeyEvent):
             if self._handle_custom_shortcut_key_event(event):
                 event.accept()
@@ -649,11 +1218,13 @@ class PdfExploreWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _debug_log(self, message: str) -> None:
+        """Handle debug log."""
         if self.debug_mode:
             print(f"[pdfexplore] {message}", file=sys.stderr)
 
     @staticmethod
     def _path_key(path: Path) -> str:
+        """Handle path key."""
         try:
             return str(path.resolve())
         except Exception:
@@ -661,14 +1232,17 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _config_file_path() -> Path:
+        """Handle config file path."""
         shared = _shared_config_file_path()
         return shared.with_name(CONFIG_FILE_NAME)
 
     def _config_lock_file_path(self) -> Path:
+        """Handle config lock file path."""
         return self.config_path.with_name(self.config_path.name + ".lock")
 
     @classmethod
     def _parse_config_payload_text(cls, text: str) -> tuple[str | None, list[str]]:
+        """Parse config payload text."""
         raw = text.strip()
         if not raw:
             return None, []
@@ -698,6 +1272,7 @@ class PdfExploreWindow(QMainWindow):
     def _normalize_recent_root_directories(
         cls, directories: list[Path | str]
     ) -> list[Path]:
+        """Normalize recent root directories."""
         normalized: list[Path] = []
         seen: set[str] = set()
         for raw_entry in directories:
@@ -727,6 +1302,7 @@ class PdfExploreWindow(QMainWindow):
         return normalized
 
     def _cleanup_stale_config_lock_file(self) -> None:
+        """Handle cleanup stale config lock file."""
         lock_path = self._config_lock_file_path()
         try:
             if not lock_path.exists():
@@ -738,6 +1314,7 @@ class PdfExploreWindow(QMainWindow):
             pass
 
     def _read_config_payload(self) -> tuple[Path | None, list[Path]]:
+        """Handle read config payload."""
         raw = ""
         lock_path = self._config_lock_file_path()
         self._cleanup_stale_config_lock_file()
@@ -782,6 +1359,7 @@ class PdfExploreWindow(QMainWindow):
         return default_root, recent_roots
 
     def _load_recent_root_directories_from_config(self) -> list[Path]:
+        """Load recent root directories from config."""
         default_root, recent_roots = self._read_config_payload()
         merged: list[Path | str] = []
         if default_root is not None:
@@ -792,11 +1370,13 @@ class PdfExploreWindow(QMainWindow):
     def _commit_recent_root_from_departure(
         self, departed_root: Path, elapsed_seconds: float
     ) -> None:
+        """Handle commit recent root from departure."""
         if float(elapsed_seconds) < float(self.MIN_RECENT_ROOT_DWELL_SECONDS):
             return
         self._record_recent_root_directory(departed_root)
 
     def _on_recent_root_navigation(self, next_root: Path) -> Path:
+        """Handle recent root navigation."""
         try:
             target_root = next_root.resolve()
         except Exception:
@@ -815,6 +1395,7 @@ class PdfExploreWindow(QMainWindow):
         return target_root
 
     def _refresh_recent_root_menu(self) -> None:
+        """Refresh recent root menu."""
         menu = getattr(self, "recent_menu", None)
         if menu is None:
             return
@@ -839,6 +1420,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
         def _add_recent_action(directory: Path) -> None:
+            """Handle add recent action."""
             label = str(directory)
             if current_key and self._path_key(directory) == current_key:
                 label = f"{label} (current)"
@@ -859,6 +1441,7 @@ class PdfExploreWindow(QMainWindow):
             _add_recent_action(directory)
 
     def _reload_recent_root_directories_before_menu_open(self) -> None:
+        """Handle reload recent root directories before menu open."""
         on_disk = self._load_recent_root_directories_from_config()
         merged: list[Path | str] = []
         merged.extend(on_disk)
@@ -867,12 +1450,14 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_recent_root_menu()
 
     def _record_recent_root_directory(self, directory: Path) -> None:
+        """Handle record recent root directory."""
         merged: list[Path | str] = [directory]
         merged.extend(self._recent_root_directories)
         self._recent_root_directories = self._normalize_recent_root_directories(merged)
         self._refresh_recent_root_menu()
 
     def _open_recent_root_directory(self, directory: Path) -> None:
+        """Open recent root directory."""
         normalized = self._normalize_recent_root_directories([directory])
         if not normalized:
             self._recent_root_directories = self._normalize_recent_root_directories(
@@ -888,12 +1473,28 @@ class PdfExploreWindow(QMainWindow):
         self._set_root_directory(target)
 
     def _update_up_button_state(self) -> None:
+        """Handle update up button state."""
         self.up_btn.setEnabled(self.root.parent != self.root)
 
     def _invalidate_visible_tree_pdf_cache(self) -> None:
+        """Handle invalidate visible tree pdf cache."""
         self._visible_tree_pdf_cache_dirty = True
+        self._visible_tree_pdf_cache_fetch_more_complete = False
+
+    def _pause_prefetch_temporarily(
+        self,
+        seconds: float,
+        *,
+        cancel_inflight: bool = False,
+    ) -> None:
+        """Handle pause prefetch temporarily."""
+        pause_until = time.monotonic() + max(0.0, float(seconds))
+        self._prefetch_paused_until = max(self._prefetch_paused_until, pause_until)
+        if cancel_inflight:
+            self._cancel_scope_prefetch()
 
     def _reset_search_scan_state(self) -> None:
+        """Handle reset search scan state."""
         self._search_scan_expected_workers = 0
         self._search_scan_completed_workers = 0
         self._search_scan_total_candidates = 0
@@ -904,20 +1505,33 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_error_count = 0
 
     def _cancel_pending_search_scan(self) -> None:
+        """Handle cancel pending search scan."""
         self._search_request_id += 1
         self.thread_pool.clear()
         self._reset_search_scan_state()
 
     def _cancel_pending_tree_marker_scan(self) -> None:
+        """Handle cancel pending tree marker scan."""
         self._tree_marker_scan_request_id += 1
         self._tree_marker_scan_pool.clear()
 
     def _rerun_active_search_for_scope(self) -> None:
+        """Handle rerun active search for scope."""
         if not self.match_input.text().strip():
+            self._request_scope_prefetch()
             return
+        # Halt stale extraction immediately when scope visibility changes.
+        self._cancel_pending_search_scan()
         self.match_timer.stop()
         self._tree_search_refresh_timer.stop()
-        self._tree_search_refresh_timer.start()
+        delay_ms = int(self.TREE_SEARCH_REFRESH_DEBOUNCE_MS)
+        remaining_pause_seconds = max(
+            0.0,
+            float(self._prefetch_paused_until) - time.monotonic(),
+        )
+        if remaining_pause_seconds > 0.0:
+            delay_ms = max(delay_ms, int((remaining_pause_seconds * 1000.0) + 80.0))
+        self._tree_search_refresh_timer.start(max(1, delay_ms))
 
     def _merge_live_tree_marker_state(
         self,
@@ -926,6 +1540,11 @@ class PdfExploreWindow(QMainWindow):
         *,
         root_key: str | None = None,
     ) -> tuple[set[str], set[str]]:
+        """Merge marker state from scans with current live/in-memory state.
+
+        This method protects marker continuity while background scans race with
+        active user actions (tab switches, fresh highlight edits).
+        """
         merged_multi_view = set(multi_view_paths or ())
         merged_highlighted = set(highlighted_paths or ())
         if root_key is None:
@@ -950,17 +1569,32 @@ class PdfExploreWindow(QMainWindow):
             if count > 1:
                 merged_multi_view.add(path_key)
 
+        # Keep marker badges for any files with known persisted highlights that
+        # are already loaded in-memory. This prevents stale background scan
+        # payloads from temporarily dropping highlight markers on tab switches.
+        for directory_key, by_file in self._persisted_text_highlights_by_dir.items():
+            if not isinstance(directory_key, str) or not isinstance(by_file, dict):
+                continue
+            if root_key and not self._path_key_is_under_root(directory_key, root_key):
+                continue
+            for file_name, entries in by_file.items():
+                if not isinstance(file_name, str) or not entries:
+                    continue
+                candidate_key = self._path_key_from_parts(directory_key, file_name)
+                merged_highlighted.add(candidate_key)
+
         current_path_key = self._current_preview_path_key()
-        if current_path_key and self._load_text_highlights_for_path_key(current_path_key):
-            if not root_key or (
-                current_path_key == root_key
-                or current_path_key.startswith(root_key + os.sep)
-            ):
-                merged_highlighted.add(current_path_key)
+        if (
+            current_path_key
+            and self._load_text_highlights_for_path_key(current_path_key)
+            and (not root_key or self._path_key_is_under_root(current_path_key, root_key))
+        ):
+            merged_highlighted.add(current_path_key)
 
         return merged_multi_view, merged_highlighted
 
     def _start_tree_marker_scan(self) -> None:
+        """Handle start tree marker scan."""
         root = getattr(self, "root", None)
         if not isinstance(root, Path) or not root.exists():
             self._tree_multi_view_marker_paths.clear()
@@ -989,6 +1623,7 @@ class PdfExploreWindow(QMainWindow):
         highlighted_paths,
         error_text: str,
     ) -> None:
+        """Handle tree marker scan finished."""
         worker_to_remove = None
         for worker in self._active_tree_marker_scan_workers:
             if worker.request_id == request_id:
@@ -1035,6 +1670,7 @@ class PdfExploreWindow(QMainWindow):
         self._sync_tree_markers_to_model()
 
     def _clear_preview_for_missing_file(self) -> None:
+        """Handle clear preview for missing file."""
         self.current_file = None
         self.path_label.setText("")
         self.path_label.setToolTip("")
@@ -1047,6 +1683,7 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_view_tabs_visibility()
 
     def _update_edit_button_state(self) -> None:
+        """Handle update edit button state."""
         enabled = False
         current = getattr(self, "current_file", None)
         if isinstance(current, Path):
@@ -1057,6 +1694,7 @@ class PdfExploreWindow(QMainWindow):
         self.edit_btn.setEnabled(enabled)
 
     def _expanded_directory_paths(self) -> list[str]:
+        """Handle expanded directory paths."""
         expanded: list[str] = []
         model = self.tree.model()
         if model is None:
@@ -1068,6 +1706,7 @@ class PdfExploreWindow(QMainWindow):
         return expanded
 
     def _collect_expanded_paths(self, index, expanded: list[str]) -> None:
+        """Handle collect expanded paths."""
         if not index.isValid():
             return
         if self.tree.isExpanded(index):
@@ -1079,12 +1718,14 @@ class PdfExploreWindow(QMainWindow):
                 self._collect_expanded_paths(child_index, expanded)
 
     def _restore_expanded_directory_paths(self, paths: list[str]) -> None:
+        """Handle restore expanded directory paths."""
         for path_text in paths:
             index = self.model.index(path_text)
             if index.isValid():
                 self.tree.expand(index)
 
     def _set_preview_signature_for_path(self, path: Path) -> None:
+        """Set preview signature for path."""
         path_key = self._path_key(path)
         try:
             stat = path.stat()
@@ -1093,11 +1734,12 @@ class PdfExploreWindow(QMainWindow):
         self._preview_signatures_by_path[path_key] = (int(stat.st_mtime_ns), int(stat.st_size))
 
     def _reload_current_preview(self, reason: str) -> None:
+        """Handle reload current preview."""
         if self.current_file is None:
             return
         path = self.current_file
         path_key = self._path_key(path)
-        self._pdf_text_cache.pop(path_key, None)
+        self._invalidate_cached_pdf_text(path_key)
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index, blocking=True)
@@ -1116,6 +1758,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _on_file_change_watch_tick(self) -> None:
+        """Handle file change watch tick."""
         if self.current_file is None:
             return
         path = self.current_file
@@ -1135,23 +1778,42 @@ class PdfExploreWindow(QMainWindow):
         self._reload_current_preview("file changed on disk")
 
     def _directory_key(self, directory: Path) -> str:
+        """Handle directory key."""
         return self._path_key(directory)
 
     def _path_directory_and_name(self, path_key: str | None) -> tuple[Path, str] | None:
+        """Handle path directory and name."""
         if not path_key:
             return None
         path = Path(path_key)
         return path.parent, path.name
 
     def _read_pdf_text(self, path: Path) -> str:
+        """Handle read pdf text."""
         try:
             stat = path.stat()
         except Exception:
             return ""
         path_key = self._path_key(path)
-        cached = self._pdf_text_cache.get(path_key)
-        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-            return cached[2]
+        cached = self._lookup_cached_pdf_text(path_key, stat.st_mtime_ns, stat.st_size)
+        if cached is not None:
+            self._record_cached_pdf_path_key(path_key)
+            return cached
+
+        disk_cached = self._load_pdf_text_from_disk_cache(
+            path_key,
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
+        if disk_cached is not None:
+            self._store_cached_pdf_text(
+                path_key,
+                stat.st_mtime_ns,
+                stat.st_size,
+                disk_cached,
+            )
+            self._record_cached_pdf_path_key(path_key)
+            return disk_cached
 
         parts: list[str] = []
         try:
@@ -1167,10 +1829,13 @@ class PdfExploreWindow(QMainWindow):
             text = ""
         else:
             text = "\n\n".join(parts)
-        self._pdf_text_cache[path_key] = (stat.st_mtime_ns, stat.st_size, text)
+        self._store_cached_pdf_text(path_key, stat.st_mtime_ns, stat.st_size, text)
+        self._store_pdf_text_to_disk_cache(path_key, stat.st_mtime_ns, stat.st_size, text)
+        self._record_cached_pdf_path_key(path_key)
         return text
 
     def _list_pdf_files_non_recursive(self, directory: Path) -> list[Path]:
+        """Handle list pdf files non recursive."""
         if not directory.is_dir():
             return []
         try:
@@ -1186,8 +1851,11 @@ class PdfExploreWindow(QMainWindow):
                 pass
         return files
 
-    def _list_visible_pdf_files_in_tree(self) -> list[Path]:
-        if not self._visible_tree_pdf_cache_dirty:
+    def _list_visible_pdf_files_in_tree(self, *, fetch_more: bool = True) -> list[Path]:
+        """Handle list visible pdf files in tree."""
+        if not self._visible_tree_pdf_cache_dirty and (
+            (not fetch_more) or self._visible_tree_pdf_cache_fetch_more_complete
+        ):
             return list(self._visible_tree_pdf_cache)
 
         root_index = self.tree.rootIndex()
@@ -1195,12 +1863,14 @@ class PdfExploreWindow(QMainWindow):
             files = self._list_pdf_files_non_recursive(self._highlight_scope_directory())
             self._visible_tree_pdf_cache = list(files)
             self._visible_tree_pdf_cache_dirty = False
+            self._visible_tree_pdf_cache_fetch_more_complete = bool(fetch_more)
             return list(files)
 
         files: list[Path] = []
         seen: set[str] = set()
 
         def _append_file(path: Path) -> None:
+            """Handle append file."""
             try:
                 resolved = path.resolve()
             except Exception:
@@ -1212,7 +1882,8 @@ class PdfExploreWindow(QMainWindow):
             files.append(resolved)
 
         def _walk_visible_children(parent_index) -> None:
-            if self.model.canFetchMore(parent_index):
+            """Handle walk visible children."""
+            if fetch_more and self.model.canFetchMore(parent_index):
                 self.model.fetchMore(parent_index)
             row_count = self.model.rowCount(parent_index)
             for row in range(row_count):
@@ -1239,9 +1910,11 @@ class PdfExploreWindow(QMainWindow):
         _walk_visible_children(root_index)
         self._visible_tree_pdf_cache = list(files)
         self._visible_tree_pdf_cache_dirty = False
+        self._visible_tree_pdf_cache_fetch_more_complete = bool(fetch_more)
         return list(files)
 
     def _highlight_scope_directory(self) -> Path:
+        """Handle highlight scope directory."""
         index = self.tree.currentIndex()
         if index.isValid():
             selected = Path(self.model.filePath(index))
@@ -1257,6 +1930,7 @@ class PdfExploreWindow(QMainWindow):
         return self.root
 
     def _effective_root_for_persistence(self) -> Path:
+        """Handle effective root for persistence."""
         index = self.tree.currentIndex()
         if index.isValid():
             selected = Path(self.model.filePath(index))
@@ -1270,6 +1944,7 @@ class PdfExploreWindow(QMainWindow):
         return self.root
 
     def _persist_effective_root(self) -> None:
+        """Handle persist effective root."""
         scope = self._effective_root_for_persistence()
         try:
             resolved_scope = scope.resolve()
@@ -1284,6 +1959,7 @@ class PdfExploreWindow(QMainWindow):
             pass
 
         def _serialize_payload(recent_roots: list[Path]) -> str:
+            """Handle serialize payload."""
             payload = {
                 self.CONFIG_DEFAULT_ROOT_KEY: str(resolved_scope),
                 self.CONFIG_RECENT_ROOTS_KEY: [str(path) for path in recent_roots],
@@ -1337,6 +2013,9 @@ class PdfExploreWindow(QMainWindow):
             pass
 
     def _set_root_directory(self, directory: Path) -> None:
+        """Set root directory."""
+        self._cancel_pending_search_scan()
+        self._cancel_scope_prefetch()
         target_root = self._on_recent_root_navigation(directory)
         if self.current_file is not None:
             self._persist_document_view_session(
@@ -1357,14 +2036,20 @@ class PdfExploreWindow(QMainWindow):
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
         if self.match_input.text().strip():
             self._run_match_search()
+        else:
+            self._request_scope_prefetch()
 
     def _go_up_directory(self) -> None:
+        """Handle go up directory."""
         parent = self.root.parent
         if parent == self.root:
             return
+        self._set_tree_interaction_visual_mode(True)
+        self._tree_visual_relax_timer.start()
         self._set_root_directory(parent)
 
     def _refresh_directory_view(self, _checked: bool = False) -> None:
+        """Refresh directory view."""
         self.statusBar().showMessage("Refreshing directory view...")
         self._invalidate_visible_tree_pdf_cache()
         selected_path: Path | None = None
@@ -1416,8 +2101,11 @@ class PdfExploreWindow(QMainWindow):
         self._update_up_button_state()
         if self.match_input.text().strip():
             self._run_match_search()
+        else:
+            self._request_scope_prefetch()
 
     def _on_match_text_changed(self, text: str) -> None:
+        """Handle match text changed."""
         self.match_clear_action.setVisible(bool(text.strip()))
         self._cancel_pending_search_scan()
         if not text.strip():
@@ -1428,23 +2116,37 @@ class PdfExploreWindow(QMainWindow):
         self.match_timer.start()
 
     def _clear_match_input(self) -> None:
+        """Handle clear match input."""
         self.match_timer.stop()
         self._tree_search_refresh_timer.stop()
         self.match_input.clear()
         self._clear_match_results()
 
     def _run_match_search_now(self) -> None:
+        """Run match search now."""
         self.match_timer.stop()
         self._tree_search_refresh_timer.stop()
         self._run_match_search()
 
     def _run_match_search(self) -> None:
+        """Run match search."""
         query = self.match_input.text().strip()
         if not query:
             self._clear_match_results()
             return
         scope = self._highlight_scope_directory()
-        candidates = self._list_visible_pdf_files_in_tree()
+        candidates = self._list_visible_pdf_files_in_tree(fetch_more=False)
+        prioritized_candidates = list(candidates)
+        if prioritized_candidates:
+            cached_candidates: list[Path] = []
+            uncached_candidates: list[Path] = []
+            for candidate in prioritized_candidates:
+                if self._is_pdf_text_cached_for_path(candidate, mark_cached_badge=True):
+                    cached_candidates.append(candidate)
+                else:
+                    uncached_candidates.append(candidate)
+            prioritized_candidates = cached_candidates + uncached_candidates
+        self._cancel_scope_prefetch()
         self._cancel_pending_search_scan()
         request_id = self._search_request_id
         self._search_scan_total_candidates = len(candidates)
@@ -1452,6 +2154,10 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_candidate_order = {
             self._path_key(path): index for index, path in enumerate(candidates)
         }
+        self.current_match_files = []
+        self._current_match_counts = {}
+        self.model.clear_search_match_paths()
+        self._sync_tree_markers_to_model()
 
         if not candidates:
             self.current_match_files = []
@@ -1484,12 +2190,12 @@ class PdfExploreWindow(QMainWindow):
             self._clear_match_results()
             return
 
-        worker_limit = max(1, min(self.thread_pool.maxThreadCount(), len(candidates)))
-        target_chunks = max(worker_limit, worker_limit * 4)
-        chunk_size = max(1, (len(candidates) + target_chunks - 1) // target_chunks)
+        # One-file chunks provide truly progressive match pills as each file is
+        # extracted/cached and scanned.
+        chunk_size = 1
         started_workers = 0
-        for start in range(0, len(candidates), chunk_size):
-            chunk = candidates[start : start + chunk_size]
+        for start in range(0, len(prioritized_candidates), chunk_size):
+            chunk = prioritized_candidates[start : start + chunk_size]
             if not chunk:
                 continue
             worker = PdfSearchWorker(
@@ -1499,6 +2205,7 @@ class PdfExploreWindow(QMainWindow):
                 hit_counter,
                 filename_patterns,
                 self._read_pdf_text,
+                should_abort=lambda req=request_id: req != self._search_request_id,
             )
             self._active_search_workers.add(worker)
             worker.signals.finished.connect(self._on_search_finished)
@@ -1510,6 +2217,23 @@ class PdfExploreWindow(QMainWindow):
             f"Searching {len(candidates)} visible PDF file(s) in tree under {scope} using {started_workers} worker(s)..."
         )
 
+    def _publish_search_scan_progress(self) -> None:
+        """Publish the current aggregated search result set to tree/viewer state."""
+        ordered_match_keys = sorted(
+            self._search_scan_match_counts.keys(),
+            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
+        )
+        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
+        self._current_match_counts = {
+            Path(path_key): self._search_scan_match_counts[path_key]
+            for path_key in ordered_match_keys
+        }
+        self.model.set_search_match_counts(
+            self._current_match_counts,
+            filename_match_path_keys=self._search_scan_filename_match_paths,
+        )
+        self.tree.viewport().update()
+
     def _on_search_finished(
         self,
         request_id: int,
@@ -1518,6 +2242,7 @@ class PdfExploreWindow(QMainWindow):
         filename_match_paths,
         error: str,
     ) -> None:
+        """Handle search finished."""
         worker_to_remove = None
         for worker in self._active_search_workers:
             if worker.request_id == request_id:
@@ -1552,23 +2277,29 @@ class PdfExploreWindow(QMainWindow):
                 if isinstance(raw_path_key, str):
                     self._search_scan_filename_match_paths.add(raw_path_key)
 
+        self._publish_search_scan_progress()
+
+        current_preview_key = self._current_preview_path_key()
+        if current_preview_key and current_preview_key in self._search_scan_match_counts:
+            self._apply_active_search_to_viewer()
+
         if self._search_scan_completed_workers < self._search_scan_expected_workers:
+            scope = self._search_scan_scope or self._highlight_scope_directory()
+            self.statusBar().showMessage(
+                (
+                    f"Searching {self._search_scan_total_candidates} visible PDF file(s) in tree under {scope}... "
+                    f"matched {len(self.current_match_files)} so far "
+                    f"({self._search_scan_completed_workers}/{self._search_scan_expected_workers} files processed). "
+                    "Full results will complete after all visible files are extracted/cached."
+                )
+            )
             return
 
-        ordered_match_keys = sorted(
-            self._search_scan_match_counts.keys(),
-            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
-        )
-        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
-        self._current_match_counts = {
-            Path(path_key): self._search_scan_match_counts[path_key]
-            for path_key in ordered_match_keys
-        }
-        self.model.set_search_match_counts(
-            self._current_match_counts,
-            filename_match_path_keys=self._search_scan_filename_match_paths,
-        )
-        self.tree.viewport().update()
+        # Re-apply marker sets once at completion so marker continuity stays
+        # correct without forcing full marker-sync work on every file update.
+        self._sync_tree_markers_to_model()
+        self._apply_active_search_to_viewer()
+
         scope = self._search_scan_scope or self._highlight_scope_directory()
         status_message = (
             f"Matched {len(self.current_match_files)} of {self._search_scan_total_candidates} visible PDF file(s) in tree under {scope}"
@@ -1578,27 +2309,34 @@ class PdfExploreWindow(QMainWindow):
                 f"{status_message} ({self._search_scan_error_count} worker error(s))"
             )
         self.statusBar().showMessage(status_message, 3500)
-        self._apply_active_search_to_viewer()
+        self._request_cached_badge_sync()
         self._reset_search_scan_state()
+        self._request_scope_prefetch()
 
     def _clear_match_results(self) -> None:
+        """Handle clear match results."""
         self._tree_search_refresh_timer.stop()
         self._cancel_pending_search_scan()
         self.current_match_files = []
         self._current_match_counts = {}
         self.model.clear_search_match_paths()
+        self._sync_tree_markers_to_model()
         self.tree.viewport().update()
         self._remove_viewer_search_highlights()
+        self._request_scope_prefetch()
 
     def _current_search_terms(self) -> list[tuple[str, bool]]:
+        """Handle current search terms."""
         query = self.match_input.text().strip()
         return extract_search_terms(query) if query else []
 
     def _is_path_in_current_matches(self, path: Path) -> bool:
+        """Return whether path in current matches."""
         target = self._path_key(path)
         return any(self._path_key(candidate) == target for candidate in self.current_match_files)
 
     def _apply_active_search_to_viewer(self) -> None:
+        """Handle apply active search to viewer."""
         path_key = self._current_preview_path_key()
         if (
             self.current_file is None
@@ -1612,6 +2350,7 @@ class PdfExploreWindow(QMainWindow):
             self._remove_viewer_search_highlights()
 
     def _highlight_viewer_search_terms(self, terms: list[tuple[str, bool]]) -> None:
+        """Handle highlight viewer search terms."""
         payload = [
             {"text": text, "caseSensitive": bool(case_sensitive)}
             for text, case_sensitive in terms
@@ -1628,12 +2367,14 @@ class PdfExploreWindow(QMainWindow):
         self._run_viewer_js(js)
 
     def _remove_viewer_search_highlights(self) -> None:
+        """Handle remove viewer search highlights."""
         self._pending_search_terms = []
         self._run_viewer_js(
             "window.__pdfexploreBridge && window.__pdfexploreBridge.clearSearchTerms && window.__pdfexploreBridge.clearSearchTerms();"
         )
 
     def _apply_match_highlight_color(self, color_value: str, color_name: str) -> None:
+        """Handle apply match highlight color."""
         self.match_timer.stop()
         if not self.current_match_files:
             self.statusBar().showMessage("No matched files to highlight", 3000)
@@ -1653,6 +2394,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _show_tree_context_menu(self, pos) -> None:
+        """Handle show tree context menu."""
         index = self.tree.indexAt(pos)
         if not index.isValid():
             return
@@ -1693,6 +2435,7 @@ class PdfExploreWindow(QMainWindow):
         self.tree.viewport().update()
 
     def _confirm_and_clear_directory_highlighting(self, scope: Path | None = None) -> None:
+        """Handle confirm and clear directory highlighting."""
         target_scope = scope if isinstance(scope, Path) else self._highlight_scope_directory()
         if not target_scope.is_dir():
             return
@@ -1712,6 +2455,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _confirm_and_clear_all_highlighting(self, scope: Path | None = None) -> None:
+        """Handle confirm and clear all highlighting."""
         target_scope = scope if isinstance(scope, Path) else self._highlight_scope_directory()
         if not target_scope.is_dir():
             return
@@ -1731,6 +2475,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _on_tree_selection_changed(self, current, _previous) -> None:
+        """Handle tree selection changed."""
         if not current.isValid():
             return
         path = Path(self.model.filePath(current))
@@ -1741,12 +2486,21 @@ class PdfExploreWindow(QMainWindow):
             except Exception:
                 self.last_directory_selection = path
             if self.match_input.text().strip():
-                self._run_match_search()
+                self._rerun_active_search_for_scope()
+            else:
+                self._request_scope_prefetch()
             return
         if path.is_file() and path.suffix.lower() == ".pdf":
             self._open_path_in_active_view(path)
 
     def _on_tree_directory_expanded(self, index) -> None:
+        """Handle tree directory expanded."""
+        self._set_tree_interaction_visual_mode(True)
+        self._tree_visual_relax_timer.start()
+        self._pause_prefetch_temporarily(
+            self.PREFETCH_TREE_MUTATION_PAUSE_SECONDS,
+            cancel_inflight=True,
+        )
         self._invalidate_visible_tree_pdf_cache()
         if not index.isValid():
             return
@@ -1754,16 +2508,25 @@ class PdfExploreWindow(QMainWindow):
         if not path.is_dir():
             return
         was_selected = self.tree.currentIndex() == index
-        self.tree.setCurrentIndex(index)
-        try:
-            self.last_directory_selection = path.resolve()
-        except Exception:
-            self.last_directory_selection = path
-        self._update_window_title()
         if was_selected:
+            try:
+                self.last_directory_selection = path.resolve()
+            except Exception:
+                self.last_directory_selection = path
+            self._update_window_title()
+        if self.match_input.text().strip():
             self._rerun_active_search_for_scope()
+        else:
+            self._request_scope_prefetch()
 
     def _on_tree_directory_collapsed(self, index) -> None:
+        """Handle tree directory collapsed."""
+        self._set_tree_interaction_visual_mode(True)
+        self._tree_visual_relax_timer.start()
+        self._pause_prefetch_temporarily(
+            self.PREFETCH_TREE_MUTATION_PAUSE_SECONDS,
+            cancel_inflight=True,
+        )
         self._invalidate_visible_tree_pdf_cache()
         if not index.isValid():
             return
@@ -1798,6 +2561,7 @@ class PdfExploreWindow(QMainWindow):
         self._rerun_active_search_for_scope()
 
     def _viewer_url_for_pdf(self, path: Path) -> QUrl:
+        """Handle viewer url for pdf."""
         viewer_url = QUrl.fromLocalFile(str(VIEWER_HTML))
         pdf_url = QUrl.fromLocalFile(str(path))
         viewer_url.setQuery(f"file={pdf_url.toString(QUrl.ComponentFormattingOption.FullyEncoded)}")
@@ -1805,10 +2569,12 @@ class PdfExploreWindow(QMainWindow):
         return viewer_url
 
     def _current_preview_widget(self) -> QWebEngineView | None:
+        """Handle current preview widget."""
         widget = self.preview_stack.currentWidget()
         return widget if isinstance(widget, QWebEngineView) else None
 
     def _current_preview_path_key(self) -> str | None:
+        """Handle current preview path key."""
         widget = self._current_preview_widget()
         if widget is None:
             return None
@@ -1816,6 +2582,7 @@ class PdfExploreWindow(QMainWindow):
         return str(raw).strip() if raw is not None else None
 
     def _create_preview_widget(self, path: Path) -> QWebEngineView:
+        """Handle create preview widget."""
         path_key = self._path_key(path)
         preview = PdfPreviewWebView(self._handle_custom_shortcut_key_event)
         preview.installEventFilter(self)
@@ -1839,6 +2606,7 @@ class PdfExploreWindow(QMainWindow):
         return preview
 
     def _preview_widget_for_path(self, path: Path) -> QWebEngineView:
+        """Handle preview widget for path."""
         path_key = self._path_key(path)
         existing = self._preview_widgets_by_path.get(path_key)
         if existing is not None:
@@ -1846,6 +2614,7 @@ class PdfExploreWindow(QMainWindow):
         return self._create_preview_widget(path)
 
     def _run_viewer_js(self, source: str, callback=None) -> None:
+        """Run viewer js."""
         preview = self._current_preview_widget()
         if preview is None:
             return
@@ -1856,6 +2625,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _normalize_viewer_json_result(result) -> dict:
+        """Normalize viewer json result."""
         if isinstance(result, dict):
             return result
         if isinstance(result, str):
@@ -1868,6 +2638,7 @@ class PdfExploreWindow(QMainWindow):
         return {}
 
     def _run_viewer_js_json(self, expression: str, callback) -> None:
+        """Run viewer js json."""
         js = f"""
 (() => {{
   try {{
@@ -1883,6 +2654,7 @@ class PdfExploreWindow(QMainWindow):
 """
 
         def _on_result(result) -> None:
+            """Handle result."""
             callback(self._normalize_viewer_json_result(result))
 
         self._run_viewer_js(js, _on_result)
@@ -1894,6 +2666,7 @@ class PdfExploreWindow(QMainWindow):
         *,
         delays_ms: tuple[int, ...] = (180, 420, 900),
     ) -> None:
+        """Handle schedule followup view restore."""
         if not path_key or not isinstance(restore_state, dict) or not restore_state:
             return
         payload = self._clone_json_compatible_dict(restore_state)
@@ -1921,6 +2694,7 @@ class PdfExploreWindow(QMainWindow):
             return
 
         def _reapply(expected_key: str = path_key, state: dict = payload) -> None:
+            """Handle reapply."""
             if (
                 self._current_preview_path_key() != expected_key
                 or not self._viewer_bridge_ready_by_path.get(expected_key, False)
@@ -1941,6 +2715,7 @@ class PdfExploreWindow(QMainWindow):
             QTimer.singleShot(delay, _reapply)
 
     def _request_preview_zoom_state(self, callback) -> None:
+        """Request preview zoom state."""
         preview = self._current_preview_widget()
         path_key = self._current_preview_path_key()
         if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
@@ -1954,6 +2729,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _apply_preview_zoom_scale(self, scale_value: float) -> None:
+        """Handle apply preview zoom scale."""
         preview = self._current_preview_widget()
         path_key = self._current_preview_path_key()
         if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
@@ -1971,7 +2747,9 @@ class PdfExploreWindow(QMainWindow):
         self._show_preview_zoom_overlay(percent_text)
 
     def _zoom_preview_in(self) -> None:
+        """Handle zoom preview in."""
         def _on_zoom_state(payload: dict) -> None:
+            """Handle zoom state."""
             try:
                 current = float(payload.get("currentScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
             except Exception:
@@ -1981,7 +2759,9 @@ class PdfExploreWindow(QMainWindow):
         self._request_preview_zoom_state(_on_zoom_state)
 
     def _zoom_preview_out(self) -> None:
+        """Handle zoom preview out."""
         def _on_zoom_state(payload: dict) -> None:
+            """Handle zoom state."""
             try:
                 current = float(payload.get("currentScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
             except Exception:
@@ -1991,6 +2771,7 @@ class PdfExploreWindow(QMainWindow):
         self._request_preview_zoom_state(_on_zoom_state)
 
     def _reset_preview_zoom(self) -> None:
+        """Handle reset preview zoom."""
         preview = self._current_preview_widget()
         path_key = self._current_preview_path_key()
         if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
@@ -2006,6 +2787,7 @@ class PdfExploreWindow(QMainWindow):
         self._show_preview_zoom_overlay("Fit Width")
 
     def _toggle_preview_three_up(self) -> None:
+        """Handle toggle preview three up."""
         preview = self._current_preview_widget()
         path_key = self._current_preview_path_key()
         if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
@@ -2015,6 +2797,7 @@ class PdfExploreWindow(QMainWindow):
             return
 
         def _on_toggle(payload: dict) -> None:
+            """Handle toggle."""
             active = bool(payload.get("threeUpActive") or payload.get("active"))
             try:
                 one_page_scale = float(payload.get("onePageScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
@@ -2041,6 +2824,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _set_preview_zoom_one_hundred(self) -> None:
+        """Set preview zoom one hundred."""
         preview = self._current_preview_widget()
         path_key = self._current_preview_path_key()
         if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
@@ -2050,6 +2834,7 @@ class PdfExploreWindow(QMainWindow):
             return
 
         def _on_result(payload: dict) -> None:
+            """Handle result."""
             if payload.get("ok") is False:
                 self.statusBar().showMessage("Unable to set preview zoom", 2200)
                 return
@@ -2063,6 +2848,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _show_preview_zoom_overlay(self, percent_text: str) -> None:
+        """Handle show preview zoom overlay."""
         self._preview_zoom_overlay.setText(percent_text)
         self._preview_zoom_overlay.adjustSize()
         self._position_preview_zoom_overlay()
@@ -2071,6 +2857,7 @@ class PdfExploreWindow(QMainWindow):
         self._preview_zoom_overlay_timer.start()
 
     def _position_preview_zoom_overlay(self) -> None:
+        """Handle position preview zoom overlay."""
         overlay = getattr(self, "_preview_zoom_overlay", None)
         target = self._current_preview_widget()
         if overlay is None or target is None:
@@ -2083,6 +2870,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _default_view_state() -> dict[str, int | float | str]:
+        """Return default view state."""
         return {
             "page": 1,
             "pagesCount": 1,
@@ -2093,10 +2881,12 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _view_tab_label_for_page(page_number: int) -> str:
+        """Handle view tab label for page."""
         return str(max(1, int(page_number)))
 
     @staticmethod
     def _normalize_custom_view_label(raw_value) -> str | None:
+        """Normalize custom view label."""
         if not isinstance(raw_value, str):
             return None
         if not raw_value.strip():
@@ -2109,6 +2899,7 @@ class PdfExploreWindow(QMainWindow):
     def _display_label_for_view(
         self, page_number: int, custom_label: str | None = None
     ) -> str:
+        """Handle display label for view."""
         normalized = self._normalize_custom_view_label(custom_label)
         if normalized is not None:
             return normalized
@@ -2116,6 +2907,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _page_from_view_state(state: dict | None) -> int:
+        """Handle page from view state."""
         if not isinstance(state, dict):
             return 1
         try:
@@ -2125,6 +2917,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _progress_from_view_state(state: dict | None) -> float:
+        """Handle progress from view state."""
         if not isinstance(state, dict):
             return 0.0
         try:
@@ -2139,6 +2932,7 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _clone_json_compatible_dict(raw) -> dict:
+        """Handle clone json compatible dict."""
         if not isinstance(raw, dict):
             return {}
         try:
@@ -2147,12 +2941,14 @@ class PdfExploreWindow(QMainWindow):
             return dict(raw)
 
     def _tab_custom_label(self, tab_index: int) -> str | None:
+        """Handle tab custom label."""
         data = self._tab_data(tab_index)
         if data is None:
             return None
         return self._normalize_custom_view_label(data.get("custom_label"))
 
     def _tab_label_anchor(self, tab_index: int) -> tuple[float, int] | None:
+        """Handle tab label anchor."""
         data = self._tab_data(tab_index)
         if data is None:
             return None
@@ -2171,6 +2967,7 @@ class PdfExploreWindow(QMainWindow):
         return scroll_top, page
 
     def _used_tab_color_slots(self) -> set[int]:
+        """Handle used tab color slots."""
         used: set[int] = set()
         palette_size = len(ViewTabBar.PASTEL_SEQUENCE)
         for index in range(self.view_tabs.count()):
@@ -2186,6 +2983,7 @@ class PdfExploreWindow(QMainWindow):
         return used
 
     def _allocate_next_tab_color_slot(self) -> int:
+        """Handle allocate next tab color slot."""
         palette_size = len(ViewTabBar.PASTEL_SEQUENCE)
         if palette_size <= 0:
             return 0
@@ -2203,6 +3001,7 @@ class PdfExploreWindow(QMainWindow):
         return slot
 
     def _ensure_current_tab(self) -> int:
+        """Handle ensure current tab."""
         if self.view_tabs.count() > 0 and self.view_tabs.currentIndex() >= 0:
             return self.view_tabs.currentIndex()
         self._reset_document_views(self.current_file)
@@ -2213,6 +3012,7 @@ class PdfExploreWindow(QMainWindow):
         return tab_index
 
     def _new_tab_data(self, path: Path | None = None) -> dict:
+        """Handle new tab data."""
         path_key = self._path_key(path) if isinstance(path, Path) else ""
         default_state = self._default_view_state()
         data = {
@@ -2232,17 +3032,20 @@ class PdfExploreWindow(QMainWindow):
         return data
 
     def _tab_data(self, index: int) -> dict | None:
+        """Handle tab data."""
         if index < 0 or index >= self.view_tabs.count():
             return None
         data = self.view_tabs.tabData(index)
         return data if isinstance(data, dict) else None
 
     def _set_tab_data(self, index: int, data: dict) -> None:
+        """Set tab data."""
         self.view_tabs.setTabData(index, data)
 
     def _capture_tab_state(
         self, index: int, *, blocking: bool = False, timeout_ms: int = 220
     ) -> dict | None:
+        """Handle capture tab state."""
         data = self._tab_data(index)
         if data is None:
             return None
@@ -2266,6 +3069,7 @@ class PdfExploreWindow(QMainWindow):
             timeout_timer.setSingleShot(True)
 
             def _on_timeout() -> None:
+                """Handle timeout."""
                 nonlocal done
                 done = True
                 if loop is not None and loop.isRunning():
@@ -2274,12 +3078,52 @@ class PdfExploreWindow(QMainWindow):
             timeout_timer.timeout.connect(_on_timeout)
 
         def _on_state(result) -> None:
+            """Handle state."""
             nonlocal done, captured_state
             if not isinstance(result, dict):
                 done = True
                 if loop is not None and loop.isRunning():
                     loop.quit()
                 return
+            previous_state = data.get("state") if isinstance(data.get("state"), dict) else {}
+            try:
+                previous_page = int(previous_state.get("page", 1) or 1)
+            except Exception:
+                previous_page = 1
+            try:
+                previous_scroll_top = float(previous_state.get("scrollTop", 0.0) or 0.0)
+            except Exception:
+                previous_scroll_top = 0.0
+            try:
+                previous_scroll_ratio = float(previous_state.get("scrollRatio", 0.0) or 0.0)
+            except Exception:
+                previous_scroll_ratio = 0.0
+
+            try:
+                next_page = int(result.get("page", 1) or 1)
+            except Exception:
+                next_page = previous_page
+            try:
+                next_scroll_top = float(result.get("scrollTop", 0.0) or 0.0)
+            except Exception:
+                next_scroll_top = previous_scroll_top
+            try:
+                next_scroll_ratio = float(result.get("scrollRatio", 0.0) or 0.0)
+            except Exception:
+                next_scroll_ratio = previous_scroll_ratio
+
+            state_changed_by_scroll = (
+                next_page != previous_page
+                or abs(next_scroll_top - previous_scroll_top) > 32.0
+                or abs(next_scroll_ratio - previous_scroll_ratio) > 0.015
+            )
+            if not blocking and state_changed_by_scroll:
+                self._mark_user_interaction()
+                self._pause_prefetch_temporarily(
+                    self.PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS,
+                    cancel_inflight=True,
+                )
+
             data["state"] = result
             data["progress"] = self._progress_from_view_state(result)
             self._set_tab_data(index, data)
@@ -2304,12 +3148,14 @@ class PdfExploreWindow(QMainWindow):
         return captured_state
 
     def _poll_current_view_state(self) -> None:
+        """Handle poll current view state."""
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index)
 
     @staticmethod
     def _should_persist_document_view_session(session: dict | None) -> bool:
+        """Handle should persist document view session."""
         if not isinstance(session, dict):
             return False
         tabs = session.get("tabs")
@@ -2329,6 +3175,7 @@ class PdfExploreWindow(QMainWindow):
     def _save_document_view_session(
         self, path_key: str | None = None, *, capture_current: bool = True
     ) -> None:
+        """Save document view session."""
         if path_key is None:
             path_key = self._current_preview_path_key()
         if not path_key:
@@ -2401,6 +3248,7 @@ class PdfExploreWindow(QMainWindow):
         }
 
     def _load_persisted_document_view_session(self, path_key: str) -> None:
+        """Load persisted document view session."""
         if not path_key or path_key in self._document_view_sessions:
             return
         resolved = self._path_directory_and_name(path_key)
@@ -2414,6 +3262,7 @@ class PdfExploreWindow(QMainWindow):
             )
 
     def _restore_document_view_session(self, path: Path) -> bool:
+        """Handle restore document view session."""
         path_key = self._path_key(path)
         session = self._document_view_sessions.get(path_key)
         if not isinstance(session, dict):
@@ -2524,6 +3373,7 @@ class PdfExploreWindow(QMainWindow):
     def _persist_document_view_session(
         self, path_key: str | None = None, *, capture_current: bool = True
     ) -> None:
+        """Handle persist document view session."""
         if path_key is None:
             path_key = self._current_preview_path_key()
         if not path_key:
@@ -2548,6 +3398,7 @@ class PdfExploreWindow(QMainWindow):
         *,
         initial_state: dict | None = None,
     ) -> None:
+        """Handle reset document views."""
         blocked = self.view_tabs.blockSignals(True)
         while self.view_tabs.count() > 0:
             self.view_tabs.removeTab(0)
@@ -2570,6 +3421,7 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_view_tabs_visibility()
 
     def _open_path_in_active_view(self, path: Path) -> None:
+        """Open path in active view."""
         if not path.is_file():
             return
         next_path_key = self._path_key(path)
@@ -2615,6 +3467,7 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_view_tabs_visibility()
 
     def _load_tab_index(self, index: int) -> None:
+        """Load tab index."""
         data = self._tab_data(index)
         if data is None:
             return
@@ -2624,6 +3477,8 @@ class PdfExploreWindow(QMainWindow):
         path = Path(path_text)
         self.current_file = path
         self._update_edit_button_state()
+        self._cancel_scope_prefetch()
+        self._request_scope_prefetch()
         self._set_preview_signature_for_path(path)
         try:
             label_text = str(path.relative_to(self.root))
@@ -2661,6 +3516,7 @@ class PdfExploreWindow(QMainWindow):
         self._rebuild_tree_marker_cache()
 
     def _add_document_view(self) -> None:
+        """Handle add document view."""
         if self.current_file is None:
             self.statusBar().showMessage("Open a PDF before adding a view", 2500)
             return
@@ -2699,6 +3555,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _refresh_view_tabs_visibility(self) -> None:
+        """Refresh view tabs visibility."""
         visible = False
         if self.view_tabs.count() > 1:
             visible = True
@@ -2709,6 +3566,7 @@ class PdfExploreWindow(QMainWindow):
         self._rebuild_tree_marker_cache()
 
     def _on_view_tab_changed(self, index: int) -> None:
+        """Handle view tab changed."""
         previous_index = self._active_view_tab_index
         if previous_index >= 0 and previous_index != index:
             self._capture_tab_state(previous_index, blocking=True)
@@ -2719,6 +3577,7 @@ class PdfExploreWindow(QMainWindow):
         self._persist_document_view_session(capture_current=False)
 
     def _on_view_tab_close_requested(self, index: int) -> None:
+        """Handle view tab close requested."""
         if self.view_tabs.count() <= 1:
             if self._tab_custom_label(index) is not None:
                 data = self._tab_data(index) or {}
@@ -2749,6 +3608,7 @@ class PdfExploreWindow(QMainWindow):
         self._persist_document_view_session(capture_current=False)
 
     def _show_view_tab_context_menu(self, pos) -> None:
+        """Handle show view tab context menu."""
         tab_index = self.view_tabs.tabAt(pos)
         if tab_index < 0:
             return
@@ -2765,6 +3625,7 @@ class PdfExploreWindow(QMainWindow):
             self._return_view_tab_to_beginning(tab_index)
 
     def _on_view_tab_home_requested(self, tab_index: int) -> None:
+        """Handle view tab home requested."""
         if self._tab_label_anchor(tab_index) is None:
             return
         if self.view_tabs.currentIndex() != tab_index:
@@ -2772,6 +3633,7 @@ class PdfExploreWindow(QMainWindow):
         self._return_view_tab_to_beginning(tab_index)
 
     def _on_view_tab_beginning_reset_requested(self, tab_index: int) -> None:
+        """Handle view tab beginning reset requested."""
         if self._tab_label_anchor(tab_index) is None:
             return
         if self.view_tabs.currentIndex() != tab_index:
@@ -2784,6 +3646,7 @@ class PdfExploreWindow(QMainWindow):
         self._reset_view_tab_beginning_to_current(tab_index)
 
     def _reset_view_tab_beginning_to_current(self, tab_index: int) -> None:
+        """Handle reset view tab beginning to current."""
         if self.view_tabs.currentIndex() == tab_index:
             self._capture_tab_state(tab_index, blocking=True)
         data = self._tab_data(tab_index)
@@ -2801,6 +3664,7 @@ class PdfExploreWindow(QMainWindow):
         self.statusBar().showMessage("Reset tab beginning to current page", 2200)
 
     def _edit_view_tab_label(self, tab_index: int) -> None:
+        """Handle edit view tab label."""
         if self.view_tabs.currentIndex() == tab_index:
             self._capture_tab_state(tab_index, blocking=True)
         data = self._tab_data(tab_index)
@@ -2848,6 +3712,7 @@ class PdfExploreWindow(QMainWindow):
             self.statusBar().showMessage(f"Tab label updated to '{custom_label}'", 2200)
 
     def _return_view_tab_to_beginning(self, tab_index: int) -> None:
+        """Handle return view tab to beginning."""
         data = self._tab_data(tab_index)
         if data is None:
             return
@@ -2874,6 +3739,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _refresh_tree_marker_cache_for_path(self, path_key: str | None) -> None:
+        """Refresh tree marker cache for path."""
         if not path_key:
             return
         session = self._view_session_for_path_key(path_key)
@@ -2898,6 +3764,7 @@ class PdfExploreWindow(QMainWindow):
         self._sync_tree_markers_to_model()
 
     def _rebuild_tree_marker_cache(self) -> None:
+        """Handle rebuild tree marker cache."""
         root_key = self._path_key(self.root)
         current_multi = {
             path_key
@@ -2920,12 +3787,70 @@ class PdfExploreWindow(QMainWindow):
         if self._tree_marker_cache_root_key != root_key:
             self._start_tree_marker_scan()
 
+    def _known_highlight_marker_paths_for_root(self, root_key: str) -> set[str]:
+        """Return in-memory known highlight marker paths under the active root."""
+        known: set[str] = set()
+        for directory_key, by_file in self._persisted_text_highlights_by_dir.items():
+            if not isinstance(directory_key, str) or not isinstance(by_file, dict):
+                continue
+            if root_key and not self._path_key_is_under_root(directory_key, root_key):
+                continue
+            for file_name, entries in by_file.items():
+                if not isinstance(file_name, str) or not entries:
+                    continue
+                candidate_key = self._path_key_from_parts(directory_key, file_name)
+                known.add(candidate_key)
+
+        current_key = self._current_preview_path_key()
+        if (
+            current_key
+            and self._current_text_highlights
+            and self._path_key_is_under_root(current_key, root_key)
+        ):
+            known.add(current_key)
+        return known
+
+    @staticmethod
+    def _path_key_is_under_root(path_key: str, root_key: str | None) -> bool:
+        """Return whether one normalized path-key belongs to the active root."""
+        if not root_key:
+            return True
+        return path_key == root_key or path_key.startswith(root_key + os.sep)
+
+    @staticmethod
+    def _path_key_from_parts(directory_key: str, file_name: str) -> str:
+        """Build a normalized path-key without filesystem `resolve()` overhead."""
+        return os.path.normpath(os.path.join(directory_key, file_name))
+
     def _sync_tree_markers_to_model(self) -> None:
-        self.model.set_multi_view_path_keys(self._tree_multi_view_marker_paths)
-        self.model.set_persistent_highlight_path_keys(self._tree_highlight_marker_paths)
+        """Push merged marker sets to the tree model and repaint once.
+
+        This method centralizes marker synchronization so all callers get the
+        same ordering, root filtering, and repaint behavior.
+        """
+        # Marker badges must be visible immediately after highlight-state changes.
+        # If temporary low-cost paint mode is still active, disable it now.
+        self._set_tree_interaction_visual_mode(False)
+        root_key = self._path_key(self.root)
+        filtered_multi = {
+            path_key
+            for path_key in self._tree_multi_view_marker_paths
+            if self._path_key_is_under_root(path_key, root_key)
+        }
+        filtered_highlights = {
+            path_key
+            for path_key in self._tree_highlight_marker_paths
+            if self._path_key_is_under_root(path_key, root_key)
+        }
+        filtered_highlights.update(self._known_highlight_marker_paths_for_root(root_key))
+        self._tree_multi_view_marker_paths = filtered_multi
+        self._tree_highlight_marker_paths = filtered_highlights
+        self.model.set_multi_view_path_keys(filtered_multi)
+        self.model.set_persistent_highlight_path_keys(filtered_highlights)
         self.tree.viewport().update()
 
     def _directory_view_states(self, directory: Path) -> dict[str, dict]:
+        """Handle directory view states."""
         key = self._directory_key(directory)
         cached = self._persisted_view_sessions_by_dir.get(key)
         if cached is not None:
@@ -2973,6 +3898,7 @@ class PdfExploreWindow(QMainWindow):
         return sessions
 
     def _save_directory_view_states(self, directory: Path) -> None:
+        """Save directory view states."""
         key = self._directory_key(directory)
         sessions = self._persisted_view_sessions_by_dir.get(key, {})
         file_path = directory / VIEWS_FILE_NAME
@@ -2995,6 +3921,7 @@ class PdfExploreWindow(QMainWindow):
             pass
 
     def _view_state_for_path_key(self, path_key: str | None) -> dict | None:
+        """Handle view state for path key."""
         if not path_key:
             return None
         current_session = self._document_view_sessions.get(path_key)
@@ -3038,6 +3965,7 @@ class PdfExploreWindow(QMainWindow):
         return None
 
     def _view_session_for_path_key(self, path_key: str | None) -> dict | None:
+        """Handle view session for path key."""
         if not path_key:
             return None
         session = self._document_view_sessions.get(path_key)
@@ -3053,6 +3981,7 @@ class PdfExploreWindow(QMainWindow):
         return None
 
     def _persist_view_state_for_path_key(self, path_key: str | None, state: dict) -> None:
+        """Handle persist view state for path key."""
         if not path_key:
             return
         session = {
@@ -3078,9 +4007,11 @@ class PdfExploreWindow(QMainWindow):
         self._persist_document_view_session(path_key, capture_current=False)
 
     def _highlighting_file_path(self, directory: Path) -> Path:
+        """Handle highlighting file path."""
         return directory / HIGHLIGHTING_FILE_NAME
 
     def _directory_text_highlights(self, directory: Path) -> dict[str, list[dict]]:
+        """Handle directory text highlights."""
         key = self._directory_key(directory)
         cached = self._persisted_text_highlights_by_dir.get(key)
         if cached is not None:
@@ -3101,6 +4032,7 @@ class PdfExploreWindow(QMainWindow):
         return highlights_by_file
 
     def _save_directory_text_highlights(self, directory: Path) -> None:
+        """Save directory text highlights."""
         key = self._directory_key(directory)
         highlights = self._persisted_text_highlights_by_dir.get(key, {})
         file_path = self._highlighting_file_path(directory)
@@ -3116,6 +4048,7 @@ class PdfExploreWindow(QMainWindow):
             pass
 
     def _normalize_text_highlight_entries(self, raw_entries) -> list[dict[str, int | str]]:
+        """Normalize text highlight entries."""
         normalized: list[dict[str, int | str]] = []
         if not isinstance(raw_entries, list):
             return normalized
@@ -3149,6 +4082,7 @@ class PdfExploreWindow(QMainWindow):
         return normalized
 
     def _new_text_highlight_id(self) -> str:
+        """Handle new text highlight id."""
         token = self._next_text_highlight_id
         self._next_text_highlight_id += 1
         return f"pdfhl-{token}"
@@ -3162,6 +4096,7 @@ class PdfExploreWindow(QMainWindow):
         kind: str,
         text: str = "",
     ) -> None:
+        """Handle replace persistent preview highlight range."""
         if page <= 0 or end <= start:
             self.statusBar().showMessage("Select text to highlight", 3000)
             return
@@ -3235,6 +4170,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _load_text_highlights_for_path_key(self, path_key: str | None) -> list[dict]:
+        """Load text highlights for path key."""
         resolved = self._path_directory_and_name(path_key)
         if resolved is None:
             return []
@@ -3242,6 +4178,7 @@ class PdfExploreWindow(QMainWindow):
         return list(self._directory_text_highlights(directory).get(file_name, []))
 
     def _persist_text_highlights_for_path_key(self, path_key: str | None, entries: list[dict]) -> None:
+        """Handle persist text highlights for path key."""
         resolved = self._path_directory_and_name(path_key)
         if resolved is None:
             return
@@ -3256,6 +4193,7 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_tree_marker_cache_for_path(path_key)
 
     def _on_preview_load_finished(self, path_key: str, ok: bool) -> None:
+        """Handle preview load finished."""
         if not ok:
             self.statusBar().showMessage("Failed to load PDF viewer", 4000)
             return
@@ -3264,6 +4202,7 @@ class PdfExploreWindow(QMainWindow):
             self._viewer_ready_timer.start()
 
     def _ensure_viewer_bridge_ready(self) -> None:
+        """Handle ensure viewer bridge ready."""
         path_key = self._current_preview_path_key()
         if not path_key:
             return
@@ -3284,6 +4223,7 @@ class PdfExploreWindow(QMainWindow):
 """
 
         def _on_ready(result) -> None:
+            """Handle ready."""
             if result is not True:
                 return
             self._viewer_ready_timer.stop()
@@ -3304,6 +4244,7 @@ class PdfExploreWindow(QMainWindow):
         self._run_viewer_js(js, _on_ready)
 
     def _apply_persistent_text_highlights(self) -> None:
+        """Handle apply persistent text highlights."""
         payload = self._normalize_text_highlight_entries(self._current_text_highlights)
         self._run_viewer_js(
             "window.__pdfexploreBridge && window.__pdfexploreBridge.setPersistentHighlights && "
@@ -3311,6 +4252,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _show_preview_context_menu(self, pos: QPoint) -> None:
+        """Handle show preview context menu."""
         preview = self._current_preview_widget()
         if preview is None:
             return
@@ -3341,7 +4283,9 @@ class PdfExploreWindow(QMainWindow):
         selected_text_hint: str,
         callback,
     ) -> None:
+        """Request preview context menu selection info."""
         def _on_info(result) -> None:
+            """Handle info."""
             info = self._normalize_viewer_json_result(result)
             if (
                 isinstance(info, dict)
@@ -3370,6 +4314,7 @@ class PdfExploreWindow(QMainWindow):
         click_x: int | None = None,
         click_y: int | None = None,
     ) -> None:
+        """Handle show preview context menu with cached selection."""
         menu = QMenu(self)
         selected_text = str(info.get("selectedText", "") or "")
         has_selection = bool(selected_text_hint.strip() or selected_text.strip())
@@ -3412,6 +4357,7 @@ class PdfExploreWindow(QMainWindow):
             return
 
         def _run_with_fresh_context_info(handler) -> None:
+            """Run with fresh context info."""
             if click_x is None or click_y is None:
                 handler(info if isinstance(info, dict) else {})
                 return
@@ -3448,6 +4394,7 @@ class PdfExploreWindow(QMainWindow):
             return
         if copy_action is not None and chosen == copy_action:
             def _copy_text(live_info: dict) -> None:
+                """Copy text."""
                 copied_text = str(live_info.get("selectedText", "") or "").strip() or selected_text_hint
                 if not copied_text.strip():
                     self.statusBar().showMessage("No selected text to copy", 2500)
@@ -3467,6 +4414,7 @@ class PdfExploreWindow(QMainWindow):
         kind: str,
         selected_text_hint: str = "",
     ) -> None:
+        """Handle add persistent preview highlight."""
         if self.current_file is None:
             return
         if info.get("multiPageSelection"):
@@ -3493,6 +4441,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _remove_persistent_preview_highlight(self, info: dict) -> None:
+        """Handle remove persistent preview highlight."""
         if self.current_file is None:
             return
         entries = self._normalize_text_highlight_entries(self._current_text_highlights)
@@ -3534,14 +4483,17 @@ class PdfExploreWindow(QMainWindow):
         self.statusBar().showMessage("Highlight removed", 2500)
 
     def _copy_destination_is_directory(self) -> bool:
+        """Copy destination is directory."""
         return bool(self.copy_directory_radio.isChecked())
 
     def _default_copy_destination_directory(self) -> Path:
+        """Return default copy destination directory."""
         if isinstance(self._copy_destination_directory, Path) and self._copy_destination_directory.is_dir():
             return self._copy_destination_directory
         return self._effective_root_for_persistence()
 
     def _prompt_copy_destination_directory(self) -> Path | None:
+        """Handle prompt copy destination directory."""
         default_directory = self._default_copy_destination_directory()
         selected_path = QFileDialog.getExistingDirectory(
             self,
@@ -3563,6 +4515,7 @@ class PdfExploreWindow(QMainWindow):
         return selected
 
     def _normalize_unique_file_paths(self, files: list[Path]) -> list[Path]:
+        """Normalize unique file paths."""
         normalized: list[Path] = []
         seen: set[str] = set()
         for path in files:
@@ -3578,6 +4531,7 @@ class PdfExploreWindow(QMainWindow):
         return normalized
 
     def _copy_files_to_clipboard(self, files: list[Path]) -> int:
+        """Copy files to clipboard."""
         normalized = self._normalize_unique_file_paths(files)
         clipboard = QApplication.clipboard()
         mime_data = QMimeData()
@@ -3595,6 +4549,7 @@ class PdfExploreWindow(QMainWindow):
     def _merge_copied_file_metadata(
         self, copied_pairs: list[tuple[Path, Path]], target_directory: Path
     ) -> tuple[int, int, int]:
+        """Handle merge copied file metadata."""
         if not copied_pairs:
             return 0, 0, 0
         color_updates = 0
@@ -3635,6 +4590,7 @@ class PdfExploreWindow(QMainWindow):
     def _copy_files_to_directory_with_metadata(
         self, files: list[Path]
     ) -> tuple[int, int, int, int, int, Path] | None:
+        """Copy files to directory with metadata."""
         normalized = self._normalize_unique_file_paths(files)
         if not normalized:
             return None
@@ -3671,6 +4627,7 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _copy_current_preview_file_to_clipboard(self) -> None:
+        """Copy current preview file to clipboard."""
         if self.current_file is None:
             self.statusBar().showMessage("No previewed PDF file to copy", 3000)
             return
@@ -3697,6 +4654,7 @@ class PdfExploreWindow(QMainWindow):
             )
 
     def _edit_current_file(self) -> None:
+        """Handle edit current file."""
         if self.current_file is None:
             self.statusBar().showMessage("Open a PDF before using Edit", 2500)
             return
@@ -3723,6 +4681,7 @@ class PdfExploreWindow(QMainWindow):
             self.statusBar().showMessage(f"Opened in Okular: {target.name}", 2500)
 
     def _copy_highlighted_files_to_clipboard(self, color_value: str, color_name: str) -> None:
+        """Copy highlighted files to clipboard."""
         scope = self._highlight_scope_directory()
         matches = self.model.collect_files_with_color(scope, color_value)
         if self._copy_destination_is_directory():
@@ -3749,16 +4708,19 @@ class PdfExploreWindow(QMainWindow):
         )
 
     def _update_window_title(self) -> None:
+        """Handle update window title."""
         scope = self._highlight_scope_directory()
         if self.model.set_effective_scope_directory(scope):
             self.tree.viewport().update()
         self.setWindowTitle(f"pdfexplore - {scope}")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
+        """Handle resizeEvent."""
         super().resizeEvent(event)
         self._position_preview_zoom_overlay()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        """Handle closeEvent."""
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index, blocking=True)
@@ -3768,6 +4730,7 @@ class PdfExploreWindow(QMainWindow):
 
 
 def _default_root_from_config() -> Path:
+    """Return default root from config."""
     fallback = Path.home()
     config_path = PdfExploreWindow._config_file_path()
     try:
@@ -3790,6 +4753,7 @@ def _default_root_from_config() -> Path:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse args."""
     parser = argparse.ArgumentParser(description="Browse and highlight PDF files.")
     parser.add_argument("path", nargs="?", help="Root directory or PDF file to open")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -3797,6 +4761,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Handle main."""
     args = parse_args(argv)
     if getattr(args, "path", None):
         candidate = Path(args.path).expanduser()

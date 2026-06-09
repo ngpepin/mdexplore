@@ -1,4 +1,15 @@
-"""Background workers used by pdfexplore."""
+"""Background worker jobs used by pdfexplore.
+
+This module intentionally keeps worker classes small and explicit because they
+run on thread-pool threads and communicate back to the GUI thread only through
+Qt signals.
+
+Design notes:
+- Workers never touch widgets directly.
+- Inputs are copied into worker-owned fields at construction time.
+- All worker `run` methods are defensive: failures are reported through
+    `finished` signals instead of raising into Qt internals.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +21,26 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 
 class PdfSearchWorkerSignals(QObject):
-    """Signals emitted by background PDF search workers."""
+    """Signals emitted by PDF content-search workers.
+
+    Signal payload:
+    - request id
+    - list of matched path keys
+    - map of path key -> hit count
+    - list of path keys with filename-term hits
+    - error text (empty on success)
+    """
 
     finished = Signal(int, object, object, object, str)
 
 
 class PdfSearchWorker(QRunnable):
-    """Scan a visible-PDF chunk for query matches without blocking the UI thread."""
+    """Scan one chunk of visible PDFs for query matches.
+
+    The main window creates one or more instances of this worker per active
+    search request. The worker uses precompiled predicate/counter callables to
+    keep the per-file loop lightweight.
+    """
 
     def __init__(
         self,
@@ -26,7 +50,13 @@ class PdfSearchWorker(QRunnable):
         hit_counter,
         filename_patterns: list,
         content_loader,
+        should_abort=None,
     ) -> None:
+        """Store immutable worker inputs used by `run`.
+
+        `should_abort` is an optional callback checked between expensive steps
+        so stale search requests can stop quickly.
+        """
         super().__init__()
         self.request_id = request_id
         self.paths = list(paths)
@@ -34,15 +64,24 @@ class PdfSearchWorker(QRunnable):
         self.hit_counter = hit_counter
         self.filename_patterns = list(filename_patterns)
         self.content_loader = content_loader
+        self.should_abort = should_abort
         self.signals = PdfSearchWorkerSignals()
 
     def run(self) -> None:
+        """Execute chunk search and emit aggregated results.
+
+        The worker resolves file keys as strings so cross-thread payloads remain
+        JSON-like and easy to merge on the GUI side.
+        """
         try:
             matched_paths: list[str] = []
             match_counts: dict[str, int] = {}
             filename_match_paths: list[str] = []
 
             for path in self.paths:
+                # Respect cancellation before doing any file work.
+                if callable(self.should_abort) and self.should_abort():
+                    break
                 try:
                     resolved = path.resolve()
                 except Exception:
@@ -50,9 +89,13 @@ class PdfSearchWorker(QRunnable):
                 path_key = str(resolved)
                 filename_search_text = path.stem
                 try:
+                    # content_loader owns cache strategy (memory/disk/extract).
                     searchable_content = self.content_loader(path)
                 except Exception:
                     searchable_content = ""
+                # Re-check cancellation after potentially heavy text load.
+                if callable(self.should_abort) and self.should_abort():
+                    break
                 try:
                     if not self.predicate(filename_search_text, searchable_content):
                         continue
@@ -66,6 +109,8 @@ class PdfSearchWorker(QRunnable):
                 ):
                     filename_match_paths.append(path_key)
                 try:
+                    # Count computation is isolated so a single failure does not
+                    # invalidate the overall search chunk.
                     count = self.hit_counter(filename_search_text, searchable_content)
                 except Exception:
                     count = 1
@@ -82,14 +127,80 @@ class PdfSearchWorker(QRunnable):
             self.signals.finished.emit(self.request_id, [], {}, [], str(exc))
 
 
+class PdfTextPrefetchWorkerSignals(QObject):
+    """Signals emitted by low-priority text-prefetch workers.
+
+    Signal payload:
+    - request id
+    - successfully prefetched file count
+    - skipped/error file count
+    - error text (empty on success)
+    """
+
+    finished = Signal(int, int, int, str)
+
+
+class PdfTextPrefetchWorker(QRunnable):
+    """Warm shared PDF text caches for current scope in the background."""
+
+    def __init__(
+        self,
+        request_id: int,
+        paths: list[Path],
+        content_loader,
+        should_abort=None,
+    ) -> None:
+        """Store immutable prefetch inputs used by `run`."""
+        super().__init__()
+        self.request_id = request_id
+        self.paths = list(paths)
+        self.content_loader = content_loader
+        self.should_abort = should_abort
+        self.signals = PdfTextPrefetchWorkerSignals()
+
+    def run(self) -> None:
+        """Execute best-effort cache warming for each candidate path."""
+        try:
+            prefetched_count = 0
+            skipped_count = 0
+            for path in self.paths:
+                # Abort checks are intentionally frequent to keep UI response
+                # predictable when user interaction pauses prefetch.
+                if callable(self.should_abort) and self.should_abort():
+                    break
+                try:
+                    self.content_loader(path)
+                    prefetched_count += 1
+                except Exception:
+                    skipped_count += 1
+                if callable(self.should_abort) and self.should_abort():
+                    break
+            self.signals.finished.emit(
+                self.request_id,
+                prefetched_count,
+                skipped_count,
+                "",
+            )
+        except Exception as exc:
+            self.signals.finished.emit(self.request_id, 0, 0, str(exc))
+
+
 class PdfTreeMarkerScanWorkerSignals(QObject):
-    """Signals emitted by background tree-sidecar scan workers."""
+    """Signals emitted by background sidecar marker scans.
+
+    Signal payload:
+    - request id
+    - resolved root key
+    - set of file path keys with multi-view marker
+    - set of file path keys with persistent-highlight marker
+    - error text (empty on success)
+    """
 
     finished = Signal(int, str, object, object, str)
 
 
 class PdfTreeMarkerScanWorker(QRunnable):
-    """Scan root sidecar files for PDF tree badges without blocking the UI thread."""
+    """Scan root sidecars for tree badges without blocking the GUI thread."""
 
     def __init__(
         self,
@@ -98,6 +209,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
         views_file_name: str,
         highlighting_file_name: str,
     ) -> None:
+        """Capture scan configuration for one request id."""
         super().__init__()
         self.root = root
         self.request_id = request_id
@@ -106,6 +218,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
         self.signals = PdfTreeMarkerScanWorkerSignals()
 
     def run(self) -> None:
+        """Walk the root tree and collect marker path sets from sidecars."""
         try:
             resolved_root = self.root.resolve()
             root_key = str(resolved_root)
@@ -113,6 +226,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
             highlighted_paths: set[str] = set()
 
             def on_walk_error(_err) -> None:
+                """Handle walk error."""
                 return
 
             for dirpath, _dirnames, filenames in os.walk(
@@ -121,6 +235,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
                 directory = Path(dirpath)
 
                 if self.views_file_name in filenames:
+                    # View sidecar contributes multi-view badge state.
                     sessions = self._load_directory_view_sessions(
                         directory / self.views_file_name
                     )
@@ -129,6 +244,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
                             multi_view_paths.add(str((directory / file_name).resolve()))
 
                 if self.highlighting_file_name in filenames:
+                    # Highlighting sidecar contributes persistent-highlight badge state.
                     highlights_by_file = self._load_directory_text_highlights(
                         directory / self.highlighting_file_name
                     )
@@ -154,6 +270,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
 
     @staticmethod
     def _load_directory_view_sessions(file_path: Path) -> dict[str, dict]:
+        """Load one views sidecar into `{pdf_file_name: session}` form."""
         sessions: dict[str, dict] = {}
         try:
             raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
@@ -174,6 +291,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
 
     @staticmethod
     def _load_directory_text_highlights(file_path: Path) -> dict[str, list[dict]]:
+        """Load one highlighting sidecar into `{pdf_file_name: entries}` form."""
         highlights_by_file: dict[str, list[dict]] = {}
         try:
             raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
@@ -194,6 +312,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
 
     @staticmethod
     def _session_has_multiple_views(session: dict | None) -> bool:
+        """Return whether a session should display the multi-view marker."""
         if not isinstance(session, dict):
             return False
         tabs = session.get("tabs")
@@ -212,6 +331,11 @@ class PdfTreeMarkerScanWorker(QRunnable):
 
     @staticmethod
     def _normalize_text_highlight_entries(raw_entries) -> list[dict[str, int | str]]:
+        """Normalize raw highlight entries and drop malformed records.
+
+        This mirrors app-side validation so worker-side marker detection remains
+        resilient to partial/corrupt sidecars.
+        """
         normalized: list[dict[str, int | str]] = []
         if not isinstance(raw_entries, list):
             return normalized

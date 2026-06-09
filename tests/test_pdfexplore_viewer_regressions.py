@@ -271,6 +271,87 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             list(initial_overlay.get("ids", [])),
         )
 
+    def test_search_scrollbar_indicators_render_and_clear(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms([{text: 'Alpha', caseSensitive: false}]);"
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+        active_count = self.run_current_viewer_js_json(
+            "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+        ).get("count", 0)
+        self.assertGreater(int(active_count), 0)
+
+        self.run_current_viewer_js("window.__pdfexploreBridge.clearSearchTerms();")
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+            ).get("count", 1)
+            == 0,
+            timeout_ms=12000,
+        )
+
+    def test_search_scrollbar_indicators_cover_unrendered_pages(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms([{text: 'line 170', caseSensitive: false}]);"
+        )
+        self.wait_until(
+            lambda: any(
+                int(page) > 1
+                for page in self.run_current_viewer_js_json(
+                    "({pages: Array.from(document.querySelectorAll('.pdfexplore-search-indicator')).map((n) => Number(n.dataset.pageNumber || 0))})"
+                ).get("pages", [])
+            ),
+            timeout_ms=12000,
+        )
+
+    def test_search_scrollbar_indicator_click_jumps_to_target_page(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms([{text: 'line 170', caseSensitive: false}]);"
+        )
+        self.wait_until(
+            lambda: any(
+                int(page) > 1
+                for page in self.run_current_viewer_js_json(
+                    "({pages: Array.from(document.querySelectorAll('.pdfexplore-search-indicator')).map((n) => Number(n.dataset.pageNumber || 0))})"
+                ).get("pages", [])
+            ),
+            timeout_ms=12000,
+        )
+
+        clicked_payload = self.run_current_viewer_js_json(
+            "(() => {"
+            " const marker = Array.from(document.querySelectorAll('.pdfexplore-search-indicator'))"
+            "   .find((n) => Number(n.dataset.pageNumber || 0) > 1);"
+            " if (!marker) return {clicked: false, page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)};"
+            " const rect = marker.getBoundingClientRect();"
+            " marker.dispatchEvent(new MouseEvent('mousedown', {"
+            "   bubbles: true,"
+            "   cancelable: true,"
+            "   button: 0,"
+            "   clientX: rect.left + (rect.width / 2),"
+            "   clientY: rect.top + (rect.height / 2),"
+            " }));"
+            " return {clicked: true, page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)};"
+            "})()"
+        )
+        self.assertEqual(clicked_payload.get("clicked"), True)
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)})"
+            ).get("page", 0)
+            > 1,
+            timeout_ms=12000,
+        )
+
     def test_highlight_overlay_tracks_selected_text_geometry(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         selection_rect = self.run_current_viewer_js_json(

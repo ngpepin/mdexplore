@@ -106,6 +106,47 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
         self.assertIn(self.window._path_key(visible_pdf), match_keys)
         self.assertNotIn(self.window._path_key(hidden_pdf), match_keys)
 
+    def test_search_scan_publishes_partial_hits_before_all_workers_finish(self) -> None:
+        first_pdf = self.root / "first.pdf"
+        _create_pdf_with_text(first_pdf, "needle first")
+        second_pdf = self.root / "second.pdf"
+        _create_pdf_with_text(second_pdf, "needle second")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+
+        first_key = self.window._path_key(first_pdf)
+        second_key = self.window._path_key(second_pdf)
+        request_id = self.window._search_request_id
+
+        self.window._search_scan_total_candidates = 2
+        self.window._search_scan_scope = self.root
+        self.window._search_scan_candidate_order = {first_key: 0, second_key: 1}
+        self.window._search_scan_expected_workers = 2
+        self.window._search_scan_completed_workers = 0
+        self.window._search_scan_match_counts = {}
+        self.window._search_scan_filename_match_paths = set()
+
+        dummy_worker = type("_DummySearchWorker", (), {"request_id": request_id})()
+        self.window._active_search_workers.add(dummy_worker)
+
+        self.window._on_search_finished(
+            request_id,
+            [first_key],
+            {first_key: 3},
+            [first_key],
+            "",
+        )
+
+        self.assertEqual(self.window._search_scan_completed_workers, 1)
+        self.assertEqual(self.window._search_scan_expected_workers, 2)
+        self.assertEqual(
+            {self.window._path_key(path) for path in self.window.current_match_files},
+            {first_key},
+        )
+        self.assertEqual(self.window.model._search_match_counts.get(first_key), 3)
+        self.assertNotIn(second_key, self.window.model._search_match_counts)
+
     def test_window_title_updates_effective_scope_model_state(self) -> None:
         child = self.root / "child"
         child.mkdir()
@@ -147,6 +188,20 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
         self._wait_for(lambda: len(calls) >= 2)
 
         self.assertGreaterEqual(len(calls), 2)
+
+    def test_rerun_active_search_cancels_inflight_scan_immediately(self) -> None:
+        self.window.match_input.setText("needle")
+        QApplication.processEvents()
+
+        calls: list[str] = []
+
+        def fake_cancel_pending_search_scan() -> None:
+            calls.append("cancel")
+
+        self.window._cancel_pending_search_scan = fake_cancel_pending_search_scan  # type: ignore[method-assign]
+        self.window._rerun_active_search_for_scope()
+
+        self.assertIn("cancel", calls)
 
     def test_tree_marker_rebuild_avoids_sync_root_walk(self) -> None:
         calls: list[str] = []

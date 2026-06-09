@@ -44,10 +44,12 @@ class ColorizedExtensionModel(QFileSystemModel):
     _ICON_GAP = 2
     _VIEWS_ICON_SIZE = 12
     _MARKER_ICON_SIZE = 13
+    _CACHED_ICON_SIZE = 12
     _SEARCH_SLOT_WIDTH = 14
     _SEARCH_COUNT_TEXT_MAX = 99
     _SEARCH_COUNT_OVERSAMPLE = 8
     _SEARCH_COUNT_TEXT_OVERSAMPLE = 12
+    _PATH_KEY_CACHE_MAX = 20000
     SEARCH_FILENAME_MATCH_COLOR = "#f7e27a"
     EFFECTIVE_SCOPE_DIRECTORY_COLOR = "#7fdfe8"
     EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR = SEARCH_FILENAME_MATCH_COLOR
@@ -62,12 +64,16 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._search_filename_match_paths: set[str] = set()
         self._multi_view_paths: set[str] = set()
         self._highlighted_preview_paths: set[str] = set()
+        self._cached_text_paths: set[str] = set()
         self._effective_scope_root_key: str | None = None
         self._out_of_scope_background_enabled = False
+        self._path_key_cache: dict[str, str] = {}
+        self._reduce_paint_cost = False
         self._primary_icon = self._load_primary_icon()
         self._symlink_icon = self._load_symlink_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
+        self._cached_icon = self._load_cached_icon()
         self._decorated_icon_cache: dict[tuple[object, ...], QIcon] = {}
 
     def _load_primary_icon(self) -> QIcon:
@@ -106,6 +112,31 @@ class ColorizedExtensionModel(QFileSystemModel):
             pass
         return self._fallback_primary_icon()
 
+    def _load_cached_icon(self) -> QIcon:
+        """Load small marker icon used for rows with extracted text cached."""
+        try:
+            preferred = Path(__file__).resolve().parent.parent / "pdfexplore" / "assets" / "cached.png"
+            candidates = [preferred, ui_asset_path("cached.png")]
+            for icon_path in candidates:
+                if not icon_path.is_file():
+                    continue
+                pixmap = QPixmap(str(icon_path))
+                if pixmap.isNull():
+                    continue
+                tinted = QPixmap(pixmap.size())
+                tinted.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(tinted)
+                painter.drawPixmap(0, 0, pixmap)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                painter.fillRect(tinted.rect(), QColor("#c9ced6"))
+                painter.end()
+                icon = QIcon(tinted)
+                if not icon.isNull():
+                    return icon
+        except Exception:
+            pass
+        return QIcon()
+
     def supports_symlink_primary_icon(self) -> bool:
         """Return whether symlink target files should use dedicated icon state."""
         return False
@@ -137,21 +168,33 @@ class ColorizedExtensionModel(QFileSystemModel):
         )
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if self._reduce_paint_cost:
+            if role == Qt.ItemDataRole.DecorationRole:
+                info = self.fileInfo(index)
+                if self.matches_file_info(info):
+                    # Preserve text alignment during interaction mode by keeping
+                    # a full-width decoration footprint from first paint.
+                    return self._decorated_primary_icon(False, False, False, 0)
+            if role in {Qt.ItemDataRole.ForegroundRole, Qt.ItemDataRole.FontRole}:
+                info = self.fileInfo(index)
+                if self.matches_file_info(info):
+                    return super().data(index, role)
+
         if role == Qt.ItemDataRole.DecorationRole:
             info = self.fileInfo(index)
             if self.matches_file_info(info):
-                file_path = Path(info.filePath())
-                path_key = self._path_key(file_path)
+                raw_path = info.filePath()
+                path_key = self._path_key_from_raw_path(raw_path)
                 search_hit_count = self._search_match_counts.get(path_key, 0)
-                if self.supports_symlink_primary_icon() and self._is_symlink_path(
-                    file_path
-                ):
+                if self.supports_symlink_primary_icon() and self._is_symlink_path(Path(raw_path)):
                     return self._decorated_symlink_icon(search_hit_count)
                 has_multi_view = path_key in self._multi_view_paths
                 has_persistent_highlight = path_key in self._highlighted_preview_paths
+                has_cached_text = path_key in self._cached_text_paths
                 return self._decorated_primary_icon(
                     has_multi_view,
                     has_persistent_highlight,
+                    has_cached_text,
                     search_hit_count,
                 )
         if role == Qt.ItemDataRole.ForegroundRole:
@@ -159,7 +202,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             if info.isDir():
                 scope_key = self._effective_scope_root_key
                 dir_path = Path(info.filePath())
-                if scope_key and self._path_key(dir_path) == scope_key:
+                if scope_key and self._path_key_from_raw_path(info.filePath()) == scope_key:
                     hit_count = self.effective_scope_search_hit_count_for_directory(
                         dir_path
                     )
@@ -172,8 +215,9 @@ class ColorizedExtensionModel(QFileSystemModel):
                     if color.isValid():
                         return QBrush(color)
             if self.matches_file_info(info):
-                path_key = self._path_key(Path(info.filePath()))
-                color_name = self._color_for_file(Path(info.filePath()))
+                raw_path = info.filePath()
+                path_key = self._path_key_from_raw_path(raw_path)
+                color_name = self._color_for_file(Path(raw_path))
                 if color_name:
                     color = QColor(color_name)
                     if color.isValid():
@@ -191,14 +235,15 @@ class ColorizedExtensionModel(QFileSystemModel):
             info = self.fileInfo(index)
             if info.isDir():
                 scope_key = self._effective_scope_root_key
-                if scope_key and self._path_key(Path(info.filePath())) == scope_key:
+                if scope_key and self._path_key_from_raw_path(info.filePath()) == scope_key:
                     base_font = super().data(index, role)
                     font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
                     font.setBold(True)
                     return font
             if self.matches_file_info(info):
+                raw_path = info.filePath()
                 if self._search_match_counts.get(
-                    self._path_key(Path(info.filePath())), 0
+                    self._path_key_from_raw_path(raw_path), 0
                 ) > 0:
                     base_font = super().data(index, role)
                     font = QFont(base_font) if isinstance(base_font, QFont) else QFont()
@@ -385,6 +430,25 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._highlighted_preview_paths.clear()
         self._decorated_icon_cache.clear()
 
+    def set_cached_path_keys(self, path_keys: set[str]) -> bool:
+        next_paths = {
+            str(path_key)
+            for path_key in path_keys
+            if isinstance(path_key, str)
+        }
+        if next_paths == self._cached_text_paths:
+            return False
+        self._cached_text_paths = next_paths
+        self._decorated_icon_cache.clear()
+        return True
+
+    def clear_cached_path_keys(self) -> bool:
+        if not self._cached_text_paths:
+            return False
+        self._cached_text_paths.clear()
+        self._decorated_icon_cache.clear()
+        return True
+
     def set_effective_scope_directory(self, directory: Path | None) -> bool:
         """Set active scope root used for out-of-scope row shading."""
         next_key: str | None = None
@@ -394,6 +458,16 @@ class ColorizedExtensionModel(QFileSystemModel):
             return False
         self._effective_scope_root_key = next_key
         return True
+
+    def set_reduce_paint_cost(self, enabled: bool) -> bool:
+        next_value = bool(enabled)
+        if next_value == self._reduce_paint_cost:
+            return False
+        self._reduce_paint_cost = next_value
+        return True
+
+    def is_reduce_paint_cost_enabled(self) -> bool:
+        return bool(self._reduce_paint_cost)
 
     def effective_scope_search_hit_count_for_directory(self, directory: Path) -> int:
         """Return aggregated search-hit count for the effective scope directory row."""
@@ -449,16 +523,23 @@ class ColorizedExtensionModel(QFileSystemModel):
         return color
 
     def _path_key(self, path: Path) -> str:
+        return self._path_key_from_raw_path(str(path))
+
+    def _path_key_from_raw_path(self, raw_path: str) -> str:
+        cached = self._path_key_cache.get(raw_path)
+        if cached is not None:
+            return cached
         try:
-            return str(path.resolve())
+            resolved = str(Path(raw_path).resolve())
         except Exception:
-            return str(path)
+            resolved = str(raw_path)
+        if len(self._path_key_cache) >= int(self._PATH_KEY_CACHE_MAX):
+            self._path_key_cache.clear()
+        self._path_key_cache[str(raw_path)] = resolved
+        return resolved
 
     def _directory_key(self, directory: Path) -> str:
-        try:
-            return str(directory.resolve())
-        except Exception:
-            return str(directory)
+        return self._path_key_from_raw_path(str(directory))
 
     def _load_directory_colors(self, directory: Path) -> dict[str, str]:
         key = self._directory_key(directory)
@@ -507,6 +588,7 @@ class ColorizedExtensionModel(QFileSystemModel):
     def max_decoration_width(cls) -> int:
         widths = [
             cls._SEARCH_SLOT_WIDTH,
+            cls._CACHED_ICON_SIZE,
             cls._MARKER_ICON_SIZE,
             cls._VIEWS_ICON_SIZE,
             cls._ICON_SIZE,
@@ -524,12 +606,15 @@ class ColorizedExtensionModel(QFileSystemModel):
         self,
         has_multi_view: bool,
         has_persistent_highlight: bool,
+        has_cached_text: bool,
         search_hit_count: int,
     ) -> QSize:
         search_count_text = self._search_count_display_text(search_hit_count)
         widths: list[int] = []
         if search_count_text:
             widths.append(self._SEARCH_SLOT_WIDTH)
+        if has_cached_text and not self._cached_icon.isNull():
+            widths.append(self._CACHED_ICON_SIZE)
         if has_persistent_highlight:
             widths.append(self._MARKER_ICON_SIZE)
         if has_multi_view:
@@ -542,10 +627,12 @@ class ColorizedExtensionModel(QFileSystemModel):
         info = self.fileInfo(index)
         if not self.matches_file_info(info):
             return QSize(self._ICON_SIZE, self._ICON_SIZE)
-        file_path = Path(info.filePath())
-        path_key = self._path_key(file_path)
+        if self._reduce_paint_cost:
+            return QSize(self.max_decoration_width(), self._ICON_SIZE)
+        raw_path = info.filePath()
+        path_key = self._path_key_from_raw_path(raw_path)
         search_hit_count = self._search_match_counts.get(path_key, 0)
-        if self.supports_symlink_primary_icon() and self._is_symlink_path(file_path):
+        if self.supports_symlink_primary_icon() and self._is_symlink_path(Path(raw_path)):
             widths: list[int] = []
             if self._search_count_display_text(search_hit_count):
                 widths.append(self._SEARCH_SLOT_WIDTH)
@@ -556,21 +643,28 @@ class ColorizedExtensionModel(QFileSystemModel):
             )
         has_multi_view = path_key in self._multi_view_paths
         has_persistent_highlight = path_key in self._highlighted_preview_paths
+        has_cached_text = path_key in self._cached_text_paths
         return self.decoration_size_for_state(
-            has_multi_view, has_persistent_highlight, search_hit_count
+            has_multi_view,
+            has_persistent_highlight,
+            has_cached_text,
+            search_hit_count,
         )
 
     def _decorated_primary_icon(
         self,
         has_multi_view: bool,
         has_persistent_highlight: bool,
+        has_cached_text: bool,
         search_hit_count: int,
     ) -> QIcon:
         search_count_text = self._search_count_display_text(search_hit_count)
+        show_cached_icon = has_cached_text and not self._cached_icon.isNull()
         cache_key = (
             "primary",
             has_multi_view,
             has_persistent_highlight,
+            show_cached_icon,
             search_count_text,
         )
         cached = self._decorated_icon_cache.get(cache_key)
@@ -578,7 +672,10 @@ class ColorizedExtensionModel(QFileSystemModel):
             return cached
 
         cluster_size = self.decoration_size_for_state(
-            has_multi_view, has_persistent_highlight, search_hit_count
+            has_multi_view,
+            has_persistent_highlight,
+            show_cached_icon,
+            search_hit_count,
         )
         total_width = self.max_decoration_width()
         total_height = self._ICON_SIZE
@@ -672,6 +769,15 @@ class ColorizedExtensionModel(QFileSystemModel):
             painter.drawPixmap(cursor_x, 0, count_layer)
             painter.drawPixmap(cursor_x, 0, text_layer)
             cursor_x += self._SEARCH_SLOT_WIDTH + self._ICON_GAP
+
+        if show_cached_icon:
+            cached_pixmap = self._cached_icon.pixmap(
+                self._CACHED_ICON_SIZE,
+                self._CACHED_ICON_SIZE,
+            )
+            cached_y = max(0, (self._ICON_SIZE - self._CACHED_ICON_SIZE) // 2)
+            painter.drawPixmap(cursor_x, cached_y, cached_pixmap)
+            cursor_x += self._CACHED_ICON_SIZE + self._ICON_GAP
 
         if has_persistent_highlight and not self._marker_icon.isNull():
             marker_pixmap = self._marker_icon.pixmap(
@@ -825,6 +931,10 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index) -> None:
         model = index.model()
         if not isinstance(model, ColorizedExtensionModel):
+            super().paint(painter, option, index)
+            return
+
+        if model.is_reduce_paint_cost_enabled():
             super().paint(painter, option, index)
             return
 

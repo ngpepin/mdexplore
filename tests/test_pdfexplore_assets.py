@@ -34,6 +34,13 @@ class PdfExploreAssetTests(unittest.TestCase):
         self.assertIn('currentApp.eventBus.on("textlayerrendered", refreshFromPdfJs)', source)
         self.assertIn("rgba(102, 86, 178, 0.36)", source)
         self.assertIn("rgba(225, 214, 255, 0.76)", source)
+        self.assertIn("pdfexplore-search-indicator", source)
+        self.assertIn("collectSearchIndicatorEntriesForTerms", source)
+
+    def test_cached_badge_asset_exists(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        cached_badge = root / "pdfexplore" / "assets" / "cached.png"
+        self.assertTrue(cached_badge.is_file())
 
 
 if __name__ == "__main__":

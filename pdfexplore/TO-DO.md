@@ -6,6 +6,46 @@
 shell, same scope rules where PDFs make sense, same sidecar philosophy, and the
 same habit of preserving work state without modifying source documents.
 
+## Current Snapshot
+
+- Search and prefetch now run on worker pools with cancellation support.
+- Text extraction uses layered cache (memory + disk) and badge visibility.
+- Tree marker state merges sidecar scan + live state to reduce stale badge drops.
+- Interaction-first throttling is in place (scroll and tree mutation pauses).
+
+## Roadmap (2026)
+
+This roadmap is organized by execution horizon so contributors can prioritize
+work without reinterpreting old phase notes.
+
+### Now (next 1-3 weeks)
+
+- [ ] Finalize `PDF` top-button behavior and confirm UX contract against
+   `mdexplore` parity expectations.
+- [ ] Run manual UX pass for search-hit/effective-root pill styling and capture
+   any visual regressions.
+- [ ] Run manual UX pass for highlight visibility, marker badge continuity,
+   scroll return, and zoom-feel parity.
+- [ ] Add focused regression tests for marker badge continuity under file switch
+   and search rerun scenarios.
+
+### Next (next 1-2 months)
+
+- [ ] Add performance regression coverage for root changes in medium/large trees.
+- [ ] Add deterministic tests for interaction-heavy scenarios where prefetch,
+   marker scan, and search overlap.
+- [ ] Introduce optional timing instrumentation for hot paths:
+   marker sync, visible-tree listing, and search aggregation.
+- [ ] Refresh top-row control tests after `PDF` behavior is finalized.
+
+### Later (quarterly hardening)
+
+- [ ] Evaluate more helper extraction into `mdexplore_app` to reduce divergence
+   and maintenance overhead.
+- [ ] Continue multi-instance soak testing for config/recent-roots lock behavior.
+- [ ] Reassess cache/prefetch heuristics for very large directory trees and
+   document practical tuning defaults.
+
 ## Audit Summary
 
 ### Already working
@@ -23,42 +63,33 @@ same habit of preserving work state without modifying source documents.
 
 ### Main UX gaps vs `mdexplore`
 
-1. Top-left shell is incomplete.
-   - Missing `Recent`.
-   - Missing `PDF`.
-   - Missing `Edit`.
-   - Current order does not match the canonical `mdexplore` shell.
+1. Shell parity still needs final polish.
+   - `Recent` and `Edit` are now present.
+   - `PDF` behavior/design parity is still open.
 
-2. Root persistence is behind `mdexplore`.
-   - `~/.pdfexplore.cfg` still behaves like a legacy single-path file.
-   - No JSON payload with `default_root` + `recent_roots`.
-   - No lock file / multi-instance-safe reload behavior.
-   - No 30-second dwell rule before recording departed roots.
+2. Root persistence parity needs continued soak testing.
+   - JSON payload and lock strategy are implemented.
+   - Recent-root behavior should continue to be validated under multi-instance use.
 
-3. Search scope does not match `mdexplore`.
-   - Current search scans only direct-child PDFs of one selected directory.
-   - Target behavior is visible-tree scope: current root plus expanded branches.
-   - Search should rerun automatically when tree visibility changes.
+3. Search/marker performance tuning remains ongoing.
+   - Search scope now follows visible-tree behavior.
+   - Remaining work is mostly responsiveness tuning for larger directories.
 
-4. Search/tree styling parity is incomplete.
-   - Effective-root row is not wired like `mdexplore`’s bold aqua/yellow state.
-   - Search-hit summary for the active scope is not surfaced the same way.
-   - Filename-term match styling parity needs confirmation after search rework.
+4. Visual consistency needs additional regression checks.
+   - Badge coexistence (search pill + marker + cache badge) should be regression-tested more thoroughly.
 
-5. Highlight/preview parity needs manual UX confirmation.
-   - Two-tier preview highlight colors now use the shared `mdexplore` palette.
-   - Scroll/session return is wired, but needs manual feel-check in real PDFs.
-   - Zoom behavior is implemented, but needs manual parity review against
-     `mdexplore`.
+5. Highlight/preview parity still needs manual UX confirmation.
+   - Two-tier preview highlight colors use shared palette.
+   - Scroll/session return and zoom are implemented; parity feel-check still open.
 
-6. External-file actions are not settled.
-   - `Edit` analog needs a defined PDF-safe behavior.
-   - `PDF` button needs a PDF-specific analog or explicit no-op/disabled behavior
-     that still preserves the shell layout contract.
+6. External-file actions are partially settled.
+   - `Edit` opens current document externally.
+   - `PDF` button behavior remains open for long-term parity/design.
 
-7. Tests do not yet cover the missing shell/config/search contracts.
+7. Test coverage gaps remain for complex UI interactions.
+   - Need stronger regressions for marker badge continuity and heavy-interaction throttling.
 
-## Work Plan
+## Detailed Phase Plan
 
 ### Phase 1
 
@@ -82,15 +113,23 @@ same habit of preserving work state without modifying source documents.
 - [x] Use the shared two-tier preview highlight colors from `mdexplore`.
 - [x] Preserve scroll/session position when returning to a PDF.
 - [x] Implement preview zoom in/out/reset with the `mdexplore` shortcut set.
-- [ ] Manual UX verification of highlight visuals, scroll return, and zoom feel.
+- [ ] Manual UX verification of highlight visuals, marker badge continuity,
+      scroll return, and zoom feel.
 
 ### Phase 4
 
-- [ ] Define and implement `PDF` button behavior for a PDF-native workflow.
-- [ ] Define and implement `Edit` behavior for PDFs.
-- [ ] Add tests for those controls once behavior is finalized.
+- [ ] Define and implement final `PDF` button behavior for a PDF-native workflow.
+- [x] Implement `Edit` behavior for PDFs.
+- [ ] Add/refresh tests for top-row controls once `PDF` behavior is finalized.
 
 ### Phase 5
 
 - [ ] Review whether more `mdexplore_app` helpers should be shared to reduce
       divergence between explorers.
+
+### Phase 6 (Stability / Responsiveness)
+
+- [ ] Add focused performance regression tests around root changes with medium-size directories.
+- [ ] Add deterministic marker-badge tests for transitions: add highlight -> switch file -> switch back.
+- [ ] Add lightweight optional timing instrumentation hooks for hot paths
+   (tree marker sync, visible-tree listing, search aggregation).
