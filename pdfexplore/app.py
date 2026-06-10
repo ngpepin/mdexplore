@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from threading import Lock
@@ -2472,6 +2473,8 @@ class PdfExploreWindow(QMainWindow):
         clear_scope = path if path.is_dir() else path.parent
         clear_in_directory_action = menu.addAction("Clear in Directory")
         clear_all_action = menu.addAction("Clear All")
+        menu.addSeparator()
+        copy_path_action = menu.addAction("Copy Path")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
             return
@@ -2483,11 +2486,31 @@ class PdfExploreWindow(QMainWindow):
             self._confirm_and_clear_all_highlighting(clear_scope)
             self.tree.viewport().update()
             return
+        if chosen == copy_path_action:
+            self._copy_tree_path_to_clipboard(path)
+            return
         if clear_action is not None and chosen == clear_action:
             self.model.set_color_for_file(path, None)
         elif chosen in color_actions:
             self.model.set_color_for_file(path, color_actions[chosen])
         self.tree.viewport().update()
+
+    def _copy_tree_path_to_clipboard(self, path: Path) -> None:
+        """Copy one filesystem path as shell-ready absolute text for bash paste."""
+        try:
+            display_path = str(path.resolve())
+        except Exception:
+            display_path = str(path)
+        display_path = re.sub(
+            r"([^A-Za-z0-9_@%+=:,./-])",
+            r"\\\1",
+            display_path,
+        )
+        QApplication.clipboard().setText(
+            display_path,
+            QClipboard.Mode.Clipboard,
+        )
+        self.statusBar().showMessage("Copied full path", 2500)
 
     def _confirm_and_clear_directory_highlighting(self, scope: Path | None = None) -> None:
         """Handle confirm and clear directory highlighting."""

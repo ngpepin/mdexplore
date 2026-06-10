@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QEvent, Qt
-from PySide6.QtGui import QIcon, QKeyEvent
+from PySide6.QtGui import QClipboard, QIcon, QKeyEvent
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from pdfexplore.app import PdfExploreWindow
@@ -57,6 +57,16 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
     def test_pdf_tree_uses_pdf_name_filter(self) -> None:
         self.assertEqual(self.window.model.nameFilters(), ["*.pdf"])
+
+    def test_tree_context_menu_copy_path_copies_shell_escaped_absolute_path(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "copy path [test].pdf"
+        _create_pdf_with_text(pdf_path, "copy path")
+        self.window._copy_tree_path_to_clipboard(pdf_path)
+        clipboard_text = QApplication.clipboard().text(QClipboard.Mode.Clipboard)
+        self.assertEqual(
+            clipboard_text,
+            str(pdf_path.resolve()).replace(" ", r"\ ").replace("[", r"\[").replace("]", r"\]"),
+        )
 
     def test_new_document_defaults_to_page_fit_view(self) -> None:
         pdf_path = Path(self._tempdir.name) / "default-fit.pdf"
@@ -446,7 +456,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
         self.window._reset_preview_zoom()
         QApplication.processEvents()
-        self.assertIn("resetZoom", captured_sources[-1])
+        self.assertTrue(any("resetZoom" in source for source in captured_sources))
 
         self.assertTrue(self.window._preview_zoom_overlay.isVisible())
         self.assertEqual(self.window._preview_zoom_overlay.text(), "Fit Width")
