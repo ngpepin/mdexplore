@@ -32,6 +32,9 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
   - yellow with an appended hit-count pill when active search has hits under it.
 - Effective-root search-hit pill should mirror file-pill formatting (`1..99`,
   then `++`).
+- `NEAR(...)` requires at least two terms. Six-term `NEAR(...)` queries are
+  covered by regression testing, and the parser/matcher are intentionally
+  variadic with no explicit upper bound beyond ordinary performance limits.
 
 ## Recent Directory Persistence Rules
 
