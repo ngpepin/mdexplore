@@ -93,18 +93,31 @@ class SearchQueryModuleTests(unittest.TestCase):
 
     def test_predicate_ignores_inline_image_data_uri_payloads(self) -> None:
         predicate = search_query.compile_match_predicate("Nico")
-        content = "![img](data:image/png;base64,AAAAAniCoBBBB)\n"
+        content = "![img](" + "data:image/png;" + "base64,AAAAAniCoBBBB)\n"
         self.assertFalse(predicate("example.md", content))
 
     def test_hit_counter_ignores_inline_image_data_uri_payloads(self) -> None:
         counter = search_query.compile_match_hit_counter("Nico")
-        content = "Visible Nico text\n![img](data:image/png;base64,AAAAAniCoBBBB)\n"
+        content = (
+            "Visible Nico text\n"
+            + "![img]("
+            + "data:image/png;"
+            + "base64,AAAAAniCoBBBB)\n"
+        )
         self.assertEqual(counter("example.md", content), 1)
 
     def test_legacy_close_alias_remains_accepted(self) -> None:
         predicate = search_query.compile_match_predicate("""CLOSE(alpha,beta)""")
         self.assertTrue(predicate("example.md", "alpha goes with beta"))
         self.assertFalse(predicate("example.md", "alpha only"))
+
+    def test_near_accepts_more_than_two_terms(self) -> None:
+        predicate = search_query.compile_match_predicate(
+            """NEAR(alpha,"beta phrase",gamma)"""
+        )
+        self.assertTrue(predicate("example.md", "alpha then beta phrase then gamma"))
+        self.assertTrue(predicate("alpha-notes.md", "beta phrase appears near gamma"))
+        self.assertFalse(predicate("example.md", "alpha and beta phrase without the third"))
 
     def test_near_matches_across_filename_and_content_stream(self) -> None:
         predicate = search_query.compile_match_predicate("""NEAR(hazmat,primitives)""")
