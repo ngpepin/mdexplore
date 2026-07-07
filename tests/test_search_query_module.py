@@ -111,13 +111,28 @@ class SearchQueryModuleTests(unittest.TestCase):
         self.assertTrue(predicate("example.md", "alpha goes with beta"))
         self.assertFalse(predicate("example.md", "alpha only"))
 
-    def test_near_accepts_more_than_two_terms(self) -> None:
+    def test_near_accepts_six_terms(self) -> None:
         predicate = search_query.compile_match_predicate(
-            """NEAR(alpha,"beta phrase",gamma)"""
+            """NEAR(alpha,"beta phrase",gamma,delta,epsilon,zeta)"""
         )
-        self.assertTrue(predicate("example.md", "alpha then beta phrase then gamma"))
-        self.assertTrue(predicate("alpha-notes.md", "beta phrase appears near gamma"))
-        self.assertFalse(predicate("example.md", "alpha and beta phrase without the third"))
+        self.assertTrue(
+            predicate(
+                "example.md",
+                "alpha then beta phrase then gamma then delta then epsilon then zeta",
+            )
+        )
+        self.assertTrue(
+            predicate(
+                "alpha-notes.md",
+                "beta phrase appears near gamma, delta, epsilon, and zeta",
+            )
+        )
+        self.assertFalse(
+            predicate(
+                "example.md",
+                "alpha then beta phrase then gamma then delta then epsilon only",
+            )
+        )
 
     def test_near_matches_across_filename_and_content_stream(self) -> None:
         predicate = search_query.compile_match_predicate("""NEAR(hazmat,primitives)""")
