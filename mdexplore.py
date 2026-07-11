@@ -5645,9 +5645,29 @@ class MdExploreWindow(QMainWindow):
         self,
         expected_key: str,
         url_by_digest: dict[str, str],
+        *,
+        completion: Callable[[set[str]], None] | None = None,
     ) -> None:
-        """Patch placeholder `<img>` nodes in-place without reloading preview HTML."""
+        """Patch placeholder `<img>` nodes in-place without reloading preview HTML.
+
+        The JavaScript callback reports which image digests were actually found
+        in the current DOM. This matters during first navigation: materialization
+        can finish while the temporary "Rendering..." page is still active. In
+        that race, retaining unapplied URLs lets the next real-page
+        ``loadFinished`` callback hydrate the placeholders instead of losing the
+        result and leaving white boxes behind.
+        """
+
+        def _finish(applied_digests: set[str]) -> None:
+            if completion is None:
+                return
+            try:
+                completion(set(applied_digests))
+            except Exception:
+                pass
+
         if self._current_preview_path_key() != expected_key:
+            _finish(set())
             return
         payload = {
             str(digest): str(url)
@@ -5655,12 +5675,30 @@ class MdExploreWindow(QMainWindow):
             if isinstance(digest, str) and isinstance(url, str) and digest and url
         }
         if not payload:
+            _finish(set())
             return
         js = _render_js_asset(
             "preview/apply_inline_image_sources.js",
             {"__INLINE_IMAGE_URLS_JSON__": json.dumps(payload, ensure_ascii=False)},
         )
-        self.preview.page().runJavaScript(js)
+
+        def _on_result(result) -> None:
+            applied_digests: set[str] = set()
+            if isinstance(result, dict):
+                raw_applied = result.get("appliedDigests", [])
+                if isinstance(raw_applied, list):
+                    applied_digests = {
+                        str(raw_digest)
+                        for raw_digest in raw_applied
+                        if isinstance(raw_digest, str) and raw_digest in payload
+                    }
+            elif isinstance(result, (int, float)) and int(result) > 0:
+                # Backward-compatible fallback for a stale/preloaded script
+                # returning only the legacy update count.
+                applied_digests = set(payload)
+            _finish(applied_digests)
+
+        self.preview.page().runJavaScript(js, _on_result)
 
     def _queue_pending_inline_data_image_urls(
         self, path_key: str, url_by_digest: dict[str, str]
@@ -5685,16 +5723,43 @@ class MdExploreWindow(QMainWindow):
         self._inline_data_image_pending_apply_urls_by_path_key[path_key] = existing
 
     def _flush_pending_inline_data_image_urls_for_current_preview(self) -> None:
-        """Apply any queued inline-image URL patches for the active preview page."""
+        """Apply queued inline-image URLs and retain any not present in the DOM."""
         current_key = self._current_preview_path_key()
         if not current_key:
             return
-        payload = self._inline_data_image_pending_apply_urls_by_path_key.pop(
+        queued_payload = self._inline_data_image_pending_apply_urls_by_path_key.get(
             current_key, {}
         )
-        if not isinstance(payload, dict) or not payload:
+        if not isinstance(queued_payload, dict) or not queued_payload:
             return
-        self._apply_inline_data_image_urls_to_preview(current_key, payload)
+        payload = dict(queued_payload)
+
+        def _after_apply(applied_digests: set[str]) -> None:
+            if not applied_digests:
+                return
+            existing = self._inline_data_image_pending_apply_urls_by_path_key.get(
+                current_key
+            )
+            if not isinstance(existing, dict):
+                return
+            for digest in applied_digests:
+                # Do not remove a newer URL queued while JavaScript was running.
+                if existing.get(digest) == payload.get(digest):
+                    existing.pop(digest, None)
+            if existing:
+                self._inline_data_image_pending_apply_urls_by_path_key[current_key] = (
+                    existing
+                )
+            else:
+                self._inline_data_image_pending_apply_urls_by_path_key.pop(
+                    current_key, None
+                )
+
+        self._apply_inline_data_image_urls_to_preview(
+            current_key,
+            payload,
+            completion=_after_apply,
+        )
 
     def _prepare_progressive_inline_data_image_display_html(
         self,

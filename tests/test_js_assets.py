@@ -11,6 +11,7 @@ class JsAssetTests(unittest.TestCase):
     def test_required_preview_scripts_are_preloaded(self) -> None:
         sources = preload_js_assets(force_reload=True)
         self.assertTrue(JS_ASSET_DIR.is_dir())
+        self.assertIn("preview/apply_inline_image_sources.js", sources)
         self.assertIn("preview/apply_persistent_highlights.js", sources)
         self.assertIn("preview/clear_search_highlights.js", sources)
         self.assertIn("preview/collect_diagram_view_state.js", sources)
@@ -27,6 +28,7 @@ class JsAssetTests(unittest.TestCase):
         self.assertIn("pdf/precheck_layout.js", sources)
         self.assertIn("pdf/preprint_normalize.js", sources)
         self.assertIn("pdf/restore_preview_palette.js", sources)
+        self.assertTrue(sources["preview/apply_inline_image_sources.js"].strip())
         self.assertTrue(sources["preview/apply_persistent_highlights.js"].strip())
         self.assertTrue(sources["preview/clear_search_highlights.js"].strip())
         self.assertTrue(sources["preview/collect_diagram_view_state.js"].strip())
@@ -43,6 +45,15 @@ class JsAssetTests(unittest.TestCase):
         self.assertTrue(sources["pdf/precheck_layout.js"].strip())
         self.assertTrue(sources["pdf/preprint_normalize.js"].strip())
         self.assertTrue(sources["pdf/restore_preview_palette.js"].strip())
+
+    def test_rendered_inline_image_template_reports_applied_digests(self) -> None:
+        rendered = render_js_asset(
+            "preview/apply_inline_image_sources.js",
+            {"__INLINE_IMAGE_URLS_JSON__": '{"abc":"file:///tmp/image.png"}'},
+        )
+        self.assertIn("appliedDigests", rendered)
+        self.assertIn('"abc":"file:///tmp/image.png"', rendered)
+        self.assertNotIn("__INLINE_IMAGE_URLS_JSON__", rendered)
 
     def test_rendered_preview_search_template_has_no_unresolved_placeholders(self) -> None:
         rendered = render_js_asset(
