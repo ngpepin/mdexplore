@@ -113,6 +113,71 @@ def extract_plantuml_error_details(stderr_text: str) -> str:
     return "\n".join(lines[:8])
 
 
+def _transform_page_annotation_geometry(page, transform) -> None:
+    """Move annotation hit areas with transformed page content.
+
+    ``pypdf`` merges annotations when a page is merged, but it does not apply
+    the page-content transformation to annotation geometry.  Without this
+    correction, PDF links remain present but their clickable rectangles stay
+    at the pre-layout coordinates.
+    """
+    try:
+        from pypdf.generic import ArrayObject, FloatObject, NameObject
+    except Exception:
+        return
+
+    try:
+        annotations = page.get("/Annots") or []
+    except Exception:
+        return
+
+    def transformed_numbers(raw_values, *, rectangle: bool = False):
+        try:
+            values = [float(value) for value in raw_values]
+        except Exception:
+            return None
+        if len(values) < 2 or len(values) % 2:
+            return None
+
+        if rectangle and len(values) == 4:
+            x1, y1, x2, y2 = values
+            corners = [
+                transform.apply_on((x1, y1)),
+                transform.apply_on((x1, y2)),
+                transform.apply_on((x2, y1)),
+                transform.apply_on((x2, y2)),
+            ]
+            xs = [float(point[0]) for point in corners]
+            ys = [float(point[1]) for point in corners]
+            values = [min(xs), min(ys), max(xs), max(ys)]
+        else:
+            transformed: list[float] = []
+            for offset in range(0, len(values), 2):
+                x, y = transform.apply_on((values[offset], values[offset + 1]))
+                transformed.extend((float(x), float(y)))
+            values = transformed
+
+        return ArrayObject(FloatObject(value) for value in values)
+
+    for annotation_ref in annotations:
+        try:
+            annotation = annotation_ref.get_object()
+        except Exception:
+            continue
+
+        rect = annotation.get("/Rect")
+        if rect is not None:
+            transformed_rect = transformed_numbers(rect, rectangle=True)
+            if transformed_rect is not None:
+                annotation[NameObject("/Rect")] = transformed_rect
+
+        quad_points = annotation.get("/QuadPoints")
+        if quad_points is not None:
+            transformed_quad_points = transformed_numbers(quad_points)
+            if transformed_quad_points is not None:
+                annotation[NameObject("/QuadPoints")] = transformed_quad_points
+
+
 def stamp_pdf_page_numbers(
     pdf_bytes: bytes, layout_hints: dict[str, object] | None = None
 ) -> bytes:
@@ -526,6 +591,17 @@ def stamp_pdf_page_numbers(
         return max(1.0, min(2.75, target_font_size / page_diagram_font_size))
 
     writer = PdfWriter()
+    source_page_index_by_ref: dict[tuple[int, int], int] = {}
+    for source_page_index, source_page in enumerate(reader.pages):
+        source_ref = getattr(source_page, "indirect_reference", None)
+        if source_ref is not None:
+            source_page_index_by_ref[
+                (int(source_ref.idnum), int(source_ref.generation))
+            ] = source_page_index
+
+    output_page_index_by_source: dict[int, int] = {}
+    source_page_by_output_index: list[object] = []
+
     for page_number, (
         page,
         is_landscape_page,
@@ -623,6 +699,7 @@ def stamp_pdf_page_numbers(
             )
         )
         composed_page.merge_transformed_page(page, transform, over=True)
+        _transform_page_annotation_geometry(composed_page, transform)
 
         footer_font_size = max(8.0, min(14.0, base_body_font_size * content_scale))
         footer_baseline_y = max(12.0, (footer_band_height - footer_font_size) / 2.0)
@@ -654,6 +731,65 @@ def stamp_pdf_page_numbers(
         if overlay_pdf.pages:
             composed_page.merge_page(overlay_pdf.pages[0])
         writer.add_page(composed_page)
+
+        source_ref = getattr(page, "indirect_reference", None)
+        if source_ref is not None:
+            source_page_index = source_page_index_by_ref.get(
+                (int(source_ref.idnum), int(source_ref.generation))
+            )
+            if source_page_index is not None:
+                output_page_index_by_source[source_page_index] = len(writer.pages) - 1
+        source_page_by_output_index.append(page)
+
+    def destination_array(annotation):
+        direct_destination = annotation.get("/Dest")
+        if direct_destination is not None:
+            return direct_destination
+        action = annotation.get("/A")
+        if action is not None and str(action.get("/S")) == "/GoTo":
+            return action.get("/D")
+        return None
+
+    # ``pypdf`` clones page annotations while adding composed pages, but an
+    # internal destination can remain pointed at a detached clone of the old
+    # source page. Rebind those destinations to the actual output page objects.
+    for output_page_index, source_page in enumerate(source_page_by_output_index):
+        try:
+            source_annotations = source_page.get("/Annots") or []
+            output_annotations = writer.pages[output_page_index].get("/Annots") or []
+        except Exception:
+            continue
+
+        for source_ref, output_ref in zip(source_annotations, output_annotations):
+            try:
+                source_annotation = source_ref.get_object()
+                output_annotation = output_ref.get_object()
+                source_destination = destination_array(source_annotation)
+                output_destination = destination_array(output_annotation)
+            except Exception:
+                continue
+            if not source_destination or not output_destination:
+                continue
+
+            try:
+                source_target_ref = source_destination[0]
+                target_key = (
+                    int(source_target_ref.idnum),
+                    int(source_target_ref.generation),
+                )
+            except Exception:
+                continue
+
+            target_source_index = source_page_index_by_ref.get(target_key)
+            if target_source_index is None:
+                continue
+            target_output_index = output_page_index_by_source.get(target_source_index)
+            if target_output_index is None:
+                continue
+
+            output_destination[0] = writer.pages[
+                target_output_index
+            ].indirect_reference
 
     output = BytesIO()
     writer.write(output)
