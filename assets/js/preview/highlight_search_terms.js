@@ -60,6 +60,18 @@
     return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
+  function escapeTermText(input) {
+    return Array.from(String(input || ""), (character) => {
+      if (/['\u2018\u2019\u02bc]/u.test(character)) {
+        // Markdown typography may replace a source apostrophe with a curly
+        // apostrophe in the rendered preview. Treat those glyphs as equivalent
+        // so search and NEAR highlighting remain aligned with source matching.
+        return "['\\u2018\\u2019\\u02bc]";
+      }
+      return escapeRegExp(character);
+    }).join("");
+  }
+
   function buildTermPattern(termText, caseSensitive, enforceWordBoundaries = false) {
     const raw = String(termText || "");
     const leadingSpaceMatch = raw.match(/^ +/);
@@ -76,7 +88,7 @@
         ? raw.slice(leftTrim, rightTrim ? raw.length - rightTrim : raw.length)
         : raw;
 
-    let source = escapeRegExp(core || raw);
+    let source = escapeTermText(core || raw);
     const canUseBoundarySpaceMode = !!core;
 
     if (canUseBoundarySpaceMode && useLeadingBoundarySpace) {

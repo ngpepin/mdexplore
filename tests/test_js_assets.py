@@ -71,6 +71,7 @@ class JsAssetTests(unittest.TestCase):
         self.assertNotIn("__SCROLL_BOOL__", rendered)
         self.assertNotIn("__NEAR_WORD_GAP__", rendered)
         self.assertNotIn("__NEAR_GROUPS_JSON__", rendered)
+        self.assertIn("['\\u2018\\u2019\\u02bc]", rendered)
 
     def test_rendered_live_selection_template_has_no_unresolved_placeholders(self) -> None:
         rendered = render_js_asset(

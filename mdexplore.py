@@ -343,16 +343,21 @@ class MarkdownRenderer:
             .enable("strikethrough")
         )
         # Parse $...$ / $$...$$ as dedicated math tokens before markdown
-        # emphasis/underscore rules run, preventing TeX corruption.
-        self._md.use(dollarmath_plugin)
+        # emphasis/underscore rules run, preventing TeX corruption. Currency
+        # commonly starts with a digit, so reject delimiter matches adjacent to
+        # digits rather than treating prose between two prices as TeX.
+        self._md.use(dollarmath_plugin, allow_digits=False)
 
         default_fence = self._md.renderer.rules["fence"]
         default_render_token = self._md.renderer.renderToken
 
         def custom_math_inline(tokens, idx, options, env):
             token = tokens[idx]
-            # Keep TeX content raw for MathJax, only HTML-escape unsafe chars.
-            return f"${html.escape(token.content)}$"
+            # The Markdown parser has already distinguished TeX from currency.
+            # Emit explicit MathJax delimiters inside a marker element so the
+            # browser never rescans ordinary dollar amounts as mathematics.
+            math_body = html.escape(token.content)
+            return f'<span class="mdexplore-math-inline">\\({math_body}\\)</span>'
 
         def custom_math_block(tokens, idx, options, env):
             token = tokens[idx]
@@ -360,7 +365,11 @@ class MarkdownRenderer:
             if token.map and len(token.map) == 2:
                 line_attrs = f' data-md-line-start="{token.map[0]}" data-md-line-end="{token.map[1]}"'
             math_body = (token.content or "").strip("\n")
-            return f'<div class="mdexplore-math-block"{line_attrs}>$$\n{html.escape(math_body)}\n$$</div>\n'
+            return (
+                f'<div class="mdexplore-math-block"{line_attrs}>'
+                f'\\[\n{html.escape(math_body)}\n\\]'
+                "</div>\n"
+            )
 
         def custom_fence(tokens, idx, options, env):
             # Intercept known diagram fences and delegate the rest to the
@@ -399,6 +408,67 @@ class MarkdownRenderer:
         self._md.renderer.rules["math_inline"] = custom_math_inline
         self._md.renderer.rules["math_block"] = custom_math_block
         self._md.renderer.renderToken = custom_render_token
+
+    @staticmethod
+    def _prepare_markdown_for_render(markdown_text: str) -> str:
+        """Normalize supported export artifacts without changing source line numbers."""
+        lines = (markdown_text or "").splitlines(keepends=True)
+        if not lines:
+            return markdown_text or ""
+
+        prepared = list(lines)
+        standalone_dollar_lines: list[int] = []
+        writing_wrapper_open = False
+        fence_char = ""
+        fence_length = 0
+
+        def blank_line(index: int) -> None:
+            line = prepared[index]
+            prepared[index] = line[len(line.rstrip("\r\n")) :]
+
+        for index, line in enumerate(lines):
+            content = line.rstrip("\r\n")
+            stripped = content.strip()
+
+            fence_match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", content)
+            if fence_char:
+                if (
+                    fence_match
+                    and fence_match.group(1)[0] == fence_char
+                    and len(fence_match.group(1)) >= fence_length
+                    and not fence_match.group(2).strip()
+                ):
+                    fence_char = ""
+                    fence_length = 0
+                continue
+            if fence_match:
+                marker = fence_match.group(1)
+                fence_char = marker[0]
+                fence_length = len(marker)
+                continue
+
+            if re.fullmatch(r"[ \t]{0,3}:::writing\{[^{}\r\n]*\}[ \t]*", content):
+                blank_line(index)
+                writing_wrapper_open = True
+                continue
+            if writing_wrapper_open and re.fullmatch(r"[ \t]{0,3}:::[ \t]*", content):
+                blank_line(index)
+                writing_wrapper_open = False
+                continue
+            if stripped == "$":
+                standalone_dollar_lines.append(index)
+
+        # Some editors accept a lone `$` on each boundary as display math. The
+        # dollar-math plugin requires `$$`, so normalize only complete pairs and
+        # preserve every original line for source-selection metadata.
+        for pair_start in range(0, len(standalone_dollar_lines) - 1, 2):
+            for index in standalone_dollar_lines[pair_start : pair_start + 2]:
+                line = prepared[index]
+                line_ending = line[len(line.rstrip("\r\n")) :]
+                indentation = line[: len(line) - len(line.lstrip(" \t"))]
+                prepared[index] = f"{indentation}$${line_ending}"
+
+        return "".join(prepared)
 
     @staticmethod
     def _line_attrs_from_sourcepos_match(match: re.Match[str]) -> str:
@@ -518,6 +588,24 @@ class MarkdownRenderer:
         except Exception:
             return None
 
+    @staticmethod
+    def _markdown_contains_math(markdown_text: str) -> bool:
+        """Return whether text contains math recognized by the configured parser."""
+        text = markdown_text or ""
+        if re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", text):
+            return True
+        # Keep this in sync with dollarmath_plugin(allow_digits=False): an
+        # opening delimiter preceded by a digit or a closing delimiter followed
+        # by a digit is not math. That distinction prevents pairs of prices from
+        # disabling the cmark fast path and from being mistaken for TeX.
+        return bool(
+            re.search(
+                r"(?<![\\\d])\$(?!\$)(?:[^$\n]|\\\$){1,400}?"
+                r"(?<!\\)\$(?!\d)",
+                text,
+            )
+        )
+
     def _should_use_cmark_fast_path(
         self, markdown_text: str, has_math_hint: bool | None = None
     ) -> bool:
@@ -530,10 +618,7 @@ class MarkdownRenderer:
         has_math = (
             bool(has_math_hint)
             if has_math_hint is not None
-            else (
-                bool(re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", markdown_text))
-                or bool(re.search(r"(?<!\\)\$(?!\s)(.+?)(?<!\\)\$", markdown_text))
-            )
+            else self._markdown_contains_math(markdown_text)
         )
         if has_math:
             return False
@@ -1292,11 +1377,14 @@ class MarkdownRenderer:
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
+        prepared_markdown = self._prepare_markdown_for_render(markdown_text)
         body: str | None = None
-        if self._should_use_cmark_fast_path(markdown_text, has_math_hint=has_math_hint):
-            body = self._render_body_with_cmark(markdown_text, env)
+        if self._should_use_cmark_fast_path(
+            prepared_markdown, has_math_hint=has_math_hint
+        ):
+            body = self._render_body_with_cmark(prepared_markdown, env)
         if body is None:
-            body = self._md.render(markdown_text, env)
+            body = self._md.render(prepared_markdown, env)
         if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
             self._last_mermaid_pdf_svg_by_hash = dict(
                 env.get("mermaid_pdf_svg_by_hash") or {}
@@ -2220,13 +2308,10 @@ class MdExploreWindow(QMainWindow):
         markdown_text: str,
     ) -> tuple[bool, bool, bool]:
         """Return (has_math, has_mermaid, has_plantuml) from raw markdown."""
-        text = markdown_text or ""
+        text = MarkdownRenderer._prepare_markdown_for_render(markdown_text or "")
         has_mermaid = bool(re.search(r"(?im)^\s*```+\s*mermaid\b", text))
         has_plantuml = bool(re.search(r"(?im)^\s*```+\s*(?:plantuml|puml|uml)\b", text))
-        has_math = bool(
-            re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", text)
-            or re.search(r"(?<!\\)\$(?!\$)(?:[^$\n]|\\\$){1,400}?(?<!\\)\$", text)
-        )
+        has_math = MarkdownRenderer._markdown_contains_math(text)
         return has_math, has_mermaid, has_plantuml
 
     @staticmethod
@@ -2235,10 +2320,12 @@ class MdExploreWindow(QMainWindow):
         text = html_doc or ""
         has_mermaid = 'class="mermaid"' in text
         has_plantuml = ("plantuml-async" in text) or ('class="plantuml"' in text)
+        # Math tokens are marked by the renderer before MathJax sees the page.
+        # Do not infer math from raw dollar signs in HTML: a document containing
+        # both $15,000 and $20 would otherwise be treated as one TeX expression.
         has_math = (
-            "mdexplore-math-block" in text
-            or bool(re.search(r"(?<!\\)\$(?!\$)(?:[^$\n]|\\\$){1,400}?(?<!\\)\$", text))
-            or bool(re.search(r"(?s)(?<!\\)\$\$(.+?)(?<!\\)\$\$", text))
+            "mdexplore-math-inline" in text
+            or "mdexplore-math-block" in text
         )
         return has_math, has_mermaid, has_plantuml
 

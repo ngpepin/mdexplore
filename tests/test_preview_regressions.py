@@ -549,11 +549,11 @@ class SearchHighlightRegressionTests(PreviewRegressionHarness):
             ('NEAR("other phrase", "Exact Case")', ["Exact Case", "other phrase"]),
             (
                 """NEAR("Program Director's RAG", pipeline)""",
-                ["Program Director's RAG", "pipeline"],
+                ["Program Director’s RAG", "pipeline"],
             ),
             (
                 """NEAR(pipeline, "Program Director's RAG")""",
-                ["Program Director's RAG", "pipeline"],
+                ["Program Director’s RAG", "pipeline"],
             ),
             ('NEAR("Joe", "Anne Smith")', ["Joe", "Anne Smith"]),
         ]

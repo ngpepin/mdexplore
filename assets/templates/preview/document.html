@@ -531,8 +531,11 @@
         typeset: false
       },
       tex: {
-        inlineMath: [['$', '$'], ['\\(', '\\)']],
-        displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        // MarkdownRenderer has already classified math tokens. Restrict
+        // MathJax to the explicit delimiters it emits so ordinary currency
+        // elsewhere in the document is never interpreted as TeX.
+        inlineMath: [['\\(', '\\)']],
+        displayMath: [['\\[', '\\]']]
       },
       svg: {
         fontCache: "global",
