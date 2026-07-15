@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat as stat_module
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
@@ -93,13 +94,20 @@ class PdfSearchWorker(QRunnable):
                     searchable_content = self.content_loader(path)
                 except Exception:
                     searchable_content = ""
-                # Re-check cancellation after potentially heavy text load.
-                if callable(self.should_abort) and self.should_abort():
-                    break
+                # Finish the already-loaded file before honoring cancellation.
+                # Predicate/count work is lightweight, and publishing this
+                # completed result preserves progressive-search continuity.
+                abort_after_current = bool(
+                    callable(self.should_abort) and self.should_abort()
+                )
                 try:
                     if not self.predicate(filename_search_text, searchable_content):
+                        if abort_after_current:
+                            break
                         continue
                 except Exception:
+                    if abort_after_current:
+                        break
                     continue
 
                 matched_paths.append(path_key)
@@ -115,6 +123,8 @@ class PdfSearchWorker(QRunnable):
                 except Exception:
                     count = 1
                 match_counts[path_key] = count if count > 0 else 1
+                if abort_after_current:
+                    break
 
             self.signals.finished.emit(
                 self.request_id,
@@ -183,6 +193,164 @@ class PdfTextPrefetchWorker(QRunnable):
             )
         except Exception as exc:
             self.signals.finished.emit(self.request_id, 0, 0, str(exc))
+
+
+class PdfTextCacheGcWorkerSignals(QObject):
+    """Signals emitted by idle extracted-text cache garbage collection."""
+
+    finished = Signal(int, object, str)
+
+
+class PdfTextCacheGcWorker(QRunnable):
+    """Find text-cache entries whose source PDFs no longer exist.
+
+    The worker is deliberately read-only. It performs bounded filesystem checks
+    away from the GUI thread and returns deletion candidates to the main window,
+    which applies them under the cache locks.
+    """
+
+    METADATA_SUFFIX = ".txt.gz.meta.json"
+
+    def __init__(
+        self,
+        request_id: int,
+        memory_path_keys: list[str],
+        disk_cache_dir: Path,
+        *,
+        memory_cursor: str = "",
+        disk_cursor: str = "",
+        batch_size: int = 128,
+        should_abort=None,
+    ) -> None:
+        """Store one bounded garbage-collection pass configuration."""
+        super().__init__()
+        self.request_id = int(request_id)
+        self.memory_path_keys = [str(value) for value in memory_path_keys if value]
+        self.disk_cache_dir = Path(disk_cache_dir)
+        self.memory_cursor = str(memory_cursor or "")
+        self.disk_cursor = str(disk_cursor or "")
+        self.batch_size = max(1, int(batch_size))
+        self.should_abort = should_abort
+        self.signals = PdfTextCacheGcWorkerSignals()
+        self.setAutoDelete(False)
+
+    @staticmethod
+    def _rotating_batch(
+        values: list[str],
+        cursor: str,
+        batch_size: int,
+    ) -> tuple[list[str], str]:
+        """Return a sorted batch beginning immediately after `cursor`."""
+        ordered = sorted(set(values))
+        if not ordered:
+            return [], ""
+        start = 0
+        if cursor:
+            for index, value in enumerate(ordered):
+                if value > cursor:
+                    start = index
+                    break
+            else:
+                start = 0
+        selected = ordered[start : start + max(1, int(batch_size))]
+        if not selected:
+            selected = ordered[: max(1, int(batch_size))]
+        return selected, selected[-1] if selected else ""
+
+    @staticmethod
+    def _source_is_missing(path_text: str) -> bool:
+        """Return true only for a definite missing-source result."""
+        try:
+            source_stat = Path(path_text).stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            # Permission and transient filesystem failures must not evict data.
+            return False
+        return not stat_module.S_ISREG(source_stat.st_mode)
+
+    def _aborted(self) -> bool:
+        return bool(callable(self.should_abort) and self.should_abort())
+
+    def _emit_finished(self, payload: object, error_text: str) -> None:
+        """Emit unless the owning Qt objects disappeared during shutdown."""
+        try:
+            self.signals.finished.emit(self.request_id, payload, error_text)
+        except RuntimeError:
+            pass
+
+    def run(self) -> None:
+        """Inspect a bounded memory/disk batch and emit deletion candidates."""
+        payload = {
+            "missing_memory_path_keys": [],
+            "missing_disk_entries": [],
+            "stale_metadata_paths": [],
+            "memory_cursor": self.memory_cursor,
+            "disk_cursor": self.disk_cursor,
+        }
+        try:
+            memory_batch, memory_cursor = self._rotating_batch(
+                self.memory_path_keys,
+                self.memory_cursor,
+                self.batch_size,
+            )
+            payload["memory_cursor"] = memory_cursor
+            for path_key in memory_batch:
+                if self._aborted():
+                    break
+                if self._source_is_missing(path_key):
+                    payload["missing_memory_path_keys"].append(path_key)
+
+            metadata_paths: list[Path] = []
+            try:
+                metadata_paths = list(
+                    self.disk_cache_dir.glob(f"*{self.METADATA_SUFFIX}")
+                )
+            except OSError:
+                metadata_paths = []
+            metadata_names = [path.name for path in metadata_paths]
+            disk_batch, disk_cursor = self._rotating_batch(
+                metadata_names,
+                self.disk_cursor,
+                self.batch_size,
+            )
+            payload["disk_cursor"] = disk_cursor
+
+            for metadata_name in disk_batch:
+                if self._aborted():
+                    break
+                metadata_path = self.disk_cache_dir / metadata_name
+                cache_name = metadata_name[: -len(".meta.json")]
+                cache_path = self.disk_cache_dir / cache_name
+                try:
+                    if not cache_path.is_file():
+                        payload["stale_metadata_paths"].append(str(metadata_path))
+                        continue
+                    raw_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    payload["stale_metadata_paths"].append(str(metadata_path))
+                    continue
+                source_path = str(
+                    raw_payload.get("source_path", "")
+                    if isinstance(raw_payload, dict)
+                    else ""
+                ).strip()
+                if not source_path or not Path(source_path).is_absolute():
+                    payload["stale_metadata_paths"].append(str(metadata_path))
+                    continue
+                if self._source_is_missing(source_path):
+                    payload["missing_disk_entries"].append(
+                        {
+                            "source_path": source_path,
+                            "cache_path": str(cache_path),
+                            "metadata_path": str(metadata_path),
+                        }
+                    )
+            self._emit_finished(payload, "")
+        except Exception as exc:
+            self._emit_finished(payload, str(exc))
 
 
 class PdfTreeMarkerScanWorkerSignals(QObject):

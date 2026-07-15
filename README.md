@@ -14,6 +14,13 @@ same shell philosophy as `mdexplore`.
 - Primary docs: [pdfexplore/README.md](/home/npepin/Projects/mdexplore/pdfexplore/README.md)
 - Maintainer guide: [pdfexplore/AGENTS.md](/home/npepin/Projects/mdexplore/pdfexplore/AGENTS.md)
 - Launcher: `./pdfexplore.sh [PATH]`
+- Its top-bar `Dark` button switches PDF pages to dark gray with light text and
+  changes to `Light` while that mode is active.
+- Its PDF preview mirrors mdexplore’s navigation gutters with persistent-highlight
+  markers on the left and active search-hit markers on the right, including
+  qualifying-window behavior for `NEAR(...)` searches.
+- Its extracted-text cache performs bounded garbage-collection passes while idle,
+  removing memory/disk entries and cache badges for PDFs that no longer exist.
 
 Runtime settings are JSON-externalized:
 

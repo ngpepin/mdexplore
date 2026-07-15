@@ -42,18 +42,28 @@ It is designed for people who review many PDFs and need stable annotation/sessio
 - Top actions:
   - `^` to move root up one directory.
   - `Refresh` to rescan the current tree root.
+  - `Dark` to render PDF pages dark gray with light text; while active, the
+    button reads `Light` and restores normal PDF colors when clicked.
   - `Add View` to create another tabbed view of the same PDF at the current page/scroll location.
 - `F5` refresh shortcut (same behavior as `Refresh`).
 - Search box and color-apply controls matching `mdexplore` search syntax:
   - supports tokenized/quoted boolean queries via shared parser helpers,
-  - searches non-recursively within direct-child PDFs of the selected directory,
-  - highlights in-tree match counts and in-view search hits for matched files.
+  - searches PDFs currently visible in the tree (root files plus expanded branches),
+  - highlights in-tree match counts and in-view search hits for matched files,
+  - opening another matched PDF while search is active jumps to its first hit.
 - Right-rail search indicators in preview:
   - markers are generated progressively from top pages to bottom pages,
   - markers become clickable as soon as they appear,
   - dense nearby markers are clustered into larger pills for easier click targets,
   - clicking a marker temporarily prioritizes navigation/rendering over marker-build throughput,
   - marker generation resumes automatically after the interaction settles.
+- Left-rail persistent-highlight indicators in preview:
+  - normal and important highlights use the same distinct marker colors as `mdexplore`,
+  - marker length reflects the highlighted span when rendered text geometry is available,
+  - markers are available for unrendered pages from persisted page/range metadata,
+  - clicking a marker opens its page and centers the corresponding highlight.
+- In-view `NEAR(...)` highlighting mirrors `mdexplore` by highlighting and marking
+  only qualifying proximity windows, including variadic groups of two or more terms.
 - Tree highlight colors and clear actions:
   - per-file color assignment via tree context menu,
   - `Clear in Directory` and `Clear All` with confirmation prompts,
@@ -83,7 +93,9 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - current open PDF is prioritized for text-cache warming,
   - visible-scope PDFs are prefetched in small batches,
   - prefetch backs off during active interaction (especially scrolling),
-  - cached-text badge reflects both memory and disk cache hits.
+  - cached-text badge reflects both memory and disk cache hits,
+  - idle garbage collection removes memory/disk text entries whose source PDF
+    has been deleted and clears the corresponding cache badge.
 - Tree marker badges:
   - view badge indicates multi-view/open-session state,
   - marker badge indicates persistent text highlights,
@@ -110,7 +122,9 @@ It is designed for people who review many PDFs and need stable annotation/sessio
 - Embedded viewer bridge: `pdfexplore/assets/viewer_bridge.js` + local `pdf.js` bundle.
 - Text caching:
   - memory cache: bounded `OrderedDict`,
-  - disk cache: compressed entries under `${XDG_CACHE_HOME:-~/.cache}/mdexplore/pdfexplore-text-cache`.
+  - disk cache: compressed entries under `${XDG_CACHE_HOME:-~/.cache}/mdexplore/pdfexplore-text-cache`,
+  - atomic `.txt.gz.meta.json` companions map compressed entries back to source
+    PDFs for idle garbage collection; legacy entries gain metadata when reused.
 
 ### Data/Control Flow Summary
 
@@ -132,7 +146,9 @@ It is designed for people who review many PDFs and need stable annotation/sessio
 - Prefetch action:
   - idle timer evaluates interaction/search pressure,
   - current document may be prioritized,
-  - cache-hit/miss results feed badge state.
+  - cache-hit/miss results feed badge state,
+  - periodically, the same low-priority pool checks bounded memory and disk-cache
+    batches and deletes extracted text only for definitively missing sources.
 - Marker update action:
   - sidecar scan worker emits marker sets,
   - app merges scan state with live state,
@@ -216,6 +232,8 @@ separate, app-local tuning surface for pdfexplore.
 | `pdf_text_disk_cache_max_files` | `1200` | Max disk cache files before trim pressure. |
 | `pdf_text_disk_cache_max_bytes` | `402653184` | Max disk cache byte budget before trim pressure. |
 | `pdf_text_disk_cache_trim_interval` | `24` | Disk-cache trim trigger interval measured in successful store operations (every Nth store runs a trim pass). |
+| `pdf_text_cache_gc_interval_seconds` | `5.0` | Minimum interval between idle missing-source garbage-collection batches. |
+| `pdf_text_cache_gc_batch_size` | `128` | Maximum memory entries and disk metadata companions checked per idle GC batch. |
 | `prefetch_batch_size` | `1` | Number of PDFs prefetched per idle cycle. |
 | `prefetch_idle_seconds` | `0.8` | Idle-delay threshold before prefetch can run. |
 | `prefetch_heavy_use_window_seconds` | `1.2` | Sliding window for interaction-pressure checks. |
@@ -347,11 +365,23 @@ General conversion rule: `MiB * 1024 * 1024`.
 
 - Search is worker-based and cancellation-aware.
 - Prefetch is low-priority and throttled by interaction detection.
+- Extracted-text garbage collection shares the idle prefetch pool, scans bounded
+  batches, and yields immediately when interaction or search pressure returns.
+- A source is treated as missing only on a definite `FileNotFoundError`; permission
+  or transient filesystem errors preserve the cached text.
 - Tree marker scans run in background workers and are merged with live state.
 - Viewer search-marker generation uses document-scoped page-text cache plus bounded concurrency.
 - Marker builds publish partial rails progressively so long documents become navigable early.
 - Marker clicks are interaction-prioritized: active builds can pause briefly so page jumps feel immediate.
+- Persistent-highlight gutter markers are derived immediately from sidecar page/range
+  metadata and refine their placement from live text geometry as pages render.
 - Temporary reduced-paint mode may be used during tree mutation bursts, but marker sync forces full marker visibility when marker state is updated.
+
+`pdfexplore` inherits `SEARCH_CLOSE_WORD_GAP`,
+`PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR`, and
+`PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR` from the shared
+`mdexplore.settings.json` values so proximity and marker visuals stay aligned
+between the two apps.
 
 ### Performance Tradeoffs
 
@@ -363,6 +393,8 @@ General conversion rule: `MiB * 1024 * 1024`.
 
 - The app is considered idle enough when no recent interaction pressure or active search scan is blocking prefetch.
 - Prefetch warms text cache for likely-next PDFs and updates cache badges progressively.
+- At most once per configured GC interval, idle scheduling gives one bounded pass
+  to missing-source cleanup before continuing cache prefetch.
 
 ## Troubleshooting
 

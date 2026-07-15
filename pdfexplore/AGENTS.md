@@ -182,6 +182,11 @@ C4Component
     - run low-priority,
     - should pause/cancel under interaction pressure,
     - should prefer current-document warmup before broader scope.
+- Text-cache garbage-collection workers:
+    - share the low-priority idle worker pool with prefetch,
+    - inspect bounded batches and stop when user/search pressure returns,
+    - may evict extracted text only after the source path is definitively missing,
+    - must not evict on permission or transient filesystem errors.
 - Marker scan workers:
     - produce sidecar-derived marker sets,
     - must be merged with live state to avoid transient badge regressions.
@@ -189,11 +194,17 @@ C4Component
 ## Viewer Bridge Marker Rules
 
 - Marker generation in `pdfexplore/assets/viewer_bridge.js` should remain document-key scoped.
+- Persistent text highlights must produce clickable left-gutter markers, including
+  page-based fallback placement before a target page has rendered.
+- Normal and important left-gutter markers must remain visually distinct and use
+  the shared mdexplore marker-color settings.
 - Per-page extracted text should be cached and reused for repeated searches in the same open PDF.
 - Marker generation should run in bounded concurrent batches and publish partial results each batch.
 - Long builds should periodically yield to the event loop so input/paint are not starved.
 - Marker click navigation should be allowed to interrupt active marker builds, then resume automatically.
 - Do not block marker click handlers on build completion.
+- Right-gutter search highlights and markers for `NEAR(...)` queries must be
+  restricted to qualifying proximity windows, matching shared variadic NEAR semantics.
 
 ## UI Performance Guardrails
 
@@ -241,12 +252,19 @@ Recommended validation sequence:
 
 - Prefer sharing generic behavior through `mdexplore_app` for long-term parity.
 - Keep prefetch throttling interaction-first; regressions should bias toward smooth UI.
+- Keep extracted-text garbage collection idle-only and bounded. Disk entries use
+  atomic `.txt.gz.meta.json` companions to retain their source-PDF path; legacy
+  entries remain readable and gain metadata when they are next accessed.
 - Treat marker badge continuity as correctness-critical: highlight and cache badges must survive tab switches, searches, and root navigation.
 - Treat marker click latency as correctness-critical in the viewer bridge: visual marker speed without click responsiveness is a regression.
 - Preserve current UX contracts:
   - scope-aware operations align with visible tree behavior,
   - copy metadata merge semantics match mdexplore expectations,
-  - view-tab model remains compatible with existing sidecars.
+  - view-tab model remains compatible with existing sidecars,
+  - the top-bar `Dark`/`Light` control applies one app-wide, session-only PDF
+    color mode across cached and newly loaded preview widgets,
+  - preview navigation keeps persistent highlights on the left rail and active
+    search hits on the right rail, with both marker types remaining clickable.
 
 ## Documentation Contract
 

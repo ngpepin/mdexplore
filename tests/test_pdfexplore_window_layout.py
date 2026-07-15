@@ -58,6 +58,82 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
     def test_pdf_tree_uses_pdf_name_filter(self) -> None:
         self.assertEqual(self.window.model.nameFilters(), ["*.pdf"])
 
+    def test_dark_mode_button_sits_between_refresh_and_add_view(self) -> None:
+        top_bar_widget = self.window.centralWidget().layout().itemAt(0).widget()
+        top_bar = top_bar_widget.layout()
+        button_labels = [
+            top_bar.itemAt(index).widget().text()
+            for index in range(top_bar.count())
+            if hasattr(top_bar.itemAt(index).widget(), "text")
+        ]
+        refresh_index = button_labels.index("Refresh")
+        self.assertEqual(
+            button_labels[refresh_index : refresh_index + 3],
+            ["Refresh", "Dark", "Add View"],
+        )
+
+    def test_dark_mode_button_toggles_viewer_colors_and_label(self) -> None:
+        captured_sources: list[str] = []
+        self.window._run_viewer_js = (  # type: ignore[method-assign]
+            lambda source, callback=None: captured_sources.append(source)
+        )
+
+        self.window.dark_mode_btn.click()
+        self.assertTrue(self.window._preview_dark_mode)
+        self.assertEqual(self.window.dark_mode_btn.text(), "Light")
+        self.assertIn("setDarkMode(true)", captured_sources[-1])
+
+        self.window.dark_mode_btn.click()
+        self.assertFalse(self.window._preview_dark_mode)
+        self.assertEqual(self.window.dark_mode_btn.text(), "Dark")
+        self.assertIn("setDarkMode(false)", captured_sources[-1])
+
+    def test_near_query_groups_are_forwarded_to_pdf_viewer(self) -> None:
+        captured_sources: list[str] = []
+        self.window._run_viewer_js = (  # type: ignore[method-assign]
+            lambda source, callback=None: captured_sources.append(source)
+        )
+        self.window._current_preview_path_key = lambda: "active.pdf"  # type: ignore[method-assign]
+        self.window._viewer_bridge_ready_by_path["active.pdf"] = True
+        self.window.match_input.setText("NEAR(alpha, 'Beta', gamma)")
+
+        groups = self.window._current_near_term_groups()
+        self.window._highlight_viewer_search_terms(
+            self.window._current_search_terms(),
+            scroll_to_first=True,
+        )
+
+        self.assertEqual(
+            groups,
+            [[("alpha", False), ("Beta", True), ("gamma", False)]],
+        )
+        self.assertTrue(captured_sources)
+        self.assertIn("setSearchTerms", captured_sources[-1])
+        self.assertIn('"text": "alpha"', captured_sources[-1])
+        self.assertIn('"text": "Beta", "caseSensitive": true', captured_sources[-1])
+        self.assertIn('"text": "gamma"', captured_sources[-1])
+        self.assertTrue(captured_sources[-1].rstrip().endswith("true);"))
+
+    def test_newly_opened_search_match_requests_first_hit_navigation(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "matched.pdf"
+        _create_pdf_with_text(pdf_path, "needle")
+        path_key = self.window._path_key(pdf_path)
+        self.window.current_file = pdf_path
+        self.window.current_match_files = [pdf_path]
+        self.window.match_input.setText("needle")
+        self.window._current_preview_path_key = lambda: path_key  # type: ignore[method-assign]
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        self.window._pending_search_scroll_to_first_path_keys.add(path_key)
+        calls: list[bool] = []
+        self.window._highlight_viewer_search_terms = (  # type: ignore[method-assign]
+            lambda _terms, *, scroll_to_first=False: calls.append(scroll_to_first)
+        )
+
+        self.window._apply_active_search_to_viewer()
+
+        self.assertEqual(calls, [True])
+        self.assertNotIn(path_key, self.window._pending_search_scroll_to_first_path_keys)
+
     def test_tree_context_menu_copy_path_copies_shell_escaped_absolute_path(self) -> None:
         pdf_path = Path(self._tempdir.name) / "copy path [test].pdf"
         _create_pdf_with_text(pdf_path, "copy path")

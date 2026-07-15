@@ -734,6 +734,13 @@ R.OVERLAY.04 :: [marker clicked] => O(jump to nearest represented target)
 R.OVERLAY.05 :: [named-view marker clicked] => O(reuse the named-view/tab restore path so marker landing matches tab landing)
 ```
 
+`pdfexplore` mirrors the search/highlight subset of these overlay laws in its
+viewer bridge: persistent PDF text ranges appear as clickable left-gutter
+markers, active search hits appear on the right, and `NEAR(...)` preview marks
+are limited to qualifying variadic proximity windows. Page/range metadata gives
+unrendered PDF pages an immediate marker position, refined from live geometry
+after pdf.js renders the target page.
+
 ### 9. View, Tab, and Session Rules
 
 #### 9.1 Tab constraints
@@ -1703,6 +1710,9 @@ viewer-bridge interaction semantics), also update
 - Keep runtime settings externalized in JSON:
   - shared/global defaults in `mdexplore.settings.json`,
   - pdfexplore-only defaults in `pdfexplore.settings.json`.
+- pdfexplore extracted-text disk entries use atomic source-path metadata companions;
+  idle, bounded garbage collection may remove an entry only after its source PDF
+  is definitively missing, never for permission or transient filesystem errors.
 - Update `UML.md` when extracted boundaries, architecture, or major control-flow  
 ownership changes.
 

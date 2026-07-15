@@ -203,6 +203,52 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             220.0,
         )
 
+    def test_dark_mode_applies_to_loaded_and_new_pdf_viewers(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+
+        self.window.dark_mode_btn.click()
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({"
+                " active: window.__pdfexploreBridge.isDarkModeActive(),"
+                " classActive: document.documentElement.classList.contains('pdfexplore-dark-mode'),"
+                " filter: getComputedStyle(document.querySelector('.canvasWrapper')).filter"
+                "})"
+            ).get("active")
+            is True,
+            timeout_ms=5000,
+        )
+        first_dark_state = self.run_current_viewer_js_json(
+            "({"
+            " active: window.__pdfexploreBridge.isDarkModeActive(),"
+            " classActive: document.documentElement.classList.contains('pdfexplore-dark-mode'),"
+            " filter: getComputedStyle(document.querySelector('.canvasWrapper')).filter"
+            "})"
+        )
+        self.assertEqual(first_dark_state.get("classActive"), True)
+        self.assertNotEqual(first_dark_state.get("filter"), "none")
+        self.assertEqual(self.window.dark_mode_btn.text(), "Light")
+
+        self._open_and_wait_for_viewer(self.second_pdf)
+        second_dark_state = self.run_current_viewer_js_json(
+            "({"
+            " active: window.__pdfexploreBridge.isDarkModeActive(),"
+            " classActive: document.documentElement.classList.contains('pdfexplore-dark-mode')"
+            "})"
+        )
+        self.assertEqual(second_dark_state.get("active"), True)
+        self.assertEqual(second_dark_state.get("classActive"), True)
+
+        self.window.dark_mode_btn.click()
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({active: window.__pdfexploreBridge.isDarkModeActive()})"
+            ).get("active")
+            is False,
+            timeout_ms=5000,
+        )
+        self.assertEqual(self.window.dark_mode_btn.text(), "Dark")
+
     def test_persistent_highlight_overlay_reappears_after_switch_and_reopen(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         selection_info = self._seed_alpha_selection_info()
@@ -349,6 +395,142 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
                 "({page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)})"
             ).get("page", 0)
             > 1,
+            timeout_ms=12000,
+        )
+
+    def test_highlight_and_search_markers_use_opposite_clickable_gutters(self) -> None:
+        multi_page_pdf = self.root / "marker-gutters.pdf"
+        _create_pdf_with_lines(multi_page_pdf, "Alpha", 210)
+        self._open_and_wait_for_viewer(multi_page_pdf)
+
+        self.window._current_text_highlights = [
+            {
+                "id": "normal-page-two",
+                "page": 2,
+                "start": 0,
+                "end": 48,
+                "kind": "normal",
+                "text": "Alpha line 43 Alpha line 44",
+            },
+            {
+                "id": "important-page-four",
+                "page": 4,
+                "start": 0,
+                "end": 5,
+                "kind": "important",
+                "text": "Alpha",
+            },
+        ]
+        self.window._apply_persistent_text_highlights()
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms([{text: 'line 170', caseSensitive: false}], []);"
+        )
+
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({"
+                " highlights: document.querySelectorAll('.pdfexplore-highlight-indicator').length,"
+                " searches: document.querySelectorAll('.pdfexplore-search-indicator').length"
+                "})"
+            ).get("highlights", 0)
+            >= 2
+            and self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+        gutter_state = self.run_current_viewer_js_json(
+            "(() => {"
+            " const leftRail = document.querySelector('.pdfexplore-highlight-indicator-rail');"
+            " const rightRail = document.querySelector('.pdfexplore-search-indicator-rail');"
+            " const normal = document.querySelector('.pdfexplore-highlight-indicator.normal');"
+            " const important = document.querySelector('.pdfexplore-highlight-indicator.important');"
+            " return {"
+            "   left: leftRail?.getBoundingClientRect().left ?? -1,"
+            "   right: rightRail?.getBoundingClientRect().left ?? -1,"
+            "   normalColor: normal ? getComputedStyle(normal).backgroundColor : '',"
+            "   importantColor: important ? getComputedStyle(important).backgroundColor : '',"
+            "   importantPage: Number(important?.dataset.pageNumber || 0),"
+            "   importantId: String(important?.dataset.highlightId || '')"
+            " };"
+            "})()"
+        )
+        self.assertGreaterEqual(float(gutter_state.get("left", -1)), 0.0)
+        self.assertGreater(float(gutter_state.get("right", -1)), float(gutter_state.get("left", -1)))
+        self.assertNotEqual(gutter_state.get("normalColor"), gutter_state.get("importantColor"))
+        self.assertEqual(gutter_state.get("importantPage"), 4)
+        self.assertEqual(gutter_state.get("importantId"), "important-page-four")
+
+        clicked = self.run_current_viewer_js_json(
+            "(() => {"
+            " const marker = document.querySelector('.pdfexplore-highlight-indicator.important');"
+            " if (!marker) return {clicked: false};"
+            " const rect = marker.getBoundingClientRect();"
+            " marker.dispatchEvent(new MouseEvent('mousedown', {"
+            "   bubbles: true, cancelable: true, button: 0,"
+            "   clientX: rect.left + (rect.width / 2),"
+            "   clientY: rect.top + (rect.height / 2)"
+            " }));"
+            " return {clicked: true};"
+            "})()"
+        )
+        self.assertEqual(clicked.get("clicked"), True)
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)})"
+            ).get("page", 0)
+            == 4,
+            timeout_ms=12000,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-highlight-rect.important[data-highlight-id=\"important-page-four\"]').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+
+    def test_near_search_markers_only_cover_qualifying_pdf_pages(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms("
+            "[{text: 'Alpha', caseSensitive: false}, {text: 'line 170', caseSensitive: false}],"
+            "[[{text: 'Alpha', caseSensitive: false}, {text: 'line 170', caseSensitive: false}]],"
+            "true"
+            ");"
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+        marker_pages = self.run_current_viewer_js_json(
+            "({pages: Array.from(new Set(Array.from(document.querySelectorAll('.pdfexplore-search-indicator')).map((node) => Number(node.dataset.pageNumber || 0))))})"
+        ).get("pages", [])
+        self.assertTrue(marker_pages)
+        self.assertTrue(all(int(page) > 1 for page in marker_pages))
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({page: Number((window.PDFViewerApplication && window.PDFViewerApplication.page) || 0)})"
+            ).get("page", 0)
+            > 1,
+            timeout_ms=12000,
+        )
+
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms("
+            "[{text: 'Alpha', caseSensitive: false}, {text: 'term-that-is-absent', caseSensitive: false}],"
+            "[[{text: 'Alpha', caseSensitive: false}, {text: 'term-that-is-absent', caseSensitive: false}]]"
+            ");"
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-search-indicator').length})"
+            ).get("count", 1)
+            == 0,
             timeout_ms=12000,
         )
 

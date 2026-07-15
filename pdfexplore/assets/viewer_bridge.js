@@ -37,6 +37,11 @@
     return value;
   }
 
+  function configString(name, fallback) {
+    const raw = bridgeConfig[name];
+    return typeof raw === "string" && raw.trim() ? raw.trim() : fallback;
+  }
+
   const THREE_UP_DIVISOR = configNumber("three_up_divisor", 3, 1, 12);
   const MIN_ZOOM_SCALE = configNumber("min_zoom_scale", 0.1, 0.01, 100);
   const MAX_ZOOM_SCALE = configNumber("max_zoom_scale", 10.0, MIN_ZOOM_SCALE, 100);
@@ -70,6 +75,15 @@
   const SEARCH_INDICATOR_YIELD_EVERY_BATCHES = Math.round(
     configNumber("search_indicator_yield_every_batches", 3, 1, 50)
   );
+  const NEAR_WORD_GAP = Math.round(configNumber("near_word_gap", 50, 1, 10000));
+  const PERSISTENT_HIGHLIGHT_MARKER_COLOR = configString(
+    "persistent_highlight_marker_color",
+    "rgba(112, 90, 188, 0.92)"
+  );
+  const PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = configString(
+    "persistent_highlight_important_marker_color",
+    "rgba(154, 132, 220, 0.96)"
+  );
 
   // Bridge runtime state. Search-indicator fields intentionally track both
   // completed and in-flight builds so marker rendering can stay progressive
@@ -79,12 +93,14 @@
     eventBusHooksInstalled: false,
     persistentEntries: [],
     searchTerms: [],
+    nearTermGroups: [],
     lastClickedHighlightId: "",
     lastSelectionPayload: null,
     lastSelectionTimestamp: 0,
     lastViewState: null,
     refreshHandle: 0,
     observer: null,
+    darkModeActive: false,
     threeUpActive: false,
     threeUpBaselineViewState: null,
     threeUpOnePageScale: 1,
@@ -100,6 +116,7 @@
     searchIndicatorPendingSignature: "",
     searchIndicatorEntries: [],
     searchIndicatorResumeHandle: 0,
+    scrollToFirstSearchHit: false,
     activeScrollHost: null,
     searchTextCacheKey: "",
     searchTextByPage: new Map(),
@@ -278,9 +295,10 @@
     if (!container) {
       return Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
     }
-    const containerRect = container.getBoundingClientRect();
-    const viewportCenterX = containerRect.left + (container.clientWidth / 2);
-    const viewportCenterY = containerRect.top + (container.clientHeight / 2);
+    const metrics = scrollHostMetrics(container);
+    const containerRect = metrics.rect;
+    const viewportCenterX = containerRect.left + (metrics.clientWidth / 2);
+    const viewportCenterY = containerRect.top + (metrics.clientHeight / 2);
 
     let bestPage = Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
     let bestDistance = Number.POSITIVE_INFINITY;
@@ -428,6 +446,14 @@ html, body {
 .page {
   box-shadow: 0 18px 32px rgba(0, 0, 0, 0.26) !important;
 }
+html.pdfexplore-dark-mode .page {
+  background-color: #2b2f36 !important;
+}
+html.pdfexplore-dark-mode .page .canvasWrapper,
+html.pdfexplore-dark-mode .page .annotationLayer,
+html.pdfexplore-dark-mode .page .xfaLayer {
+  filter: invert(90%) hue-rotate(180deg);
+}
 .pdfexplore-overlay-host {
   position: absolute;
   inset: 0;
@@ -471,8 +497,51 @@ html, body {
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.52);
   opacity: 0.98;
 }
+.pdfexplore-highlight-indicator-rail {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 12px;
+  height: 1px;
+  pointer-events: auto;
+  z-index: 2147483645;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 999px;
+}
+.pdfexplore-highlight-indicator {
+  position: absolute;
+  left: 1px;
+  width: 9px;
+  min-height: 7px;
+  border-radius: 999px;
+  pointer-events: auto;
+  cursor: pointer;
+  background: ${PERSISTENT_HIGHLIGHT_MARKER_COLOR};
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.44);
+  opacity: 0.98;
+}
+.pdfexplore-highlight-indicator.important {
+  background: ${PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR};
+}
+.pdfexplore-highlight-indicator:hover {
+  filter: brightness(1.1);
+}
 `;
     document.head.appendChild(style);
+  }
+
+  function isDarkModeActive() {
+    return Boolean(state.darkModeActive);
+  }
+
+  function setDarkMode(enabled) {
+    state.darkModeActive = Boolean(enabled);
+    document.documentElement.classList.toggle(
+      "pdfexplore-dark-mode",
+      state.darkModeActive,
+    );
+    return state.darkModeActive;
   }
 
   function ensureOverlayHost(pageEl) {
@@ -554,6 +623,329 @@ html, body {
     }
   }
 
+  function ensureHighlightIndicatorRail() {
+    let rail = document.querySelector("body > .pdfexplore-highlight-indicator-rail");
+    if (!rail) {
+      rail = document.createElement("div");
+      rail.className = "pdfexplore-highlight-indicator-rail";
+      document.body.appendChild(rail);
+    }
+    syncHighlightIndicatorRailBounds(rail);
+    return rail;
+  }
+
+  // The left highlight rail mirrors the right search rail against the active
+  // pdf.js scroll host so both gutters stay aligned in every layout mode.
+  function syncHighlightIndicatorRailBounds(rail) {
+    const targetRail = rail || document.querySelector("body > .pdfexplore-highlight-indicator-rail");
+    if (!targetRail) {
+      return;
+    }
+    const container = primaryScrollContainer();
+    const metrics = scrollHostMetrics(container);
+    const leftGap = 4;
+    let left = leftGap;
+    let top = 0;
+    let height = Math.max(1, Math.round(window.innerHeight || 1));
+    if (metrics) {
+      const rect = metrics.rect;
+      const hasUsableRect = rect.width > 20 && rect.height > 20;
+      if (hasUsableRect) {
+        const topPadding = 8;
+        const bottomPadding = 8;
+        left = Math.max(0, Math.round(rect.left + leftGap));
+        top = Math.max(0, Math.round(rect.top + topPadding));
+        height = Math.max(
+          1,
+          Math.round((metrics.clientHeight || rect.height) - topPadding - bottomPadding),
+        );
+      }
+    }
+    targetRail.style.left = `${left}px`;
+    targetRail.style.top = `${top}px`;
+    targetRail.style.height = `${height}px`;
+  }
+
+  function clearHighlightIndicators() {
+    const rail = document.querySelector("body > .pdfexplore-highlight-indicator-rail");
+    if (rail) {
+      rail.remove();
+    }
+  }
+
+  function tryCenterOnRenderedPersistentHighlight(pageNumber, highlightId) {
+    const container = primaryScrollContainer();
+    if (!container || !Number.isFinite(pageNumber) || pageNumber <= 0) {
+      return false;
+    }
+    const pageEl = document.querySelector(`#viewer .page[data-page-number="${pageNumber}"]`);
+    if (!pageEl) {
+      return false;
+    }
+    const targetRects = Array.from(
+      pageEl.querySelectorAll(".pdfexplore-highlight-rect[data-highlight-id]")
+    ).filter((node) => String(node.dataset.highlightId || "") === String(highlightId || ""));
+    if (!targetRects.length) {
+      return false;
+    }
+    const metrics = scrollHostMetrics(container);
+    const renderedRects = targetRects
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => rect && rect.width > 0 && rect.height > 0);
+    if (!renderedRects.length) {
+      return false;
+    }
+    const targetTop = Math.min(...renderedRects.map((rect) => Number(rect.top || 0)));
+    const targetBottom = Math.max(...renderedRects.map((rect) => Number(rect.bottom || 0)));
+    const targetCenter = (targetTop + targetBottom) * 0.5;
+    const absoluteCenter = metrics.scrollTop + (targetCenter - metrics.rect.top);
+    const desiredTop = Math.max(0, absoluteCenter - (metrics.clientHeight * 0.5));
+    setScrollTopForHost(container, desiredTop);
+    return true;
+  }
+
+  function scrollRenderedPageIntoPrimaryHost(pageNumber) {
+    const container = primaryScrollContainer();
+    if (!container || !Number.isFinite(pageNumber) || pageNumber <= 0) {
+      return false;
+    }
+    const pageEl = document.querySelector(`#viewer .page[data-page-number="${pageNumber}"]`);
+    if (!pageEl) {
+      return false;
+    }
+    const metrics = scrollHostMetrics(container);
+    const pageRect = pageEl.getBoundingClientRect();
+    if (!pageRect || pageRect.height <= 0) {
+      return false;
+    }
+    const absoluteTop = metrics.scrollTop + (pageRect.top - metrics.rect.top);
+    const desiredTop = Math.max(0, absoluteTop - (metrics.clientHeight * 0.08));
+    setScrollTopForHost(container, desiredTop);
+    return true;
+  }
+
+  function synchronizeActivePageNumber(pageNumber) {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer || !Number.isFinite(pageNumber) || pageNumber <= 0) {
+      return;
+    }
+    if (Number(currentViewer.currentPageNumber || 0) !== pageNumber) {
+      try {
+        currentViewer.currentPageNumber = pageNumber;
+      } catch (_error) {
+        // A later scroll/render retry will synchronize the page number.
+      }
+    }
+    if (Number(currentApp.page || 0) !== pageNumber && "page" in currentApp) {
+      try {
+        currentApp.page = pageNumber;
+      } catch (_error) {
+        // A later scroll/render retry will synchronize the page number.
+      }
+    }
+  }
+
+  function jumpToPersistentHighlightTarget(target) {
+    if (!target || typeof target !== "object") {
+      return;
+    }
+    const pageNumber = Number.parseInt(target.pageNumber, 10);
+    const highlightId = String(target.highlightId || "");
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (currentApp && currentViewer && Number.isFinite(pageNumber) && pageNumber > 0) {
+      applyPageState(currentApp, currentViewer, pageNumber);
+    }
+    scrollRenderedPageIntoPrimaryHost(pageNumber);
+    synchronizeActivePageNumber(pageNumber);
+    scheduleRefresh();
+    const tryFocus = () => {
+      if (tryCenterOnRenderedPersistentHighlight(pageNumber, highlightId)) {
+        synchronizeActivePageNumber(pageNumber);
+        return true;
+      }
+      scrollRenderedPageIntoPrimaryHost(pageNumber);
+      synchronizeActivePageNumber(pageNumber);
+      scheduleRefresh();
+      return false;
+    };
+    window.requestAnimationFrame(tryFocus);
+    for (const delay of [80, 220, 500, 1000, 1800]) {
+      window.setTimeout(tryFocus, delay);
+    }
+  }
+
+  function persistentHighlightIndicatorEntries() {
+    const currentViewer = viewer();
+    const currentApp = app();
+    const pagesCount = Number(
+      (currentViewer && currentViewer.pagesCount)
+      || (currentApp && currentApp.pagesCount)
+      || 0
+    );
+    if (!Number.isFinite(pagesCount) || pagesCount <= 0) {
+      return [];
+    }
+    const entries = Array.isArray(state.persistentEntries) ? state.persistentEntries : [];
+    const indicatorEntries = [];
+    for (const entry of entries) {
+      const pageNumber = Number.parseInt(entry && entry.page, 10);
+      const start = Number.parseInt(entry && entry.start, 10);
+      const end = Number.parseInt(entry && entry.end, 10);
+      const highlightId = String(entry && entry.id ? entry.id : "").trim();
+      if (
+        !Number.isFinite(pageNumber)
+        || pageNumber <= 0
+        || pageNumber > pagesCount
+        || !Number.isFinite(start)
+        || !Number.isFinite(end)
+        || end <= start
+        || !highlightId
+      ) {
+        continue;
+      }
+
+      let intraStart = 0.47;
+      let intraEnd = 0.53;
+      const pageEl = document.querySelector(`#viewer .page[data-page-number="${pageNumber}"]`);
+      if (pageEl) {
+        const matchingRects = Array.from(
+          pageEl.querySelectorAll(".pdfexplore-highlight-rect[data-highlight-id]")
+        ).filter((node) => String(node.dataset.highlightId || "") === highlightId);
+        const pageRect = pageEl.getBoundingClientRect();
+        const pageHeight = Math.max(1, Number(pageRect.height || pageEl.clientHeight || 1));
+        const renderedRects = matchingRects
+          .map((node) => node.getBoundingClientRect())
+          .filter((rect) => rect && rect.width > 0 && rect.height > 0);
+        if (renderedRects.length) {
+          const minTop = Math.min(...renderedRects.map((rect) => Number(rect.top || 0)));
+          const maxBottom = Math.max(...renderedRects.map((rect) => Number(rect.bottom || 0)));
+          intraStart = Math.max(0, Math.min(1, (minTop - pageRect.top) / pageHeight));
+          intraEnd = Math.max(intraStart, Math.min(1, (maxBottom - pageRect.top) / pageHeight));
+        } else {
+          const index = pageIndex(pageEl);
+          const textLength = Number(index && index.text ? index.text.length : 0);
+          if (textLength > 0) {
+            intraStart = Math.max(0, Math.min(1, start / textLength));
+            intraEnd = Math.max(intraStart, Math.min(1, end / textLength));
+          }
+        }
+      }
+
+      const minimumIntraSpan = Math.min(0.08, Math.max(0.012, 1 / (pagesCount * 30)));
+      if (intraEnd - intraStart < minimumIntraSpan) {
+        const center = (intraStart + intraEnd) * 0.5;
+        intraStart = Math.max(0, center - (minimumIntraSpan * 0.5));
+        intraEnd = Math.min(1, intraStart + minimumIntraSpan);
+      }
+      const ratioStart = ((pageNumber - 1) + intraStart) / pagesCount;
+      const ratioEnd = ((pageNumber - 1) + intraEnd) / pagesCount;
+      indicatorEntries.push({
+        ratioStart: Math.max(0, Math.min(1, ratioStart)),
+        ratioEnd: Math.max(0, Math.min(1, ratioEnd)),
+        pageNumber,
+        highlightId,
+        kind: String(entry && entry.kind || "").toLowerCase() === "important"
+          ? "important"
+          : "normal",
+      });
+    }
+    return indicatorEntries;
+  }
+
+  function refreshPersistentHighlightIndicators() {
+    const entries = persistentHighlightIndicatorEntries();
+    if (!entries.length) {
+      clearHighlightIndicators();
+      return;
+    }
+    const rail = ensureHighlightIndicatorRail();
+    if (!rail) {
+      return;
+    }
+    syncHighlightIndicatorRailBounds(rail);
+    while (rail.firstChild) {
+      rail.removeChild(rail.firstChild);
+    }
+    const railHeight = Math.max(1, rail.clientHeight || rail.getBoundingClientRect().height || 1);
+    const maxPixel = Math.max(0, railHeight - 1);
+    const positions = entries
+      .map((entry) => {
+        const top = Math.max(0, Math.min(maxPixel, Math.round(entry.ratioStart * maxPixel)));
+        const bottom = Math.max(top + 5, Math.min(railHeight, Math.round(entry.ratioEnd * maxPixel)));
+        return {
+          top,
+          bottom,
+          center: (top + bottom) * 0.5,
+          target: entry,
+        };
+      })
+      .sort((left, right) => left.top - right.top);
+    const merged = [];
+    for (const item of positions) {
+      const previous = merged.length ? merged[merged.length - 1] : null;
+      if (
+        previous
+        && previous.kind === item.target.kind
+        && item.top <= previous.bottom + 2
+      ) {
+        previous.bottom = Math.max(previous.bottom, item.bottom);
+        previous.targets.push(item);
+        continue;
+      }
+      merged.push({
+        top: item.top,
+        bottom: item.bottom,
+        kind: item.target.kind,
+        targets: [item],
+      });
+    }
+
+    for (const item of merged) {
+      const node = document.createElement("div");
+      node.className = `pdfexplore-highlight-indicator ${item.kind}`;
+      node.style.top = `${item.top}px`;
+      node.style.height = `${Math.max(7, item.bottom - item.top)}px`;
+      if (item.targets.length) {
+        const primary = item.targets[Math.floor(item.targets.length / 2)].target;
+        node.dataset.pageNumber = String(primary.pageNumber);
+        node.dataset.highlightId = String(primary.highlightId);
+        node.dataset.highlightKind = String(primary.kind);
+      }
+      const activateMarker = (event) => {
+        if (typeof event.button === "number" && event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        const railRect = rail.getBoundingClientRect();
+        const clickY = Number.isFinite(event.clientY)
+          ? event.clientY - railRect.top
+          : (item.top + item.bottom) * 0.5;
+        const candidate = item.targets.reduce((best, next) => {
+          if (!best) {
+            return next;
+          }
+          return Math.abs(next.center - clickY) < Math.abs(best.center - clickY)
+            ? next
+            : best;
+        }, null);
+        if (candidate && candidate.target) {
+          jumpToPersistentHighlightTarget(candidate.target);
+        }
+      };
+      node.addEventListener("mousedown", activateMarker);
+      node.addEventListener("pointerdown", activateMarker);
+      node.addEventListener("click", activateMarker);
+      rail.appendChild(node);
+    }
+    window.requestAnimationFrame(() => syncHighlightIndicatorRailBounds(rail));
+  }
+
   function clearSearchIndicatorBuildState() {
     state.searchIndicatorBuildId += 1;
     state.searchIndicatorSignature = "";
@@ -585,7 +977,7 @@ html, body {
     // Resume after the interaction settles so pdf.js can prioritize navigation/rendering work.
     state.searchIndicatorResumeHandle = window.setTimeout(() => {
       state.searchIndicatorResumeHandle = 0;
-      scheduleSearchIndicatorBuild(state.searchTerms);
+      scheduleSearchIndicatorBuild(state.searchTerms, state.nearTermGroups);
     }, SEARCH_INDICATOR_RESUME_DELAY_MS);
   }
 
@@ -595,8 +987,8 @@ html, body {
     }
     return rawTerms
       .map((entry) => {
-        const text = String(entry && entry.text ? entry.text : "").trim();
-        if (!text) {
+        const text = String(entry && entry.text ? entry.text : "");
+        if (!text.trim()) {
           return null;
         }
         return {
@@ -607,21 +999,287 @@ html, body {
       .filter((entry) => !!entry);
   }
 
-  function searchTermMatchers(rawTerms) {
-    const terms = normalizedSearchTerms(rawTerms);
-    return terms
-      .map((term) => {
-        const text = String(term.text || "");
-        if (!text) {
-          return null;
+  function normalizedNearTermGroups(rawGroups) {
+    if (!Array.isArray(rawGroups)) {
+      return [];
+    }
+    return rawGroups
+      .map((group) => normalizedSearchTerms(group))
+      .filter((group) => group.length >= 2);
+  }
+
+  function escapeSearchTermText(input) {
+    return Array.from(String(input || ""), (character) => {
+      if (/['\u2018\u2019\u02bc]/u.test(character)) {
+        return "['\\u2018\\u2019\\u02bc]";
+      }
+      return escapeRegExp(character);
+    }).join("");
+  }
+
+  function shouldUseNearWordBoundaries(termText) {
+    return (
+      typeof termText === "string"
+      && Boolean(termText)
+      && !/\s/u.test(termText)
+      && /^\w+$/u.test(termText)
+    );
+  }
+
+  function buildSearchTermPattern(termText, caseSensitive, enforceWordBoundaries = false) {
+    const raw = String(termText || "");
+    const leadingSpaceMatch = raw.match(/^ +/);
+    const trailingSpaceMatch = raw.match(/ +$/);
+    const leadingSpaceCount = leadingSpaceMatch ? leadingSpaceMatch[0].length : 0;
+    const trailingSpaceCount = trailingSpaceMatch ? trailingSpaceMatch[0].length : 0;
+    const useLeadingBoundarySpace = leadingSpaceCount === 1;
+    const useTrailingBoundarySpace = trailingSpaceCount === 1;
+    const leftTrim = useLeadingBoundarySpace ? 1 : 0;
+    const rightTrim = useTrailingBoundarySpace ? 1 : 0;
+    const core = useLeadingBoundarySpace || useTrailingBoundarySpace
+      ? raw.slice(leftTrim, rightTrim ? raw.length - rightTrim : raw.length)
+      : raw;
+    let source = escapeSearchTermText(core || raw);
+    if (core && useLeadingBoundarySpace) {
+      source = `(?:^|(?<=[^\\w]))${source}`;
+    }
+    if (core && useTrailingBoundarySpace) {
+      source = `${source}(?=$|(?=[^\\w]))`;
+    }
+    if (
+      enforceWordBoundaries
+      && !useLeadingBoundarySpace
+      && !useTrailingBoundarySpace
+      && shouldUseNearWordBoundaries(core)
+    ) {
+      source = `(?<!\\w)${source}(?!\\w)`;
+    }
+    return new RegExp(source, caseSensitive ? "g" : "gi");
+  }
+
+  function upperBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (values[middle] <= target) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low;
+  }
+
+  function collectNearFocusWindows(content, rawGroups) {
+    const groups = normalizedNearTermGroups(rawGroups);
+    if (!content || !groups.length) {
+      return [];
+    }
+    const words = [];
+    const wordPattern = /\S+/g;
+    let wordMatch = null;
+    while ((wordMatch = wordPattern.exec(content)) !== null) {
+      words.push({ start: wordMatch.index, end: wordMatch.index + wordMatch[0].length });
+      if (wordPattern.lastIndex <= wordMatch.index) {
+        wordPattern.lastIndex = wordMatch.index + 1;
+      }
+    }
+    if (!words.length) {
+      return [];
+    }
+    const wordStarts = words.map((item) => item.start);
+
+    function earliestWindowForGroup(group, minimumStartChar) {
+      const occurrencesByTerm = Array.from({ length: group.length }, () => []);
+      for (let termIndex = 0; termIndex < group.length; termIndex += 1) {
+        const term = group[termIndex];
+        const pattern = buildSearchTermPattern(term.text, term.caseSensitive, true);
+        let match = null;
+        while ((match = pattern.exec(content)) !== null) {
+          const startChar = match.index;
+          const endChar = startChar + match[0].length;
+          if (startChar >= minimumStartChar) {
+            const startWord = upperBound(wordStarts, startChar) - 1;
+            const endProbe = endChar > startChar ? endChar - 1 : startChar;
+            const endWord = Math.max(startWord, upperBound(wordStarts, endProbe) - 1);
+            if (startWord >= 0) {
+              occurrencesByTerm[termIndex].push({
+                startWord,
+                endWord,
+                start: startChar,
+                end: endChar,
+              });
+            }
+          }
+          if (pattern.lastIndex <= startChar) {
+            pattern.lastIndex = startChar + 1;
+          }
         }
-        const caseSensitive = Boolean(term.caseSensitive);
-        return {
-          caseSensitive,
-          needle: caseSensitive ? text : text.toLocaleLowerCase(),
-        };
-      })
-      .filter((entry) => !!entry);
+      }
+      if (occurrencesByTerm.some((occurrences) => !occurrences.length)) {
+        return null;
+      }
+      const orderedTerms = occurrencesByTerm
+        .map((occurrences, termIndex) => ({ termIndex, count: occurrences.length }))
+        .sort((left, right) => left.count - right.count)
+        .map((entry) => entry.termIndex);
+      let best = null;
+
+      const search = (
+        orderIndex,
+        usedStarts,
+        minimumStartWord,
+        maximumEndWord,
+        minimumStart,
+        maximumEnd,
+      ) => {
+        if (orderIndex >= orderedTerms.length) {
+          if (
+            minimumStartWord === null
+            || maximumEndWord === null
+            || minimumStart === null
+            || maximumEnd === null
+          ) {
+            return;
+          }
+          const span = maximumEndWord - minimumStartWord;
+          if (
+            !best
+            || minimumStart < best.startChar
+            || (
+              minimumStart === best.startChar
+              && (span < best.span || (span === best.span && maximumEnd < best.endChar))
+            )
+          ) {
+            best = {
+              span,
+              startChar: minimumStart,
+              endChar: maximumEnd,
+              terms: group,
+            };
+          }
+          return;
+        }
+        const termIndex = orderedTerms[orderIndex];
+        for (const occurrence of occurrencesByTerm[termIndex]) {
+          if (usedStarts.has(occurrence.start)) {
+            continue;
+          }
+          const nextMinimumStartWord = minimumStartWord === null
+            ? occurrence.startWord
+            : Math.min(minimumStartWord, occurrence.startWord);
+          const nextMaximumEndWord = maximumEndWord === null
+            ? occurrence.endWord
+            : Math.max(maximumEndWord, occurrence.endWord);
+          const span = nextMaximumEndWord - nextMinimumStartWord;
+          if (span > NEAR_WORD_GAP) {
+            continue;
+          }
+          const nextMinimumStart = minimumStart === null
+            ? occurrence.start
+            : Math.min(minimumStart, occurrence.start);
+          const nextMaximumEnd = maximumEnd === null
+            ? occurrence.end
+            : Math.max(maximumEnd, occurrence.end);
+          if (
+            best
+            && (
+              nextMinimumStart > best.startChar
+              || (nextMinimumStart === best.startChar && span > best.span)
+            )
+          ) {
+            continue;
+          }
+          usedStarts.add(occurrence.start);
+          search(
+            orderIndex + 1,
+            usedStarts,
+            nextMinimumStartWord,
+            nextMaximumEndWord,
+            nextMinimumStart,
+            nextMaximumEnd,
+          );
+          usedStarts.delete(occurrence.start);
+        }
+      };
+      search(0, new Set(), null, null, null, null);
+      return best;
+    }
+
+    const windows = [];
+    for (const group of groups) {
+      let minimumStartChar = 0;
+      while (true) {
+        const candidate = earliestWindowForGroup(group, minimumStartChar);
+        if (!candidate) {
+          break;
+        }
+        windows.push(candidate);
+        minimumStartChar = Math.max(minimumStartChar + 1, candidate.endChar);
+      }
+    }
+    windows.sort((left, right) => (
+      (left.startChar - right.startChar)
+      || (left.span - right.span)
+      || (left.endChar - right.endChar)
+    ));
+    return windows;
+  }
+
+  function searchRangesForText(content, rawTerms, rawNearGroups) {
+    if (!content) {
+      return [];
+    }
+    const terms = normalizedSearchTerms(rawTerms);
+    const nearGroups = normalizedNearTermGroups(rawNearGroups);
+    const windows = nearGroups.length ? collectNearFocusWindows(content, nearGroups) : [];
+    if (nearGroups.length && !windows.length) {
+      return [];
+    }
+    const ranges = [];
+    const sources = windows.length
+      ? windows.map((windowEntry) => ({
+          terms: windowEntry.terms,
+          start: windowEntry.startChar,
+          end: windowEntry.endChar,
+          enforceBoundaries: true,
+        }))
+      : [{ terms, start: 0, end: content.length, enforceBoundaries: false }];
+    for (const source of sources) {
+      for (const term of source.terms) {
+        const pattern = buildSearchTermPattern(
+          term.text,
+          term.caseSensitive,
+          source.enforceBoundaries,
+        );
+        let match = null;
+        while ((match = pattern.exec(content)) !== null) {
+          const start = match.index;
+          const end = start + match[0].length;
+          if (start >= source.start && end <= source.end && end > start) {
+            ranges.push({ start, end });
+          }
+          if (pattern.lastIndex <= start) {
+            pattern.lastIndex = start + 1;
+          }
+        }
+      }
+    }
+    ranges.sort((left, right) => (
+      (left.start - right.start)
+      || ((right.end - right.start) - (left.end - left.start))
+    ));
+    const deduped = [];
+    let lastEnd = -1;
+    for (const range of ranges) {
+      if (range.start < lastEnd) {
+        continue;
+      }
+      deduped.push(range);
+      lastEnd = range.end;
+    }
+    return deduped;
   }
 
   function currentSearchDocumentKey() {
@@ -648,47 +1306,17 @@ html, body {
 
   // A signature keys marker entries to document identity + normalized terms.
   // Matching signatures let us reuse built entries and avoid needless rebuilds.
-  function currentSearchIndicatorSignature(terms) {
+  function currentSearchIndicatorSignature(terms, nearGroups) {
     const normalizedTerms = normalizedSearchTerms(terms);
     if (!normalizedTerms.length) {
       return "";
     }
-    return `${currentSearchDocumentKey()}|${JSON.stringify(normalizedTerms)}`;
+    const normalizedNearGroups = normalizedNearTermGroups(nearGroups);
+    return `${currentSearchDocumentKey()}|${JSON.stringify(normalizedTerms)}|${JSON.stringify(normalizedNearGroups)}`;
   }
 
-  function countLiteralMatches(haystack, needle) {
-    if (!haystack || !needle) {
-      return 0;
-    }
-    let from = 0;
-    let count = 0;
-    while (from < haystack.length) {
-      const index = haystack.indexOf(needle, from);
-      if (index < 0) {
-        break;
-      }
-      count += 1;
-      from = index + 1;
-    }
-    return count;
-  }
-
-  function countPageMatches(pageText, matchers) {
-    if (!pageText || !Array.isArray(matchers) || !matchers.length) {
-      return 0;
-    }
-    let lowered = null;
-    let total = 0;
-    for (const matcher of matchers) {
-      if (!matcher || !matcher.needle) {
-        continue;
-      }
-      const haystack = matcher.caseSensitive
-        ? pageText
-        : (lowered || (lowered = pageText.toLocaleLowerCase()));
-      total += countLiteralMatches(haystack, matcher.needle);
-    }
-    return total;
+  function countPageMatches(pageText, terms, nearGroups) {
+    return searchRangesForText(pageText, terms, nearGroups).length;
   }
 
   function resetSearchTextCache(cacheKey) {
@@ -789,25 +1417,28 @@ html, body {
     if (currentApp && currentViewer && Number.isFinite(pageNumber) && pageNumber > 0) {
       applyPageState(currentApp, currentViewer, pageNumber);
     }
+    scrollRenderedPageIntoPrimaryHost(pageNumber);
+    synchronizeActivePageNumber(pageNumber);
     // Retry a few times because pdf.js may need a brief render delay before
     // search highlight rectangles exist on the target page.
     const tryFocus = () => {
       if (!Number.isFinite(pageNumber) || pageNumber <= 0) {
         return;
       }
-      tryCenterOnRenderedSearchHit(pageNumber, intraRatio);
-    };
-    window.requestAnimationFrame(() => {
-      if (tryCenterOnRenderedSearchHit(pageNumber, intraRatio)) {
-        return;
+      if (!tryCenterOnRenderedSearchHit(pageNumber, intraRatio)) {
+        scrollRenderedPageIntoPrimaryHost(pageNumber);
       }
-      window.setTimeout(() => {
-        if (tryCenterOnRenderedSearchHit(pageNumber, intraRatio)) {
-          return;
-        }
-        window.setTimeout(tryFocus, SEARCH_INDICATOR_CLICK_FINAL_RETRY_DELAY_MS);
-      }, SEARCH_INDICATOR_CLICK_RETRY_DELAY_MS);
-    });
+      synchronizeActivePageNumber(pageNumber);
+    };
+    window.requestAnimationFrame(tryFocus);
+    for (const delay of [
+      SEARCH_INDICATOR_CLICK_RETRY_DELAY_MS,
+      SEARCH_INDICATOR_CLICK_FINAL_RETRY_DELAY_MS,
+      1000,
+      1800,
+    ]) {
+      window.setTimeout(tryFocus, delay);
+    }
   }
 
   function renderedSearchIndicatorEntry(pageEl, rect) {
@@ -840,7 +1471,12 @@ html, body {
     };
   }
 
-  async function collectSearchIndicatorEntriesForTerms(terms, buildId, signature) {
+  async function collectSearchIndicatorEntriesForTerms(
+    terms,
+    nearGroups,
+    buildId,
+    signature,
+  ) {
     const currentApp = app();
     const currentViewer = viewer();
     const pdfDocument = currentApp && currentApp.pdfDocument ? currentApp.pdfDocument : null;
@@ -852,8 +1488,9 @@ html, body {
     if (!pdfDocument || !Number.isFinite(pagesCount) || pagesCount <= 0) {
       return [];
     }
-    const matchers = searchTermMatchers(terms);
-    if (!matchers.length) {
+    const normalizedTerms = normalizedSearchTerms(terms);
+    const normalizedNearGroups = normalizedNearTermGroups(nearGroups);
+    if (!normalizedTerms.length) {
       return [];
     }
 
@@ -887,7 +1524,11 @@ html, body {
       const batch = await Promise.all(
         pageNumbers.map(async (pageNumber) => {
           const pageText = await pageSearchText(pdfDocument, pageNumber, cacheKey);
-          const pageHitCount = countPageMatches(pageText, matchers);
+          const pageHitCount = countPageMatches(
+            pageText,
+            normalizedTerms,
+            normalizedNearGroups,
+          );
           return { pageNumber, pageHitCount };
         })
       );
@@ -943,14 +1584,18 @@ html, body {
     return entries;
   }
 
-  function scheduleSearchIndicatorBuild(terms) {
+  function scheduleSearchIndicatorBuild(terms, nearGroups) {
     const normalizedTerms = normalizedSearchTerms(terms);
+    const normalizedNearGroups = normalizedNearTermGroups(nearGroups);
     if (!normalizedTerms.length) {
       clearSearchIndicatorBuildState();
       clearSearchIndicators();
       return;
     }
-    const signature = currentSearchIndicatorSignature(normalizedTerms);
+    const signature = currentSearchIndicatorSignature(
+      normalizedTerms,
+      normalizedNearGroups,
+    );
     if (!signature) {
       clearSearchIndicatorBuildState();
       clearSearchIndicators();
@@ -972,7 +1617,12 @@ html, body {
     clearSearchIndicators();
 
     // Build asynchronously so paint/input can continue while markers appear.
-    collectSearchIndicatorEntriesForTerms(normalizedTerms, buildId, signature)
+    collectSearchIndicatorEntriesForTerms(
+      normalizedTerms,
+      normalizedNearGroups,
+      buildId,
+      signature,
+    )
       .then((entries) => {
         if (
           buildId !== state.searchIndicatorBuildId
@@ -1101,6 +1751,18 @@ html, body {
       node.addEventListener("pointerdown", activateMarker);
       node.addEventListener("click", activateMarker);
       rail.appendChild(node);
+    }
+    if (state.scrollToFirstSearchHit && state.searchIndicatorEntries.length) {
+      const firstTarget = state.searchIndicatorEntries.reduce((best, candidate) => {
+        if (!best) {
+          return candidate;
+        }
+        return Number(candidate.ratio) < Number(best.ratio) ? candidate : best;
+      }, null);
+      state.scrollToFirstSearchHit = false;
+      if (firstTarget) {
+        window.requestAnimationFrame(() => jumpToSearchIndicatorTarget(firstTarget));
+      }
     }
     window.requestAnimationFrame(() => syncSearchIndicatorRailBounds(rail));
   }
@@ -1296,11 +1958,13 @@ html, body {
         String(entry.id || ""),
       );
     }
+    refreshPersistentHighlightIndicators();
   }
 
   function refreshSearchHighlights() {
     clearOverlayClass("search");
     const terms = Array.isArray(state.searchTerms) ? state.searchTerms : [];
+    const nearGroups = Array.isArray(state.nearTermGroups) ? state.nearTermGroups : [];
     // Fallback entries come from currently rendered highlight rects. They allow
     // immediate marker feedback before full-text scanning completes.
     const renderedFallbackEntries = [];
@@ -1309,41 +1973,24 @@ html, body {
       clearSearchIndicators();
       return;
     }
-    scheduleSearchIndicatorBuild(terms);
+    scheduleSearchIndicatorBuild(terms, nearGroups);
     for (const pageEl of pageElements()) {
       const index = pageIndex(pageEl);
       if (!index || !index.text) {
         continue;
       }
-      for (const term of terms) {
-        const rawText = String(term && term.text ? term.text : "");
-        if (!rawText.trim()) {
-          continue;
-        }
-        const flags = term && term.caseSensitive ? "g" : "gi";
-        const pattern = new RegExp(escapeRegExp(rawText), flags);
-        let match = null;
-        while ((match = pattern.exec(index.text))) {
-          const start = match.index;
-          const end = start + match[0].length;
-          if (end <= start) {
-            pattern.lastIndex = start + 1;
-            continue;
-          }
-          const range = rangeForOffsets(pageEl, start, end);
-          if (range) {
-            const host = ensureOverlayHost(pageEl);
-            const rects = rectsForRange(pageEl, range, host);
-            paintRects(pageEl, rects, "search", "");
-            for (const rect of rects) {
-              const fallback = renderedSearchIndicatorEntry(pageEl, rect);
-              if (fallback) {
-                renderedFallbackEntries.push(fallback);
-              }
+      const ranges = searchRangesForText(index.text, terms, nearGroups);
+      for (const item of ranges) {
+        const range = rangeForOffsets(pageEl, item.start, item.end);
+        if (range) {
+          const host = ensureOverlayHost(pageEl);
+          const rects = rectsForRange(pageEl, range, host);
+          paintRects(pageEl, rects, "search", "");
+          for (const rect of rects) {
+            const fallback = renderedSearchIndicatorEntry(pageEl, rect);
+            if (fallback) {
+              renderedFallbackEntries.push(fallback);
             }
-          }
-          if (pattern.lastIndex <= start) {
-            pattern.lastIndex = start + 1;
           }
         }
       }
@@ -1412,6 +2059,7 @@ html, body {
       return false;
     }
     ensureInjectedStyle();
+    setDarkMode(state.darkModeActive);
     ensureObservers();
     if (!state.installed) {
       document.addEventListener("keydown", (event) => {
@@ -1460,16 +2108,18 @@ html, body {
           }
         }
         syncSearchIndicatorRailBounds();
-        if (state.threeUpActive) {
-          const currentAppForCenter = app();
-          const currentViewerForCenter = viewer();
-          const activeContainer = primaryScrollContainer();
-          if (currentAppForCenter && currentViewerForCenter && activeContainer) {
-            state.threeUpCenterPage = pageNearestViewportCenter(
-              currentAppForCenter,
-              currentViewerForCenter,
-              activeContainer
-            );
+        syncHighlightIndicatorRailBounds();
+        const currentAppForCenter = app();
+        const currentViewerForCenter = viewer();
+        const activeContainer = primaryScrollContainer();
+        if (currentAppForCenter && currentViewerForCenter && activeContainer) {
+          const centerPage = pageNearestViewportCenter(
+            currentAppForCenter,
+            currentViewerForCenter,
+            activeContainer
+          );
+          if (state.threeUpActive) {
+            state.threeUpCenterPage = centerPage;
           }
         }
         state.lastViewState = capturePersistedViewState();
@@ -1491,8 +2141,12 @@ html, body {
       }
       window.addEventListener("resize", () => {
         syncSearchIndicatorRailBounds();
+        syncHighlightIndicatorRailBounds();
         if (state.searchTerms.length) {
           refreshSearchIndicators(state.searchIndicatorEntries);
+        }
+        if (state.persistentEntries.length) {
+          refreshPersistentHighlightIndicators();
         }
       });
       state.installed = true;
@@ -1532,18 +2186,31 @@ html, body {
       return;
     }
     if (currentApp.pdfLinkService && typeof currentApp.pdfLinkService.goToPage === "function") {
-      currentApp.pdfLinkService.goToPage(page);
-      return;
-    }
-    if (typeof currentViewer.scrollPageIntoView === "function") {
-      currentViewer.scrollPageIntoView({ pageNumber: page });
-      return;
+      try {
+        currentApp.pdfLinkService.goToPage(page);
+      } catch (_error) {
+        // Continue through the direct viewer fallbacks below.
+      }
+    } else if (typeof currentViewer.scrollPageIntoView === "function") {
+      try {
+        currentViewer.scrollPageIntoView({ pageNumber: page });
+      } catch (_error) {
+        // Continue through the direct page-number fallbacks below.
+      }
     }
     if ("page" in currentApp) {
-      currentApp.page = page;
+      try {
+        currentApp.page = page;
+      } catch (_error) {
+        // pdf.js may reject a transient update while document state settles.
+      }
     }
     if ("currentPageNumber" in currentViewer) {
-      currentViewer.currentPageNumber = page;
+      try {
+        currentViewer.currentPageNumber = page;
+      } catch (_error) {
+        // The link-service call above remains the primary navigation path.
+      }
     }
   }
 
@@ -1951,6 +2618,9 @@ html, body {
 
   function setPersistentHighlights(entries) {
     state.persistentEntries = Array.isArray(entries) ? entries.slice() : [];
+    if (!state.persistentEntries.length) {
+      clearHighlightIndicators();
+    }
     scheduleRefresh();
     window.setTimeout(scheduleRefresh, 60);
     window.setTimeout(scheduleRefresh, 180);
@@ -1959,15 +2629,19 @@ html, body {
     return true;
   }
 
-  function setSearchTerms(terms) {
+  function setSearchTerms(terms, nearGroups = [], scrollToFirst = false) {
     state.searchTerms = Array.isArray(terms) ? terms.slice() : [];
-    scheduleSearchIndicatorBuild(state.searchTerms);
+    state.nearTermGroups = normalizedNearTermGroups(nearGroups);
+    state.scrollToFirstSearchHit = Boolean(scrollToFirst);
+    scheduleSearchIndicatorBuild(state.searchTerms, state.nearTermGroups);
     scheduleRefresh();
     return true;
   }
 
   function clearSearchTerms() {
     state.searchTerms = [];
+    state.nearTermGroups = [];
+    state.scrollToFirstSearchHit = false;
     clearSearchIndicatorBuildState();
     clearSearchIndicators();
     scheduleRefresh();
@@ -1977,6 +2651,8 @@ html, body {
   window.__pdfexploreBridge = {
     install,
     isReady,
+    isDarkModeActive,
+    setDarkMode,
     isThreeUpActive,
     toggleThreeUpMode,
     setOnePageZoom100,

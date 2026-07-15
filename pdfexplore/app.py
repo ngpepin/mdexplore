@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat as stat_module
 import subprocess
 import sys
 from threading import Lock
@@ -57,11 +58,14 @@ from mdexplore_app.icons import build_clear_x_icon, ui_asset_path
 from mdexplore_app.constants import (
     PREVIEW_PERSISTENT_HIGHLIGHT_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR,
+    PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR,
+    PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR,
     PREVIEW_ZOOM_MAX,
     PREVIEW_ZOOM_MIN,
     PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS,
     PREVIEW_ZOOM_RESET,
     PREVIEW_ZOOM_STEP,
+    SEARCH_CLOSE_WORD_GAP,
 )
 from mdexplore_app.runtime import (
     config_file_path as _shared_config_file_path,
@@ -71,13 +75,19 @@ from mdexplore_app.search import (
     compile_term_pattern,
     compile_match_hit_counter,
     compile_match_predicate,
+    extract_near_term_groups,
     extract_search_terms,
 )
 from mdexplore_app.tabs import ViewTabBar
 
 from .settings import APP_SETTINGS, VIEWER_BRIDGE_SETTINGS
 from .tree import ColorizedPdfModel, PdfTreeItemDelegate
-from .workers import PdfSearchWorker, PdfTextPrefetchWorker, PdfTreeMarkerScanWorker
+from .workers import (
+    PdfSearchWorker,
+    PdfTextCacheGcWorker,
+    PdfTextPrefetchWorker,
+    PdfTreeMarkerScanWorker,
+)
 
 
 def _app_setting(name: str, default):
@@ -168,6 +178,12 @@ class PdfExploreWindow(QMainWindow):
     PDF_TEXT_DISK_CACHE_MAX_FILES = int(_app_setting("pdf_text_disk_cache_max_files", 1200))
     PDF_TEXT_DISK_CACHE_MAX_BYTES = int(_app_setting("pdf_text_disk_cache_max_bytes", 384 * 1024 * 1024))
     PDF_TEXT_DISK_CACHE_TRIM_INTERVAL = int(_app_setting("pdf_text_disk_cache_trim_interval", 24))
+    PDF_TEXT_CACHE_GC_INTERVAL_SECONDS = float(
+        _app_setting("pdf_text_cache_gc_interval_seconds", 5.0)
+    )
+    PDF_TEXT_CACHE_GC_BATCH_SIZE = int(
+        _app_setting("pdf_text_cache_gc_batch_size", 128)
+    )
     PREFETCH_BATCH_SIZE = int(_app_setting("prefetch_batch_size", 1))
     PREFETCH_IDLE_SECONDS = float(_app_setting("prefetch_idle_seconds", 0.8))
     PREFETCH_HEAVY_USE_WINDOW_SECONDS = float(_app_setting("prefetch_heavy_use_window_seconds", 1.2))
@@ -223,6 +239,10 @@ class PdfExploreWindow(QMainWindow):
         self._pdf_text_disk_cache_lock = Lock()
         self._pdf_text_disk_cache_store_count = 0
         self._pdf_text_disk_cache_dir = self._build_pdf_text_disk_cache_dir()
+        self._last_pdf_text_cache_gc_at = time.monotonic()
+        self._pdf_text_cache_gc_memory_cursor = ""
+        self._pdf_text_cache_gc_disk_cursor = ""
+        self._active_pdf_text_cache_gc_worker: PdfTextCacheGcWorker | None = None
         self._prefetch_scope_key = ""
         self._prefetch_cursor = 0
         self._last_user_interaction_at = time.monotonic()
@@ -241,20 +261,33 @@ class PdfExploreWindow(QMainWindow):
         self._next_view_sequence = 1
         self._next_tab_color_index = 0
         self._pending_search_terms: list[tuple[str, bool]] = []
+        self._pending_search_scroll_to_first_path_keys: set[str] = set()
         self._visible_tree_pdf_cache: list[Path] = []
         self._visible_tree_pdf_cache_dirty = True
         self._visible_tree_pdf_cache_fetch_more_complete = False
         viewer_bridge_payload = VIEWER_BRIDGE_JS.read_text(encoding="utf-8")
+        viewer_bridge_settings = dict(VIEWER_BRIDGE_SETTINGS)
+        viewer_bridge_settings.setdefault("near_word_gap", SEARCH_CLOSE_WORD_GAP)
+        viewer_bridge_settings.setdefault(
+            "persistent_highlight_marker_color",
+            PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR,
+        )
+        viewer_bridge_settings.setdefault(
+            "persistent_highlight_important_marker_color",
+            PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR,
+        )
         self._viewer_bridge_source = (
-            f"window.__pdfexploreBridgeConfig = {json.dumps(VIEWER_BRIDGE_SETTINGS, ensure_ascii=False)};\n"
+            f"window.__pdfexploreBridgeConfig = {json.dumps(viewer_bridge_settings, ensure_ascii=False)};\n"
             + viewer_bridge_payload
         )
         self._preview_widgets_by_path: dict[str, QWebEngineView] = {}
         self._viewer_bridge_ready_by_path: dict[str, bool] = {}
         self._viewer_pending_restore_state_by_path: dict[str, dict | None] = {}
         self._preview_signatures_by_path: dict[str, tuple[int, int]] = {}
+        self._preview_dark_mode = False
         self._gpu_context_available = bool(gpu_context_available)
         self._global_shortcuts: list[QShortcut] = []
+        self._closing = False
 
         self.thread_pool = QThreadPool(self)
         # pypdf text extraction is Python-heavy; keeping search concurrency low
@@ -400,6 +433,10 @@ class PdfExploreWindow(QMainWindow):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_directory_view)
 
+        self.dark_mode_btn = QPushButton("Dark")
+        self.dark_mode_btn.setToolTip("Show PDFs with dark pages and light text")
+        self.dark_mode_btn.clicked.connect(self._toggle_preview_dark_mode)
+
         self.add_view_btn = QPushButton("Add View")
         self.add_view_btn.clicked.connect(self._add_document_view)
 
@@ -517,6 +554,7 @@ class PdfExploreWindow(QMainWindow):
         top_bar.addWidget(self.recent_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
+        top_bar.addWidget(self.dark_mode_btn)
         top_bar.addWidget(self.add_view_btn)
         top_bar.addWidget(self.edit_btn)
         top_bar.addWidget(self.path_label, 1)
@@ -893,6 +931,8 @@ class PdfExploreWindow(QMainWindow):
                 exists = cache_path.is_file()
             except Exception:
                 return False
+            if exists:
+                self._ensure_pdf_text_disk_cache_metadata_locked(cache_path, path_key)
         if exists and mark_cached_badge:
             self._record_cached_pdf_path_key(path_key)
         return exists
@@ -924,6 +964,47 @@ class PdfExploreWindow(QMainWindow):
         file_name = self._pdf_text_disk_cache_file_name(path_key, mtime_ns, size)
         return self._pdf_text_disk_cache_dir / file_name
 
+    @staticmethod
+    def _pdf_text_disk_cache_metadata_path(cache_path: Path) -> Path:
+        """Return the source-path metadata companion for a compressed entry."""
+        return cache_path.with_name(f"{cache_path.name}.meta.json")
+
+    def _ensure_pdf_text_disk_cache_metadata_locked(
+        self,
+        cache_path: Path,
+        path_key: str,
+    ) -> None:
+        """Atomically record which source PDF owns a disk-cache entry."""
+        metadata_path = self._pdf_text_disk_cache_metadata_path(cache_path)
+        try:
+            raw_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(raw_payload, dict)
+                and str(raw_payload.get("source_path", "")) == str(path_key)
+            ):
+                return
+        except Exception:
+            pass
+
+        temp_path = metadata_path.with_name(
+            f".{metadata_path.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+        )
+        try:
+            temp_path.write_text(
+                json.dumps(
+                    {"version": 1, "source_path": str(path_key)},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            temp_path.replace(metadata_path)
+        except Exception:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def _load_pdf_text_from_disk_cache(
         self,
         path_key: str,
@@ -945,10 +1026,14 @@ class PdfExploreWindow(QMainWindow):
             except Exception:
                 try:
                     cache_path.unlink(missing_ok=True)
+                    self._pdf_text_disk_cache_metadata_path(cache_path).unlink(
+                        missing_ok=True
+                    )
                 except Exception:
                     pass
                 return None
 
+            self._ensure_pdf_text_disk_cache_metadata_locked(cache_path, path_key)
             try:
                 os.utime(cache_path, None)
             except Exception:
@@ -988,6 +1073,7 @@ class PdfExploreWindow(QMainWindow):
                 continue
             try:
                 path.unlink(missing_ok=True)
+                self._pdf_text_disk_cache_metadata_path(path).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -1021,6 +1107,7 @@ class PdfExploreWindow(QMainWindow):
                     pass
                 return
 
+            self._ensure_pdf_text_disk_cache_metadata_locked(cache_path, path_key)
             self._pdf_text_disk_cache_store_count += 1
             if (
                 self._pdf_text_disk_cache_store_count
@@ -1028,14 +1115,208 @@ class PdfExploreWindow(QMainWindow):
             ) == 0:
                 self._trim_pdf_text_disk_cache_locked()
 
+    @staticmethod
+    def _pdf_source_definitely_missing(path_key: str) -> bool:
+        """Return true only when the filesystem definitively reports absence."""
+        try:
+            source_stat = Path(path_key).stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return not stat_module.S_ISREG(source_stat.st_mode)
+
+    def _snapshot_pdf_text_cache_gc_path_keys(self) -> list[str]:
+        """Snapshot source paths represented by memory entries or cache badges."""
+        with self._pdf_text_cache_lock:
+            path_keys = set(self._pdf_text_cache.keys())
+        with self._cached_pdf_path_keys_lock:
+            path_keys.update(self._cached_pdf_path_keys)
+        return sorted(path_keys)
+
+    def _apply_pdf_text_cache_gc_payload(self, payload: object) -> tuple[int, int]:
+        """Delete confirmed stale cache data under the appropriate locks."""
+        if not isinstance(payload, dict):
+            return 0, 0
+
+        missing_sources = {
+            str(value)
+            for value in payload.get("missing_memory_path_keys", [])
+            if value and self._pdf_source_definitely_missing(str(value))
+        }
+        disk_entries = payload.get("missing_disk_entries", [])
+        if not isinstance(disk_entries, list):
+            disk_entries = []
+
+        removed_disk_entries = 0
+        cache_dir = self._pdf_text_disk_cache_dir
+        with self._pdf_text_disk_cache_lock:
+            for entry in disk_entries:
+                if not isinstance(entry, dict):
+                    continue
+                source_path = str(entry.get("source_path", "")).strip()
+                cache_path = Path(str(entry.get("cache_path", "")))
+                metadata_path = Path(str(entry.get("metadata_path", "")))
+                if (
+                    not source_path
+                    or not self._pdf_source_definitely_missing(source_path)
+                    or cache_path.parent != cache_dir
+                    or metadata_path != self._pdf_text_disk_cache_metadata_path(cache_path)
+                ):
+                    continue
+                removed = False
+                try:
+                    removed = cache_path.is_file()
+                    cache_path.unlink(missing_ok=True)
+                    metadata_path.unlink(missing_ok=True)
+                except Exception:
+                    continue
+                if removed:
+                    removed_disk_entries += 1
+                missing_sources.add(source_path)
+
+            stale_metadata_paths = payload.get("stale_metadata_paths", [])
+            if isinstance(stale_metadata_paths, list):
+                for raw_path in stale_metadata_paths:
+                    metadata_path = Path(str(raw_path))
+                    if (
+                        metadata_path.parent != cache_dir
+                        or not metadata_path.name.endswith(".txt.gz.meta.json")
+                    ):
+                        continue
+                    try:
+                        metadata_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        removed_memory_entries = 0
+        if missing_sources:
+            with self._pdf_text_cache_lock:
+                for path_key in missing_sources:
+                    removed = self._pdf_text_cache.pop(path_key, None)
+                    if removed is None:
+                        continue
+                    self._pdf_text_cache_total_chars -= len(removed[2])
+                    removed_memory_entries += 1
+                self._pdf_text_cache_total_chars = max(
+                    0,
+                    self._pdf_text_cache_total_chars,
+                )
+
+            with self._cached_pdf_path_keys_lock:
+                previous_count = len(self._cached_pdf_path_keys)
+                self._cached_pdf_path_keys.difference_update(missing_sources)
+                if len(self._cached_pdf_path_keys) != previous_count:
+                    self._cached_pdf_path_keys_revision += 1
+
+        return removed_memory_entries, removed_disk_entries
+
+    def _maybe_start_pdf_text_cache_gc(self) -> bool:
+        """Start one bounded cache-GC pass when the app remains idle."""
+        if self._closing:
+            return False
+        if self._active_pdf_text_cache_gc_worker is not None:
+            return True
+        if self._active_prefetch_workers:
+            return False
+        now = time.monotonic()
+        if self._prefetch_temporarily_paused():
+            return False
+        if (now - self._last_user_interaction_at) < float(self.PREFETCH_IDLE_SECONDS):
+            return False
+        if (
+            self._search_scan_expected_workers > 0
+            and self._search_scan_completed_workers < self._search_scan_expected_workers
+        ):
+            return False
+        if (now - self._last_pdf_text_cache_gc_at) < max(
+            0.1,
+            float(self.PDF_TEXT_CACHE_GC_INTERVAL_SECONDS),
+        ):
+            return False
+
+        request_id = self._prefetch_request_id
+        worker = PdfTextCacheGcWorker(
+            request_id,
+            self._snapshot_pdf_text_cache_gc_path_keys(),
+            self._pdf_text_disk_cache_dir,
+            memory_cursor=self._pdf_text_cache_gc_memory_cursor,
+            disk_cursor=self._pdf_text_cache_gc_disk_cursor,
+            batch_size=max(1, int(self.PDF_TEXT_CACHE_GC_BATCH_SIZE)),
+            should_abort=lambda req=request_id: (
+                self._closing
+                or req != self._prefetch_request_id
+                or self._prefetch_temporarily_paused()
+                or (
+                    time.monotonic() - self._last_user_interaction_at
+                    < float(self.PREFETCH_IDLE_SECONDS)
+                )
+                or (
+                    self._search_scan_expected_workers > 0
+                    and self._search_scan_completed_workers
+                    < self._search_scan_expected_workers
+                )
+            ),
+        )
+        self._last_pdf_text_cache_gc_at = now
+        self._active_pdf_text_cache_gc_worker = worker
+        worker.signals.finished.connect(self._on_pdf_text_cache_gc_finished)
+        self._prefetch_pool.start(worker, -2)
+        return True
+
+    def _on_pdf_text_cache_gc_finished(
+        self,
+        request_id: int,
+        payload: object,
+        _error_text: str,
+    ) -> None:
+        """Apply one worker result and return the idle pool to prefetching."""
+        worker = self._active_pdf_text_cache_gc_worker
+        if worker is not None and worker.request_id == request_id:
+            self._active_pdf_text_cache_gc_worker = None
+        if isinstance(payload, dict):
+            self._pdf_text_cache_gc_memory_cursor = str(
+                payload.get("memory_cursor", "") or ""
+            )
+            self._pdf_text_cache_gc_disk_cursor = str(
+                payload.get("disk_cursor", "") or ""
+            )
+        self._apply_pdf_text_cache_gc_payload(payload)
+        self._request_cached_badge_sync()
+        self._request_scope_prefetch()
+
     def _cancel_scope_prefetch(self) -> None:
         """Handle cancel scope prefetch."""
         self._prefetch_request_id += 1
+        gc_worker = self._active_pdf_text_cache_gc_worker
+        if gc_worker is not None:
+            try:
+                if self._prefetch_pool.tryTake(gc_worker):
+                    self._active_pdf_text_cache_gc_worker = None
+            except Exception:
+                pass
         self._prefetch_pool.clear()
 
     def _request_scope_prefetch(self) -> None:
         """Schedule one prefetch pass through the scope timer."""
+        if self._closing:
+            return
         self._scope_prefetch_timer.start()
+
+    def _request_next_pdf_text_cache_gc_check(self) -> None:
+        """Keep idle GC alive even when there is no prefetch work remaining."""
+        if self._closing:
+            return
+        interval_seconds = max(0.1, float(self.PDF_TEXT_CACHE_GC_INTERVAL_SECONDS))
+        remaining_seconds = max(
+            0.1,
+            interval_seconds - (time.monotonic() - self._last_pdf_text_cache_gc_at),
+        )
+        delay_ms = max(
+            int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS),
+            int(remaining_seconds * 1000),
+        )
+        self._scope_prefetch_timer.start(delay_ms)
 
     def _start_scope_prefetch(self) -> None:
         """Start one low-priority cache-warming batch for visible PDFs.
@@ -1062,8 +1343,16 @@ class PdfExploreWindow(QMainWindow):
             self._scope_prefetch_timer.start()
             return
 
+        if self._active_prefetch_workers:
+            self._scope_prefetch_timer.start()
+            return
+
+        if self._maybe_start_pdf_text_cache_gc():
+            return
+
         candidates = self._list_visible_pdf_files_in_tree()
         if not candidates:
+            self._request_next_pdf_text_cache_gc_check()
             return
 
         current_scope_key = self._path_key(self._highlight_scope_directory())
@@ -1117,6 +1406,7 @@ class PdfExploreWindow(QMainWindow):
         self._prefetch_cursor = cursor
         if not batch:
             self._request_cached_badge_sync()
+            self._request_next_pdf_text_cache_gc_check()
             return
 
         self._cancel_scope_prefetch()
@@ -2375,6 +2665,7 @@ class PdfExploreWindow(QMainWindow):
         self._cancel_pending_search_scan()
         self.current_match_files = []
         self._current_match_counts = {}
+        self._pending_search_scroll_to_first_path_keys.clear()
         self.model.clear_search_match_paths()
         self._sync_tree_markers_to_model()
         self.tree.viewport().update()
@@ -2385,6 +2676,11 @@ class PdfExploreWindow(QMainWindow):
         """Handle current search terms."""
         query = self.match_input.text().strip()
         return extract_search_terms(query) if query else []
+
+    def _current_near_term_groups(self) -> list[list[tuple[str, bool]]]:
+        """Extract variadic NEAR(...) groups for in-view PDF highlighting."""
+        query = self.match_input.text().strip()
+        return extract_near_term_groups(query) if query else []
 
     def _is_path_in_current_matches(self, path: Path) -> bool:
         """Return whether path in current matches."""
@@ -2401,16 +2697,38 @@ class PdfExploreWindow(QMainWindow):
         ):
             return
         if self._is_path_in_current_matches(self.current_file):
-            self._highlight_viewer_search_terms(self._current_search_terms())
+            scroll_to_first = path_key in self._pending_search_scroll_to_first_path_keys
+            self._pending_search_scroll_to_first_path_keys.discard(path_key)
+            self._highlight_viewer_search_terms(
+                self._current_search_terms(),
+                scroll_to_first=scroll_to_first,
+            )
         else:
+            self._pending_search_scroll_to_first_path_keys.discard(path_key)
             self._remove_viewer_search_highlights()
 
-    def _highlight_viewer_search_terms(self, terms: list[tuple[str, bool]]) -> None:
+    def _highlight_viewer_search_terms(
+        self,
+        terms: list[tuple[str, bool]],
+        *,
+        scroll_to_first: bool = False,
+    ) -> None:
         """Handle highlight viewer search terms."""
         payload = [
             {"text": text, "caseSensitive": bool(case_sensitive)}
             for text, case_sensitive in terms
             if text.strip()
+        ]
+        near_groups_payload = [
+            [
+                {"text": text, "caseSensitive": bool(case_sensitive)}
+                for text, case_sensitive in group
+                if text.strip()
+            ]
+            for group in self._current_near_term_groups()
+        ]
+        near_groups_payload = [
+            group for group in near_groups_payload if len(group) >= 2
         ]
         self._pending_search_terms = terms
         path_key = self._current_preview_path_key()
@@ -2418,7 +2736,10 @@ class PdfExploreWindow(QMainWindow):
             return
         js = (
             "window.__pdfexploreBridge && "
-            f"window.__pdfexploreBridge.setSearchTerms({json.dumps(payload)});"
+            "window.__pdfexploreBridge.setSearchTerms && "
+            f"window.__pdfexploreBridge.setSearchTerms({json.dumps(payload)}, "
+            f"{json.dumps(near_groups_payload)}, "
+            f"{'true' if scroll_to_first else 'false'});"
         )
         self._run_viewer_js(js)
 
@@ -2700,6 +3021,31 @@ class PdfExploreWindow(QMainWindow):
             preview.page().runJavaScript(source)
             return
         preview.page().runJavaScript(source, callback)
+
+    def _apply_preview_dark_mode(self) -> None:
+        """Apply the current page-color mode to the visible PDF viewer."""
+        enabled = "true" if self._preview_dark_mode else "false"
+        self._run_viewer_js(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.setDarkMode && "
+            f"window.__pdfexploreBridge.setDarkMode({enabled});"
+        )
+
+    def _toggle_preview_dark_mode(self) -> None:
+        """Toggle the PDF preview between normal and dark page colors."""
+        self._preview_dark_mode = not self._preview_dark_mode
+        self.dark_mode_btn.setText("Light" if self._preview_dark_mode else "Dark")
+        self.dark_mode_btn.setToolTip(
+            "Show PDFs with normal page colors"
+            if self._preview_dark_mode
+            else "Show PDFs with dark pages and light text"
+        )
+        self._apply_preview_dark_mode()
+        self.statusBar().showMessage(
+            "Dark PDF mode enabled"
+            if self._preview_dark_mode
+            else "Normal PDF mode enabled",
+            2500,
+        )
 
     @staticmethod
     def _normalize_viewer_json_result(result) -> dict:
@@ -3553,6 +3899,7 @@ class PdfExploreWindow(QMainWindow):
         if not path_text:
             return
         path = Path(path_text)
+        previous_preview_path_key = self._current_preview_path_key()
         self.current_file = path
         self._update_edit_button_state()
         self._cancel_scope_prefetch()
@@ -3567,6 +3914,11 @@ class PdfExploreWindow(QMainWindow):
         self._update_window_title()
         self._current_text_highlights = self._load_text_highlights_for_path_key(self._path_key(path))
         path_key = self._path_key(path)
+        if (
+            previous_preview_path_key != path_key
+            and bool(self.match_input.text().strip())
+        ):
+            self._pending_search_scroll_to_first_path_keys.add(path_key)
         preview = self._preview_widget_for_path(path)
         self.preview_stack.setCurrentWidget(preview)
         wanted_state = data.get("state") if isinstance(data.get("state"), dict) else None
@@ -3586,6 +3938,7 @@ class PdfExploreWindow(QMainWindow):
                 "window.__pdfexploreBridge && window.__pdfexploreBridge.restoreViewState && "
                 f"window.__pdfexploreBridge.restoreViewState({json.dumps(restore_state)});"
             )
+            self._apply_preview_dark_mode()
             self._apply_persistent_text_highlights()
             self._apply_active_search_to_viewer()
             self._schedule_followup_view_restore(path_key, restore_state)
@@ -4315,6 +4668,7 @@ class PdfExploreWindow(QMainWindow):
                 "window.__pdfexploreBridge && window.__pdfexploreBridge.restoreViewState && "
                 f"window.__pdfexploreBridge.restoreViewState({json.dumps(restore_state)});"
             )
+            self._apply_preview_dark_mode()
             self._apply_persistent_text_highlights()
             self._apply_active_search_to_viewer()
             self._schedule_followup_view_restore(path_key, restore_state)
@@ -4799,6 +5153,9 @@ class PdfExploreWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """Handle closeEvent."""
+        self._closing = True
+        self._scope_prefetch_timer.stop()
+        self._cancel_scope_prefetch()
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index, blocking=True)
