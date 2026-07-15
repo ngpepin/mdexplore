@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
+from .file_coordination import update_files_sidecar
 from .icons import load_svg_icon, ui_asset_path
 from .runtime import search_hit_count_font_family
 
@@ -259,7 +260,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             color_map[path.name] = color_name
         else:
             color_map.pop(path.name, None)
-        self._save_directory_colors(directory)
+        self._save_directory_colors(directory, changed_names={path.name})
 
         index = self.index(str(path))
         if index.isValid():
@@ -564,19 +565,38 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._dir_color_map[key] = color_map
         return color_map
 
-    def _save_directory_colors(self, directory: Path) -> None:
+    def invalidate_persisted_color_cache(self) -> None:
+        """Forget sidecar snapshots so another process's changes are reloaded."""
+        self._loaded_dirs.clear()
+        self._dir_color_map.clear()
+
+    def _save_directory_colors(
+        self,
+        directory: Path,
+        *,
+        changed_names: set[str] | None = None,
+    ) -> None:
         key = self._directory_key(directory)
         color_map = self._dir_color_map.get(key, {})
         color_file = directory / self.COLOR_FILE_NAME
         try:
-            if color_map:
-                payload = {"files": dict(sorted(color_map.items()))}
-                color_file.write_text(
-                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-            elif color_file.exists():
-                color_file.unlink()
+            replace_all = changed_names is None
+            names = set(color_map) if changed_names is None else set(changed_names)
+            updates: dict[str, object | None] = {
+                name: color_map.get(name)
+                for name in names
+            }
+            committed = update_files_sidecar(
+                color_file,
+                updates,
+                replace_all=replace_all,
+            )
+            self._dir_color_map[key] = {
+                name: value
+                for name, value in committed.items()
+                if isinstance(name, str) and isinstance(value, str)
+            }
+            self._loaded_dirs.add(key)
         except Exception:
             pass
 

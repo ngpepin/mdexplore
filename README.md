@@ -36,6 +36,45 @@ same shell philosophy as `mdexplore`.
   overlay/index work during ordinary scrolling while preserving pdf.js's
   viewport-bounded scroll container and render virtualization.
 
+### Running Multiple pdfexplore Instances
+
+Multiple `pdfexplore` windows may run as separate OS processes, including on
+the same PDF tree.
+
+- Color, view-session, and persistent-highlight sidecars use stable companion
+  lock files and atomic replacement. A normal edit merges only the changed PDF
+  entry with the latest sidecar on disk, so simultaneous edits to different
+  PDFs are retained. Same-PDF highlight range edits are applied transactionally
+  to the latest committed list; same-PDF color/view-session values use
+  last-commit-wins semantics.
+- Failed transactional highlight writes leave the disk payload unchanged,
+  restore viewer/cache state from that payload, and report the save failure.
+- Config writes replay this instance's newly recorded recent-root events over
+  the latest on-disk history. The `default_root` is intentionally
+  last-successful-writer-wins, while a failed non-blocking lock attempt leaves
+  the existing config untouched for a later save attempt.
+- The extracted-text disk cache uses short shared/exclusive transactions for
+  opening entries, atomic commits, per-entry trimming, and garbage collection;
+  gzip decompression and quota scans run outside the global lock. Path-stable,
+  hash-striped producer locks also prevent two instances extracting the same
+  source concurrently, including across source-file replacements. Each commit
+  publishes a shared trim-dirty marker so any idle instance can enforce the
+  quota without relying on another process's in-memory counters. A shared activity
+  heartbeat is written asynchronously and coalesced, and its timestamp is
+  polled on a separate worker, so GUI input and idle schedulers never wait on
+  cache-directory I/O; it delays idle work when any instance is active. A
+  non-blocking background lease permits only one instance at a time to prefetch
+  or collect.
+- `pdfexplore.sh` serializes only virtual-environment/dependency bootstrap work
+  with `flock`; it releases that lock before Qt starts. PDF previews use Qt's
+  off-the-record WebEngine profile, avoiding a shared persistent Chromium
+  profile lock between processes.
+- Sidecar changes are not pushed live between windows. Use `Refresh` or `F5` to
+  invalidate disk-backed color/view/highlight snapshots, rescan markers, and
+  reload the current PDF's persisted highlights while preserving tree
+  expansion and selection where possible. A currently open window's live view
+  tabs remain authoritative until their normal save/switch lifecycle.
+
 Runtime settings are JSON-externalized:
 
 - global/shared settings: `mdexplore.settings.json`
@@ -71,6 +110,8 @@ module, but low-risk support code is now split into `mdexplore_app/`:
 - `mdexplore_app/templates.py`: extracted HTML template-asset registry/renderer for preview document shells.
 - `mdexplore_app/pdf.py`: PDF footer stamping, blank-page suppression, and PlantUML stderr formatting.
 - `mdexplore_app/icons.py`: icon loading/recoloring helpers.
+- `mdexplore_app/file_coordination.py`: stable advisory locks, atomic text-file
+  replacement, and merge-safe per-file sidecar updates shared with `pdfexplore`.
 - `mdexplore_app/tree.py`: markdown tree model and delegate (`ColorizedMarkdownModel`, `MarkdownTreeItemDelegate`).
 - `mdexplore_app/tabs.py`: custom multi-view tab bar (`ViewTabBar`).
 - `mdexplore_app/workers.py`: background worker classes for preview render, PlantUML, and PDF write/stamp steps.

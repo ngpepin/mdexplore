@@ -20,6 +20,76 @@ import stat as stat_module
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from mdexplore_app.file_coordination import advisory_file_lock
+
+
+BACKGROUND_LEASE_BUSY = "background-lease-busy"
+
+
+class GlobalActivityHeartbeatWorkerSignals(QObject):
+    """Signals emitted after one shared activity-stamp write attempt."""
+
+    finished = Signal(int)
+
+
+class GlobalActivityHeartbeatWorker(QRunnable):
+    """Touch the multi-instance activity stamp without blocking the GUI."""
+
+    def __init__(self, request_id: int, stamp_path: Path) -> None:
+        """Capture one immutable heartbeat write request."""
+        super().__init__()
+        self.request_id = int(request_id)
+        self.stamp_path = Path(stamp_path)
+        self.signals = GlobalActivityHeartbeatWorkerSignals()
+        self.setAutoDelete(False)
+
+    def run(self) -> None:
+        """Create/touch the stamp best-effort, then always report completion."""
+        try:
+            self.stamp_path.parent.mkdir(parents=True, exist_ok=True)
+            self.stamp_path.touch(exist_ok=True)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.signals.finished.emit(self.request_id)
+            except RuntimeError:
+                pass
+
+
+class GlobalActivityProbeWorkerSignals(QObject):
+    """Signals emitted after one shared activity-stamp read attempt."""
+
+    finished = Signal(int, object)
+
+
+class GlobalActivityProbeWorker(QRunnable):
+    """Read the multi-instance activity stamp without blocking the GUI."""
+
+    def __init__(self, request_id: int, stamp_path: Path) -> None:
+        """Capture one immutable heartbeat read request."""
+        super().__init__()
+        self.request_id = int(request_id)
+        self.stamp_path = Path(stamp_path)
+        self.signals = GlobalActivityProbeWorkerSignals()
+        self.setAutoDelete(False)
+
+    def run(self) -> None:
+        """Read the stamp mtime best-effort, then always report completion."""
+        observed_wall_time: float | None = None
+        try:
+            observed_wall_time = float(self.stamp_path.stat().st_mtime)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.signals.finished.emit(
+                    self.request_id,
+                    observed_wall_time,
+                )
+            except RuntimeError:
+                pass
+
 
 class PdfSearchWorkerSignals(QObject):
     """Signals emitted by PDF content-search workers.
@@ -159,6 +229,7 @@ class PdfTextPrefetchWorker(QRunnable):
         paths: list[Path],
         content_loader,
         should_abort=None,
+        lease_lock_path: Path | None = None,
     ) -> None:
         """Store immutable prefetch inputs used by `run`."""
         super().__init__()
@@ -166,10 +237,53 @@ class PdfTextPrefetchWorker(QRunnable):
         self.paths = list(paths)
         self.content_loader = content_loader
         self.should_abort = should_abort
+        self.lease_lock_path = (
+            Path(lease_lock_path) if lease_lock_path is not None else None
+        )
         self.signals = PdfTextPrefetchWorkerSignals()
 
     def run(self) -> None:
         """Execute best-effort cache warming for each candidate path."""
+        result: tuple[int, int, str] = (0, 0, "")
+        try:
+            if self.lease_lock_path is not None:
+                with advisory_file_lock(
+                    self.lease_lock_path,
+                    exclusive=True,
+                    blocking=False,
+                ) as acquired:
+                    if not acquired:
+                        result = (0, 0, BACKGROUND_LEASE_BUSY)
+                    else:
+                        result = self._run_paths()
+            else:
+                result = self._run_paths()
+        except Exception as exc:
+            # A lease-path mkdir/open/flock failure must not strand the owning
+            # window's active-worker bookkeeping.  Report it like any other
+            # worker failure and let the GUI decide when to retry.
+            result = (0, 0, str(exc))
+        self._emit_finished(*result)
+
+    def _emit_finished(
+        self,
+        prefetched_count: int,
+        skipped_count: int,
+        error_text: str,
+    ) -> None:
+        """Emit only after any cross-process background lease is released."""
+        try:
+            self.signals.finished.emit(
+                self.request_id,
+                prefetched_count,
+                skipped_count,
+                error_text,
+            )
+        except RuntimeError:
+            pass
+
+    def _run_paths(self) -> tuple[int, int, str]:
+        """Warm candidates while the optional cross-process lease is held."""
         try:
             prefetched_count = 0
             skipped_count = 0
@@ -185,14 +299,9 @@ class PdfTextPrefetchWorker(QRunnable):
                     skipped_count += 1
                 if callable(self.should_abort) and self.should_abort():
                     break
-            self.signals.finished.emit(
-                self.request_id,
-                prefetched_count,
-                skipped_count,
-                "",
-            )
+            return prefetched_count, skipped_count, ""
         except Exception as exc:
-            self.signals.finished.emit(self.request_id, 0, 0, str(exc))
+            return 0, 0, str(exc)
 
 
 class PdfTextCacheGcWorkerSignals(QObject):
@@ -222,6 +331,7 @@ class PdfTextCacheGcWorker(QRunnable):
         batch_size: int = 128,
         should_abort=None,
         payload_applier=None,
+        lease_lock_path: Path | None = None,
     ) -> None:
         """Store one bounded garbage-collection pass configuration."""
         super().__init__()
@@ -233,6 +343,9 @@ class PdfTextCacheGcWorker(QRunnable):
         self.batch_size = max(1, int(batch_size))
         self.should_abort = should_abort
         self.payload_applier = payload_applier
+        self.lease_lock_path = (
+            Path(lease_lock_path) if lease_lock_path is not None else None
+        )
         self.signals = PdfTextCacheGcWorkerSignals()
         self.setAutoDelete(False)
 
@@ -283,6 +396,28 @@ class PdfTextCacheGcWorker(QRunnable):
 
     def run(self) -> None:
         """Inspect a bounded memory/disk batch and emit deletion candidates."""
+        result: tuple[object, str] = ({}, "")
+        try:
+            if self.lease_lock_path is not None:
+                with advisory_file_lock(
+                    self.lease_lock_path,
+                    exclusive=True,
+                    blocking=False,
+                ) as acquired:
+                    if not acquired:
+                        result = ({}, BACKGROUND_LEASE_BUSY)
+                    else:
+                        result = self._run_with_lease()
+            else:
+                result = self._run_with_lease()
+        except Exception as exc:
+            # Always publish completion even when entering or leaving the
+            # optional cross-process lease fails.
+            result = ({}, str(exc))
+        self._emit_finished(*result)
+
+    def _run_with_lease(self) -> tuple[object, str]:
+        """Inspect and apply one batch while owning the maintenance lease."""
         payload = {
             "missing_memory_path_keys": [],
             "missing_disk_entries": [],
@@ -292,58 +427,78 @@ class PdfTextCacheGcWorker(QRunnable):
         }
         try:
             if self._aborted():
-                self._emit_finished(payload, "")
-                return
-            memory_batch, memory_cursor = self._rotating_batch(
+                return payload, ""
+            memory_batch, _memory_batch_end = self._rotating_batch(
                 self.memory_path_keys,
                 self.memory_cursor,
                 self.batch_size,
             )
-            payload["memory_cursor"] = memory_cursor
             for path_key in memory_batch:
                 if self._aborted():
                     break
                 if self._source_is_missing(path_key):
                     payload["missing_memory_path_keys"].append(path_key)
+                payload["memory_cursor"] = path_key
 
             if self._aborted():
-                self._emit_finished(payload, "")
-                return
-            metadata_paths: list[Path] = []
+                return payload, ""
+            metadata_names: list[str] = []
             try:
-                metadata_paths = list(
-                    self.disk_cache_dir.glob(f"*{self.METADATA_SUFFIX}")
-                )
+                with os.scandir(self.disk_cache_dir) as entries:
+                    for entry in entries:
+                        if self._aborted():
+                            return payload, ""
+                        if entry.name.endswith(self.METADATA_SUFFIX):
+                            metadata_names.append(entry.name)
+            except FileNotFoundError:
+                metadata_names = []
             except OSError:
-                metadata_paths = []
+                metadata_names = []
             if self._aborted():
-                self._emit_finished(payload, "")
-                return
-            metadata_names = [path.name for path in metadata_paths]
-            disk_batch, disk_cursor = self._rotating_batch(
+                return payload, ""
+            disk_batch, _disk_batch_end = self._rotating_batch(
                 metadata_names,
                 self.disk_cursor,
                 self.batch_size,
             )
-            payload["disk_cursor"] = disk_cursor
             if self._aborted():
-                self._emit_finished(payload, "")
-                return
+                return payload, ""
 
             for metadata_name in disk_batch:
                 if self._aborted():
                     break
+                # Once this entry starts, it is handled synchronously without
+                # another cancellation boundary, so advancing here records
+                # only work actually attempted rather than the batch tail.
+                payload["disk_cursor"] = metadata_name
                 metadata_path = self.disk_cache_dir / metadata_name
                 cache_name = metadata_name[: -len(".meta.json")]
                 cache_path = self.disk_cache_dir / cache_name
                 try:
-                    if not cache_path.is_file():
+                    cache_stat = cache_path.stat()
+                except FileNotFoundError:
+                    if metadata_path.is_file():
                         payload["stale_metadata_paths"].append(str(metadata_path))
-                        continue
-                    raw_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    continue
+                except OSError:
+                    continue
+                if not stat_module.S_ISREG(cache_stat.st_mode):
+                    payload["stale_metadata_paths"].append(str(metadata_path))
+                    continue
+                try:
+                    raw_text = metadata_path.read_text(encoding="utf-8")
                 except FileNotFoundError:
                     continue
-                except Exception:
+                except OSError:
+                    # Permission/transient I/O errors are not evidence that a
+                    # valid companion is stale.
+                    continue
+                except UnicodeError:
+                    payload["stale_metadata_paths"].append(str(metadata_path))
+                    continue
+                try:
+                    raw_payload = json.loads(raw_text)
+                except (json.JSONDecodeError, TypeError, ValueError):
                     payload["stale_metadata_paths"].append(str(metadata_path))
                     continue
                 source_path = str(
@@ -360,6 +515,12 @@ class PdfTextCacheGcWorker(QRunnable):
                             "source_path": source_path,
                             "cache_path": str(cache_path),
                             "metadata_path": str(metadata_path),
+                            "cache_identity": [
+                                int(cache_stat.st_dev),
+                                int(cache_stat.st_ino),
+                                int(cache_stat.st_mtime_ns),
+                                int(cache_stat.st_size),
+                            ],
                         }
                     )
             if not self._aborted() and callable(self.payload_applier):
@@ -369,9 +530,9 @@ class PdfTextCacheGcWorker(QRunnable):
                 )
                 payload["removed_memory_entries"] = int(removed_memory)
                 payload["removed_disk_entries"] = int(removed_disk)
-            self._emit_finished(payload, "")
+            return payload, ""
         except Exception as exc:
-            self._emit_finished(payload, str(exc))
+            return payload, str(exc)
 
 
 class PdfTreeMarkerScanWorkerSignals(QObject):

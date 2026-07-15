@@ -6,6 +6,7 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
 REQ_HASH_FILE="${VENV_DIR}/.requirements.sha256"
 LOG_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/pdfexplore"
+BOOTSTRAP_LOCK_FILE="${LOG_DIR}/bootstrap.lock"
 LOG_FILE="${LOG_DIR}/launcher.log"
 MAX_LOG_LINES=1000
 NON_INTERACTIVE=0
@@ -186,6 +187,14 @@ if [[ -z "${TARGET_PATH}" && ( -t 0 || -t 1 ) ]]; then
   fi
 fi
 
+# Only dependency/bootstrap mutation is serialized. The descriptor is released
+# before Qt starts, so any number of pdfexplore application instances may run.
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p "${LOG_DIR}"
+  exec 9>"${BOOTSTRAP_LOCK_FILE}"
+  flock 9
+fi
+
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "Creating virtual environment at ${VENV_DIR}..."
   python3 -m venv "${VENV_DIR}"
@@ -238,6 +247,11 @@ if ! runtime_import_check; then
   "${VENV_PYTHON}" -m pip install --disable-pip-version-check --upgrade --force-reinstall -r "${REQUIREMENTS_FILE}"
   printf '%s\n' "${current_hash}" > "${REQ_HASH_FILE}"
   runtime_import_check
+fi
+
+if command -v flock >/dev/null 2>&1; then
+  flock -u 9
+  exec 9>&-
 fi
 
 if [[ "${DEBUG_MODE}" == "true" ]]; then

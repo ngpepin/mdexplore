@@ -12,12 +12,12 @@
     "min_recent_root_dwell_seconds": 30.0,
     "config_default_root_key": "default_root",
     "config_recent_roots_key": "recent_roots",
-    "config_lock_stale_seconds": 120.0,
     "pdf_text_cache_max_entries": 768,
     "pdf_text_cache_max_chars": 201326592,
     "pdf_text_disk_cache_max_files": 8000,
     "pdf_text_disk_cache_max_bytes": 1610612736,
     "pdf_text_disk_cache_trim_interval": 240,
+    "pdf_text_disk_cache_touch_interval_seconds": 60.0,
     "pdf_text_cache_gc_interval_seconds": 30.0,
     "pdf_text_cache_gc_idle_seconds": 10.0,
     "pdf_text_cache_gc_batch_size": 128,
@@ -25,6 +25,8 @@
     "prefetch_batch_size": 1,
     "prefetch_idle_seconds": 10.0,
     "prefetch_batch_cooldown_seconds": 1.0,
+    "multi_instance_activity_touch_interval_seconds": 0.25,
+    "multi_instance_activity_probe_interval_seconds": 0.5,
     "prefetch_heavy_use_window_seconds": 1.2,
     "prefetch_heavy_use_event_threshold": 14,
     "prefetch_heavy_use_pause_seconds": 1.2,
@@ -92,7 +94,9 @@
     "search_indicator_concurrency_max": 4,
     "search_indicator_markers_per_page_max": 48,
     "search_indicator_yield_every_batches": 3,
-    "search_indicator_publish_interval_ms": 90
+    "search_indicator_publish_interval_ms": 90,
+    "persistent_highlight_fill_color": "rgba(102, 86, 178, 0.24)",
+    "persistent_highlight_important_fill_color": "rgba(225, 214, 255, 0.36)"
   },
   "tree": {
     "color_file_name": ".pdfexplore-colors.json",

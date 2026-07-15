@@ -87,6 +87,14 @@
     "persistent_highlight_important_marker_color",
     "rgba(154, 132, 220, 0.96)"
   );
+  const PERSISTENT_HIGHLIGHT_FILL_COLOR = configString(
+    "persistent_highlight_fill_color",
+    "rgba(102, 86, 178, 0.24)"
+  );
+  const PERSISTENT_HIGHLIGHT_IMPORTANT_FILL_COLOR = configString(
+    "persistent_highlight_important_fill_color",
+    "rgba(225, 214, 255, 0.36)"
+  );
   const HOST_ACTIVITY_CONSOLE_MESSAGE = "__pdfexplore_user_activity__";
   const HOST_ACTIVITY_NOTIFY_INTERVAL_MS = 120;
 
@@ -463,13 +471,6 @@ html, body {
   position: absolute !important;
   overflow: auto !important;
   background: #0f1218 !important;
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
-}
-#viewerContainer::-webkit-scrollbar {
-  width: 0 !important;
-  height: 0 !important;
-  display: none !important;
 }
 .page {
   box-shadow: 0 18px 32px rgba(0, 0, 0, 0.26) !important;
@@ -496,10 +497,10 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   background: rgba(245, 211, 79, 0.42);
 }
 .pdfexplore-highlight-rect.normal {
-  background: rgba(102, 86, 178, 0.36);
+  background: ${PERSISTENT_HIGHLIGHT_FILL_COLOR};
 }
 .pdfexplore-highlight-rect.important {
-  background: rgba(225, 214, 255, 0.76);
+  background: ${PERSISTENT_HIGHLIGHT_IMPORTANT_FILL_COLOR};
 }
 .pdfexplore-search-indicator-rail {
   position: fixed;
@@ -1956,18 +1957,52 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!index || !Array.isArray(index.nodes)) {
       return null;
     }
-    const startContainer = range.startContainer;
-    const endContainer = range.endContainer;
-    let startOffset = -1;
-    let endOffset = -1;
-    for (const item of index.nodes) {
-      if (item.node === startContainer) {
-        startOffset = item.start + range.startOffset;
-      }
-      if (item.node === endContainer) {
-        endOffset = item.start + range.endOffset;
-      }
+    const layer = pageEl.querySelector(".textLayer");
+    if (!layer) {
+      return null;
     }
+
+    // A short selection often exposes text-node endpoints, but selecting a
+    // complete line/paragraph commonly gives Range endpoints on the wrapping
+    // pdf.js SPAN elements. Clone the text-layer prefix to each DOM boundary
+    // and count it with the same node-normalization used by `pageIndex` so both
+    // endpoint forms map into one stable absolute-offset space.
+    const absoluteOffsetForBoundary = (container, offset) => {
+      if (!container || (container !== layer && !layer.contains(container))) {
+        return -1;
+      }
+      // Preserve the cheap path used during ordinary drag selections, where
+      // selectionchange fires frequently and both endpoints are text nodes.
+      const directItem = index.nodes.find((item) => item.node === container);
+      if (directItem) {
+        const rawText = String(container.nodeValue || "");
+        const localOffset = Math.max(
+          0,
+          Math.min(rawText.length, Number(offset) || 0),
+        );
+        return directItem.start + normalizedText(
+          rawText.slice(0, localOffset),
+        ).length;
+      }
+      try {
+        const prefix = document.createRange();
+        prefix.setStart(layer, 0);
+        prefix.setEnd(container, Math.max(0, Number(offset) || 0));
+        const absolute = collectTextNodes(prefix.cloneContents()).text.length;
+        return Math.max(0, Math.min(index.text.length, absolute));
+      } catch (_error) {
+        return -1;
+      }
+    };
+
+    const startOffset = absoluteOffsetForBoundary(
+      range.startContainer,
+      range.startOffset,
+    );
+    const endOffset = absoluteOffsetForBoundary(
+      range.endContainer,
+      range.endOffset,
+    );
     if (startOffset < 0 || endOffset < 0 || endOffset <= startOffset) {
       return null;
     }
@@ -2184,7 +2219,22 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       }, true);
       document.addEventListener("selectionchange", () => {
         const snapshot = getSelectionInfo(0, 0);
-        if (snapshot && snapshot.hasSelection) {
+        const snapshotPage = Number(snapshot && snapshot.page);
+        const snapshotStart = Number(snapshot && snapshot.start);
+        const snapshotEnd = Number(snapshot && snapshot.end);
+        const hasStableRange = (
+          Number.isFinite(snapshotPage)
+          && snapshotPage > 0
+          && Number.isFinite(snapshotStart)
+          && snapshotStart >= 0
+          && Number.isFinite(snapshotEnd)
+          && snapshotEnd > snapshotStart
+        );
+        if (
+          snapshot
+          && snapshot.hasSelection
+          && (hasStableRange || snapshot.multiPageSelection)
+        ) {
           state.lastSelectionPayload = {
             selectedText: String(snapshot.selectedText || ""),
             hasSelection: true,
@@ -2194,6 +2244,11 @@ html.pdfexplore-dark-mode .page .xfaLayer {
             multiPageSelection: Boolean(snapshot.multiPageSelection),
           };
           state.lastSelectionTimestamp = Date.now();
+        } else if (snapshot && snapshot.hasSelection) {
+          // Never let an earlier, shorter drag range stand in for different
+          // currently selected text whose DOM boundary cannot be mapped.
+          state.lastSelectionPayload = null;
+          state.lastSelectionTimestamp = 0;
         }
       }, true);
       const onAnyScroll = (event) => {

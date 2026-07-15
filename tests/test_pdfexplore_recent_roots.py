@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -105,6 +108,78 @@ class PdfExploreRecentRootHistoryTests(unittest.TestCase):
         self.assertIsInstance(payload.get(self.window.CONFIG_RECENT_ROOTS_KEY), list)
         self.assertGreaterEqual(len(payload[self.window.CONFIG_RECENT_ROOTS_KEY]), 1)
         self.assertEqual(payload[self.window.CONFIG_RECENT_ROOTS_KEY][0], str(target))
+
+    def test_active_aged_config_lock_is_not_unlinked(self) -> None:
+        lock_path = self.window._config_lock_file_path()
+        lock_path.touch()
+        old_time = time.time() - 125.0
+        os.utime(lock_path, (old_time, old_time))
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            inode_before = lock_path.stat().st_ino
+            self.window._read_config_payload()
+            self.assertTrue(lock_path.exists())
+            self.assertEqual(lock_path.stat().st_ino, inode_before)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def test_unlocked_aged_config_lock_inode_remains_stable(self) -> None:
+        lock_path = self.window._config_lock_file_path()
+        lock_path.touch()
+        old_time = time.time() - 125.0
+        os.utime(lock_path, (old_time, old_time))
+        inode_before = lock_path.stat().st_ino
+
+        self.window._read_config_payload()
+
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(lock_path.stat().st_ino, inode_before)
+
+    def test_local_recent_event_merges_with_newer_external_config(self) -> None:
+        local = self.base / "local-root"
+        external = self.base / "external-root"
+        local.mkdir()
+        external.mkdir()
+        self.window._record_recent_root_directory(local)
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    self.window.CONFIG_DEFAULT_ROOT_KEY: str(external),
+                    self.window.CONFIG_RECENT_ROOTS_KEY: [str(external)],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self.window._persist_effective_root()
+
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload[self.window.CONFIG_RECENT_ROOTS_KEY][:2],
+            [str(local.resolve()), str(external.resolve())],
+        )
+
+    def test_contended_config_save_retains_event_for_retry(self) -> None:
+        local = self.base / "retry-root"
+        local.mkdir()
+        self.window._record_recent_root_directory(local)
+        lock_path = self.window._config_lock_file_path()
+        lock_path.touch()
+
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.window._persist_effective_root()
+            self.assertEqual(self.window._recent_root_events, [local])
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        self.window._persist_effective_root()
+
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload[self.window.CONFIG_RECENT_ROOTS_KEY][0],
+            str(local.resolve()),
+        )
+        self.assertEqual(self.window._recent_root_events, [])
 
 
 class PdfExploreDefaultRootConfigTests(unittest.TestCase):

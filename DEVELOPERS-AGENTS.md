@@ -774,6 +774,88 @@ R.PDFOVERLAY.07 :: [newer restore/layout action begins] => X(allow stale delayed
   page indexes; repeated identical persistent-highlight/search commands are
   idempotent.
 
+#### 8.4 pdfexplore multi-process coordination
+
+Separate `pdfexplore` OS processes are a supported runtime configuration. Keep
+the following laws intact:
+
+```text
+R.PDFMULTI.01 :: [ordinary color/view/highlight edit names one PDF] => O(lock stable sidecar companion; reread disk; merge/tombstone that entry; atomically replace)
+R.PDFMULTI.02 :: [two processes edit different PDF entries] => O(preserve both entries)
+R.PDFMULTI.03 :: [two processes edit the same PDF highlights] => O(lock; apply range add/remove to latest entry; preserve unrelated edits)
+R.PDFMULTI.03B :: [transactional highlight commit fails] => O(reload unchanged disk entry; align viewer/cache; report failure)
+R.PDFMULTI.03A :: [two processes edit the same PDF color/view session] => O(last committed complete value wins)
+R.PDFMULTI.04 :: [config save succeeds] => O(replay local recent-root events over latest locked disk history)
+R.PDFMULTI.05 :: [processes choose different default roots] => O(last successful config writer wins default_root)
+R.PDFMULTI.06 :: [config lock unavailable] => X(overwrite or truncate current config)
+R.PDFMULTI.07 :: [another process reports recent activity] => X(start or continue idle prefetch/GC past the next safe cancellation boundary)
+R.PDFMULTI.08 :: [one process owns background lease] => X(start prefetch/GC in another process)
+R.PDFMULTI.09 :: [cache reader observes corrupt inode] => X(delete a newer replacement with different identity)
+R.PDFMULTI.10 :: [launcher bootstrap complete] => O(release bootstrap lock before Qt application lifetime)
+R.PDFMULTI.11 :: [Refresh/F5] => O(invalidate disk-backed sidecar snapshots and rescan markers without silently replacing current live tabs)
+R.PDFMULTI.12 :: [any process commits extracted text] => O(publish shared trim-dirty marker for a later idle quota pass)
+R.PDFMULTI.13 :: [GC candidate metadata ownership changed after scan] => X(delete repaired/reassigned cache entry)
+```
+
+Implementation notes:
+
+- `mdexplore_app/file_coordination.py` owns stable advisory locking,
+  process-unique temporary writes, atomic replacement, and per-file sidecar
+  read/merge/write. Do not delete a lock path while it may be held: unlinking a
+  locked inode can split cooperating processes into different lock domains.
+- Normal color, view-session, and persistent-highlight mutations pass only the
+  changed PDF name to `update_files_sidecar`; a `None` value is an entry
+  tombstone. Whole-scope clear/replace operations may deliberately use
+  `replace_all`. Per-file highlight IDs are UUID-based, and same-PDF highlight
+  add/remove operations use `transform_files_sidecar_entry` so the range edit
+  is applied to the latest lock-protected list. Color and view-session changes
+  to the same PDF remain last-committed-complete-value wins.
+- Config recent-root history is not merged from arbitrary stale snapshots.
+  Each instance records ordered local events, then under the config lock reads
+  the current payload and replays those events. The current effective root is
+  the new `default_root`, so that field is deliberately
+  last-successful-writer-wins. Lock contention causes a non-destructive skipped
+  save; navigation and shutdown provide later attempts.
+- Extracted-text readers open/fstat under shared
+  `.pdfexplore-text-cache.lock` ownership, then decompress the retained inode
+  after releasing it. Cache commits, metadata repair, and each trim/GC deletion
+  use short exclusive ownership with identity revalidation; scans, sorting,
+  source checks, and gzip work stay outside that transaction. Compression is
+  cancellation-chunked in a process-unique temporary and committed atomically.
+  Path-stable hash-striped producer locks serialize extraction for one canonical
+  source path across processes and source-file replacements; waiters re-stat
+  the PDF and recheck the cache after acquiring the stripe. Gzip reads are
+  cancellation-chunked and never treat cancellation as corruption.
+  Failed-gzip cleanup compares device/inode/mtime/size before deletion so a
+  concurrent replacement survives.
+- Every successful cache commit atomically replaces `.pdfexplore-trim-dirty`
+  while holding the cache transaction lock. Any instance's next eligible idle
+  GC pass observes that marker, performs the abortable quota scan, and removes
+  the marker only if its identity is unchanged; a concurrent writer therefore
+  cannot have its newer request cleared by an older trim.
+- `.pdfexplore-activity` is the cross-process idle heartbeat. Startup and input
+  enqueue coalesced touches on a dedicated one-thread worker pool, throttled by
+  `multi_instance_activity_touch_interval_seconds` (`0.25` by default); never
+  perform its cache-directory `mkdir`/`touch` work on the GUI input path.
+  A separate probe worker polls its mtime every
+  `multi_instance_activity_probe_interval_seconds` (`0.5` by default); GUI
+  schedulers consume only that cached observation and must not call `stat()`.
+  Prefetch/GC start and cancellation checks use the minimum local/shared idle
+  duration. `.pdfexplore-background.lock` is a non-blocking exclusive lease
+  shared by prefetch and GC, so at most one process performs idle cache work.
+- `pdfexplore.sh` holds the launcher bootstrap lock only while creating or
+  repairing `.venv`, installing requirements, and verifying imports; it closes
+  the descriptor before invoking Python. Pdf previews use the default
+  off-the-record `QWebEngineProfile`, avoiding persistent Chromium profile
+  ownership conflicts. This does not make app sidecars or extracted text
+  ephemeral.
+- Cross-process metadata visibility is pull-based. `Refresh` clears cached
+  color/view/highlight disk snapshots, reapplies current persisted highlights,
+  rebuilds the tree, and launches a marker scan while preserving expansion and
+  selection where possible. Current live view tabs remain authoritative until
+  normal save/switch handling; do not replace an actively edited tab model from
+  another process without an explicit conflict design.
+
 ### 9. View, Tab, and Session Rules
 
 #### 9.1 Tab constraints
@@ -1743,11 +1825,13 @@ viewer-bridge interaction semantics), also update
 - Keep runtime settings externalized in JSON:
   - shared/global defaults in `mdexplore.settings.json`,
   - pdfexplore-only defaults in `pdfexplore.settings.json`.
-- pdfexplore extracted-text disk entries use atomic source-path metadata companions;
-  idle, bounded garbage collection may remove an entry only after its source PDF
-  is definitively missing, never for permission or transient filesystem errors.
-  Its independent default cadence is 30 seconds after 10 seconds of sustained
-  input idle, including when automatic prefetch is disabled.
+- pdfexplore extracted-text disk entries and their atomic source-path metadata
+  companions are guarded by a stable cross-process cache lock. Idle, bounded
+  garbage collection may remove an entry only after its source PDF is
+  definitively missing, never for permission or transient filesystem errors.
+  Its independent default cadence is 30 seconds after 10 seconds of global
+  sustained input idle, including when automatic prefetch is disabled, and it
+  shares the single cross-process background lease with prefetch.
 - Update `UML.md` when extracted boundaries, architecture, or major control-flow  
 ownership changes.
 

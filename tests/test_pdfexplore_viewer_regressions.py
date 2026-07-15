@@ -6,13 +6,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--disable-gpu --disable-software-rasterizer",
 )
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -188,6 +189,35 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             float(metrics.get("viewportHeight", 0)) + 10,
         )
 
+    def test_pdfjs_bounded_scroll_host_keeps_native_scrollbar_visible(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        metrics = self.run_current_viewer_js_json(
+            "(() => {"
+            " const container = document.getElementById('viewerContainer');"
+            " const style = container ? getComputedStyle(container) : null;"
+            " const scrollbar = container"
+            "   ? getComputedStyle(container, '::-webkit-scrollbar')"
+            "   : null;"
+            " return {"
+            "   overflowY: style?.overflowY || '',"
+            "   scrollbarWidth: style?.scrollbarWidth || '',"
+            "   webkitDisplay: scrollbar?.display || '',"
+            "   webkitWidth: scrollbar?.width || '',"
+            "   clientHeight: Number(container?.clientHeight || 0),"
+            "   scrollHeight: Number(container?.scrollHeight || 0)"
+            " };"
+            "})()"
+        )
+
+        self.assertIn(metrics.get("overflowY"), {"auto", "scroll"})
+        self.assertGreater(
+            float(metrics.get("scrollHeight", 0)),
+            float(metrics.get("clientHeight", 0)) + 100,
+        )
+        self.assertNotEqual(metrics.get("scrollbarWidth"), "none")
+        self.assertNotEqual(metrics.get("webkitDisplay"), "none")
+        self.assertNotEqual(metrics.get("webkitWidth"), "0px")
+
     def test_scroll_state_restores_after_switching_documents_in_live_viewer(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         desired_state = {
@@ -362,6 +392,262 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             list(reopened_overlay.get("ids", [])),
             list(initial_overlay.get("ids", [])),
         )
+
+    def test_context_menu_highlight_survives_expired_selection_and_click_away(
+        self,
+    ) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        selection_snapshot = self._seed_alpha_selection_info()
+        self.run_current_viewer_js(
+            "(() => {"
+            " const selection = window.getSelection();"
+            " if (selection) selection.removeAllRanges();"
+            " return true;"
+            "})()"
+        )
+        # Outlive the bridge's short collapsed-selection fallback to model a
+        # user pausing over the context menu before choosing Highlight.
+        self.wait_ms(1950)
+
+        class _FakeAction:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeMenu:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.actions: list[_FakeAction] = []
+
+            def addAction(self, text: str):
+                action = _FakeAction(text)
+                self.actions.append(action)
+                return action
+
+            @staticmethod
+            def addSeparator() -> None:
+                return None
+
+            def exec(self, *_args, **_kwargs):
+                return next(
+                    action for action in self.actions if action.text == "Highlight"
+                )
+
+        with patch("pdfexplore.app.QMenu", _FakeMenu):
+            self.window._show_preview_context_menu_with_cached_selection(
+                QPoint(20, 20),
+                dict(selection_snapshot),
+                "Alpha",
+                click_x=20,
+                click_y=20,
+            )
+
+        self.wait_until(
+            lambda: len(self.window._current_text_highlights) == 1,
+            timeout_ms=5000,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll("
+                "'.pdfexplore-highlight-rect.normal[data-highlight-id]').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+        self.run_current_viewer_js(
+            "(() => {"
+            " const target = document.querySelector('.endOfContent') || document.body;"
+            " target.dispatchEvent(new MouseEvent('click', {bubbles: true}));"
+            " return true;"
+            "})()"
+        )
+        self.wait_ms(300)
+
+        state = self.run_current_viewer_js_json(
+            "({"
+            " selection: String(window.getSelection() || ''),"
+            " overlays: document.querySelectorAll("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id]'"
+            " ).length"
+            "})"
+        )
+        path_key = self.window._path_key(self.first_pdf)
+        self.assertEqual(state.get("selection"), "")
+        self.assertGreater(int(state.get("overlays", 0)), 0)
+        self.assertEqual(
+            len(self.window._load_text_highlights_for_path_key(path_key)),
+            1,
+        )
+
+    def test_multi_span_paragraph_highlight_survives_click_away(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        selected = self.run_current_viewer_js_json(
+            "(() => {"
+            " const layer = document.querySelector("
+            "   '.page[data-page-number=\"1\"] .textLayer'"
+            " );"
+            " const spans = layer ? Array.from(layer.querySelectorAll('span')).filter("
+            "   (node) => String(node.textContent || '').trim()"
+            " ) : [];"
+            " if (spans.length < 3) return {selected: false};"
+            " const range = document.createRange();"
+            " range.setStart(spans[0], 0);"
+            " range.setEnd(spans[2], spans[2].childNodes.length);"
+            " const selection = window.getSelection();"
+            " selection.removeAllRanges();"
+            " selection.addRange(range);"
+            " return {"
+            "   selected: true,"
+            "   text: String(selection),"
+            "   expectedLength: spans.slice(0, 3).reduce("
+            "     (total, node) => total + String(node.textContent || '').length, 0"
+            "   ),"
+            "   startNodeType: range.startContainer.nodeType,"
+            "   endNodeType: range.endContainer.nodeType"
+            " };"
+            "})()"
+        )
+        self.assertEqual(selected.get("selected"), True)
+        # Whole-line selection deliberately produces element-boundary Range
+        # endpoints rather than the simple text-node endpoints used elsewhere.
+        self.assertEqual(selected.get("startNodeType"), 1)
+        self.assertEqual(selected.get("endNodeType"), 1)
+        selected_text = str(selected.get("text", ""))
+        self.assertIn("Alpha line 1", selected_text)
+        self.assertIn("Alpha line 2", selected_text)
+        self.assertIn("Alpha line 3", selected_text)
+
+        selection_info = self.await_callback_result(
+            lambda done: self.window._request_preview_context_menu_selection_info(
+                0,
+                0,
+                selected_text,
+                done,
+            )
+        )
+        self.assertEqual(selection_info.get("hasSelection"), True)
+        self.assertEqual(selection_info.get("multiPageSelection"), False)
+        self.assertEqual(selection_info.get("page"), 1)
+        self.assertEqual(selection_info.get("start"), 0)
+        selection_start = int(selection_info.get("start", -1))
+        selection_end = int(selection_info.get("end", -1))
+        self.assertEqual(
+            selection_end - selection_start,
+            int(selected.get("expectedLength", 0)),
+        )
+
+        self.window._add_persistent_preview_highlight(
+            selection_info,
+            kind="normal",
+            selected_text_hint=selected_text,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll("
+                "'.pdfexplore-highlight-rect.normal[data-highlight-id]').length})"
+            ).get("count", 0)
+            >= 3,
+            timeout_ms=12000,
+        )
+
+        self.run_current_viewer_js(
+            "(() => {"
+            " const selection = window.getSelection();"
+            " if (selection) selection.removeAllRanges();"
+            " const target = document.querySelector('.textLayer span:nth-child(6)')"
+            "   || document.querySelector('.endOfContent')"
+            "   || document.body;"
+            " target.dispatchEvent(new MouseEvent('click', {bubbles: true}));"
+            " return true;"
+            "})()"
+        )
+        self.wait_ms(300)
+
+        state = self.run_current_viewer_js_json(
+            "({"
+            " selection: String(window.getSelection() || ''),"
+            " overlays: document.querySelectorAll("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id]'"
+            " ).length,"
+            " ids: Array.from(document.querySelectorAll("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id]'"
+            " )).map((node) => String(node.dataset.highlightId || ''))"
+            "})"
+        )
+        path_key = self.window._path_key(self.first_pdf)
+        persisted = self.window._load_text_highlights_for_path_key(path_key)
+        self.assertEqual(state.get("selection"), "")
+        self.assertGreaterEqual(int(state.get("overlays", 0)), 3)
+        overlay_ids = {str(value) for value in state.get("ids", []) if str(value)}
+        self.assertEqual(len(overlay_ids), 1)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(int(persisted[0]["page"]), 1)
+        self.assertEqual(int(persisted[0]["start"]), selection_start)
+        self.assertEqual(int(persisted[0]["end"]), selection_end)
+        self.assertEqual(overlay_ids, {str(persisted[0]["id"])})
+
+    def test_persistent_highlight_fills_are_lightly_translucent(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.window._current_text_highlights = [
+            {
+                "id": "normal-opacity",
+                "page": 1,
+                "start": 0,
+                "end": 5,
+                "kind": "normal",
+                "text": "Alpha",
+            },
+            {
+                "id": "important-opacity",
+                "page": 1,
+                "start": 12,
+                "end": 17,
+                "kind": "important",
+                "text": "Alpha",
+            },
+        ]
+        self.window._apply_persistent_text_highlights()
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({"
+                " normal: document.querySelectorAll("
+                "   '.pdfexplore-highlight-rect.normal'"
+                " ).length,"
+                " important: document.querySelectorAll("
+                "   '.pdfexplore-highlight-rect.important'"
+                " ).length"
+                "})"
+            ).get("normal", 0)
+            > 0
+            and self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll("
+                "'.pdfexplore-highlight-rect.important').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+
+        colors = self.run_current_viewer_js_json(
+            "(() => {"
+            " const normal = document.querySelector("
+            "   '.pdfexplore-highlight-rect.normal'"
+            " );"
+            " const important = document.querySelector("
+            "   '.pdfexplore-highlight-rect.important'"
+            " );"
+            " const alpha = (node) => {"
+            "   const value = node ? getComputedStyle(node).backgroundColor : '';"
+            "   const match = value.match(/rgba\\([^,]+,[^,]+,[^,]+,\\s*([0-9.]+)\\)/);"
+            "   return match ? Number(match[1]) : (value ? 1 : -1);"
+            " };"
+            " return {normalAlpha: alpha(normal), importantAlpha: alpha(important)};"
+            "})()"
+        )
+        self.assertAlmostEqual(float(colors.get("normalAlpha", -1)), 0.24, places=2)
+        self.assertAlmostEqual(
+            float(colors.get("importantAlpha", -1)),
+            0.36,
+            places=2,
+        )
+        self.assertLess(float(colors.get("importantAlpha", 1)), 0.5)
 
     def test_persistent_overlay_stays_stable_when_idle_scrolled_and_reapplied(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)

@@ -47,6 +47,12 @@ The system should feel predictable under stress: opening a new root, expanding f
       least-recently-used cache (two by default).
     - Eviction must detach and discard the WebEngine page, not merely remove its
       lookup key while leaving browser memory resident.
+- Multi-instance invariant:
+    - Independent `pdfexplore` processes may browse the same tree concurrently.
+    - Shared config, sidecars, extracted-text cache files, and idle background
+      work must use their defined cross-process coordination paths.
+    - A process must never delete a stable lock file while another process may
+      hold the corresponding inode.
 
 ## Key Sidecars
 
@@ -76,6 +82,103 @@ runtime settings in `pdfexplore.settings.json`.
     - tolerate partial payloads,
     - accept legacy shapes when feasible,
     - sanitize malformed entries instead of failing the pipeline.
+
+## Multi-Instance Coordination Rules
+
+### Sidecars
+
+- Keep generic sidecar coordination in
+  `mdexplore_app/file_coordination.py`.
+- `.pdfexplore-colors.json`, `.pdfexplore-views.json`, and
+  `.pdfexplore-highlighting.json` use stable `<sidecar>.lock` companions and
+  process-unique temporary files followed by atomic replacement.
+- For an ordinary edit, pass only the changed PDF name to
+  `update_files_sidecar`. The helper locks, rereads the latest payload, merges
+  that entry, and returns the exact committed mapping so stale per-instance
+  caches can be refreshed. Use `None` as a tombstone for only that name.
+- Concurrent changes to distinct PDF names must survive. Color and view-session
+  changes to the same PDF are last-commit-wins. Persistent-highlight IDs are
+  UUIDs, and same-PDF range adds/removes must use
+  `transform_files_sidecar_entry` to transform the latest entry under its lock;
+  never replace it from a stale complete highlight list.
+- A failed transactional highlight commit must restore the viewer/cache from
+  the unchanged disk payload and report failure; never display an add/remove
+  success message merely because the in-lock transform callback ran.
+- Reserve `replace_all=True` for intentional whole-scope clear/replace
+  operations. Do not use it for a routine single-document save.
+
+### Config
+
+- Keep recent-root changes as ordered local events, not as an indefinitely
+  authoritative in-memory snapshot. Under the config lock, reread disk and
+  replay those events over the latest MRU list.
+- `default_root` is deliberately last-successful-writer-wins: the process whose
+  config commit most recently succeeds writes its current effective root.
+- Config locking remains short and non-blocking. Contention skips the save
+  without modifying the file; later navigation/shutdown may retry.
+- The config advisory-lock path is permanent. Kernel locks disappear when a
+  process exits, but the inode must never be unlinked or age-cleaned: a process
+  may already have opened it before taking `flock`, and unlinking would split
+  callers across independent lock domains.
+
+### Extracted-text cache and idle work
+
+- `.pdfexplore-text-cache.lock` is the stable cache transaction lock. Open and
+  identify a cache entry under shared mode, then decompress its retained file
+  descriptor after releasing the lock. Use short exclusive transactions for
+  commits, metadata repair, corrupt-entry cleanup, and each individual
+  trim/GC deletion; never hold one exclusive transaction across a directory
+  scan, sort, source-path validation batch, or gzip operation.
+- Prepare compressed text and JSON metadata through process-unique temporaries
+  and atomic replacement. Compression must check cancellation between bounded
+  chunks and again before commit. If a gzip read fails, delete it only after an
+  exclusive-lock identity check proves the current device/inode/mtime/size is
+  still the file that failed; preserve a newer replacement.
+- `.pdfexplore-activity` is a shared heartbeat. Touch it at startup and during
+  input through the coalescing dedicated heartbeat worker, throttled by
+  `multi_instance_activity_touch_interval_seconds` (`0.25` seconds by default).
+  Update local idle/cancellation state before enqueueing it, and never perform
+  its cache-directory `mkdir`/`touch` operations on the GUI input path.
+  Read its mtime through the separate probe worker at
+  `multi_instance_activity_probe_interval_seconds` (`0.5` seconds by default);
+  GUI-thread prefetch/GC schedulers must use the cached observation rather than
+  synchronously calling `stat()`.
+  Prefetch and GC use the minimum of local and shared idle age both before
+  starting and in cancellation checks.
+- Every successful cache commit atomically refreshes the shared
+  `.pdfexplore-trim-dirty` marker. Perform quota scans only during eligible idle
+  GC, check cancellation during `scandir`, and take a non-blocking,
+  identity-revalidating lock separately for each deletion. Clear the marker
+  only when its identity still matches the pre-trim snapshot so a concurrent
+  store cannot lose its request.
+- Path-stable, hash-striped `.pdfexplore-producer-*.lock` files serialize
+  extraction of the same canonical PDF path across processes and file-version
+  changes. Waiters must re-stat and recheck memory/disk after acquiring the
+  stripe and honor cancellation while waiting.
+- `.pdfexplore-background.lock` is a non-blocking exclusive lease shared by
+  prefetch and GC. Failure to acquire it means the worker exits quietly, so
+  only one instance performs idle extraction/maintenance at a time.
+- Running work still stops only at safe cancellation points: between candidate
+  files, PDF pages, or GC entries. Never commit partially extracted text.
+
+### Launcher, WebEngine, and refresh
+
+- `pdfexplore.sh` serializes mutable bootstrap work (venv creation/repair,
+  requirements installation, runtime import verification) with
+  `${XDG_CACHE_HOME:-$HOME/.cache}/pdfexplore/bootstrap.lock` when `flock` is
+  available. Release it before starting Qt; it is not an application singleton
+  lock.
+- Preview pages use Qt's default off-the-record WebEngine profile. Do not add a
+  shared persistent profile directory without designing and testing Chromium
+  profile ownership across processes. Off-record browser storage does not
+  affect intentional app sidecars or extracted-text persistence.
+- Cross-process sidecar observation is pull-based. `Refresh`/`F5` invalidates
+  color/view/highlight disk snapshots, reloads the current PDF's persisted
+  highlights, rebuilds the filesystem model, and starts a fresh marker scan
+  while restoring expansion/selection where possible.
+- Refresh must not silently replace the currently open document's live tab
+  model. Existing tabs remain authoritative until the normal save/switch
+  lifecycle; later disk reads see the refreshed sidecar state.
 
 ## C4 Context
 
@@ -150,9 +253,12 @@ C4Component
 1. Boot
 
 - App resolves startup root.
+- Launcher bootstrap serialization has already been released before Qt starts.
 - Tree model/delegate are attached.
-- Viewer bridge source is loaded.
+- Viewer bridge source is loaded through an off-the-record WebEngine profile.
 - Timers and worker pools are initialized.
+- A shared activity-heartbeat touch is queued off the GUI thread so sibling
+  instances defer idle work.
 
 2. Root Activation
 
@@ -197,7 +303,9 @@ C4Component
       sentinel, remove cancelled queued runnables from active bookkeeping, and
       yield running extraction between pages,
     - must not treat the cache-badge path set as a cache-validity index,
-    - should prefer current-document warmup before broader scope.
+    - should prefer current-document warmup before broader scope,
+    - must obtain the non-blocking cross-process background lease and observe
+      the shared activity heartbeat before and during work.
 - Text-cache garbage-collection workers:
     - share the low-priority idle worker pool with prefetch,
     - are offered by an independent 30-second timer only after 10 seconds of
@@ -207,7 +315,9 @@ C4Component
     - receive first refusal on the shared idle pool after prefetch completion when
       their independent cadence is overdue,
     - may evict extracted text only after the source path is definitively missing,
-    - must not evict on permission or transient filesystem errors.
+    - must not evict on permission or transient filesystem errors,
+    - must share the cross-process background lease with prefetch and take the
+      exclusive cache transaction lock before disk mutation.
 - Marker scan workers:
     - produce sidecar-derived marker sets,
     - must be merged with live state to avoid transient badge regressions.
@@ -282,6 +392,11 @@ Recommended validation sequence:
 - Excessive UI stalls on root change due to marker merge overhead.
 - Crash paths around viewer creation or event/filter hooks.
 - Sidecar parse errors cascading into badge/model state resets.
+- Lost updates caused by writing a stale whole sidecar for one changed PDF.
+- Deleting/recreating a stable lock path while another process holds its old inode.
+- Idle prefetch/GC continuing after a sibling instance touches the activity heartbeat.
+- Launcher bootstrap locking accidentally extending across the Qt process lifetime.
+- Introducing a persistent shared WebEngine profile and Chromium profile-lock contention.
 
 ## Change Boundaries
 
@@ -299,9 +414,14 @@ Recommended validation sequence:
   atomic `.txt.gz.meta.json` companions to retain their source-PDF path; legacy
   entries remain readable and gain metadata when they are next loaded.
 - GC uses its own 30-second cadence timer after 10 seconds of sustained input
-  idle and may share the low-priority worker pool, but it must remain independent
-  of the `prefetch_enabled` setting and must not wake scope prefetch, traverse the
-  visible tree, or read disk metadata on the GUI-thread cache-hit path.
+  idle across all instances and may share the low-priority worker pool, but it
+  must remain independent of the `prefetch_enabled` setting and must not wake
+  scope prefetch, traverse the visible tree, or read disk metadata on the
+  GUI-thread cache-hit path. Prefetch and GC must retain their shared
+  non-blocking background lease and safe-point cancellation checks.
+- Keep per-file sidecar updates merge-based and atomic. Preserve the
+  recent-root event-replay/default-root conflict policy and stable lock inode
+  discipline when changing config or persistence code.
 - Treat marker badge continuity as correctness-critical: highlight and cache badges must survive tab switches, searches, and root navigation.
 - Treat marker click latency as correctness-critical in the viewer bridge: visual marker speed without click responsiveness is a regression.
 - Preserve current UX contracts:

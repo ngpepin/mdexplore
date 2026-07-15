@@ -13,7 +13,7 @@ duplicating low-level render logic across two docs.
 
 Low-risk modularization note: support code now lives in `mdexplore_app/`
 (`constants.py`, `runtime.py`, `search.py`, `templates.py`, `pdf.py`,
-`icons.py`, `workers.py`, `tree.py`, `tabs.py`), while the main orchestration,
+`icons.py`, `file_coordination.py`, `workers.py`, `tree.py`, `tabs.py`), while the main orchestration,
 renderer/template wiring, and UI state machine remain in `mdexplore.py`. The
 diagrams below show that split at subsystem boundaries rather than expanding
 every extracted helper inline.
@@ -40,6 +40,7 @@ node "Ubuntu Desktop Session" as Desktop {
     component "templates.py" as TemplateSupport
     component "pdf.py" as PdfSupport
     component "icons.py" as IconSupport
+    component "file_coordination.py\nstable locks + atomic sidecars" as CoordinationSupport
     component "tree.py" as TreeSupport
     component "tabs.py" as TabSupport
     component "workers.py" as WorkerSupport
@@ -93,6 +94,7 @@ Window --> RuntimeSupport
 Window --> SearchSupport
 Window --> PdfSupport
 Window --> IconSupport
+Model --> CoordinationSupport : lock + merge color sidecars
 Window --> TreeSupport
 Window --> TabSupport
 Window --> WorkerSupport

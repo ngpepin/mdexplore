@@ -486,6 +486,14 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
     def test_show_preview_context_menu_uses_request_selected_text_hint(self) -> None:
         captured: dict[str, object] = {}
+        selection_info = {
+            "selectedText": "Selected from Qt",
+            "hasSelection": True,
+            "page": 2,
+            "start": 4,
+            "end": 12,
+            "multiPageSelection": False,
+        }
 
         class _FakeRequest:
             def selectedText(self) -> str:
@@ -502,8 +510,23 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         original_show_with_cached_selection = (
             self.window._show_preview_context_menu_with_cached_selection
         )
+        original_request_selection_info = (
+            self.window._request_preview_context_menu_selection_info
+        )
         try:
             self.window._current_preview_widget = lambda: _FakePreview()  # type: ignore[method-assign]
+            self.window._request_preview_context_menu_selection_info = (  # type: ignore[method-assign]
+                lambda click_x, click_y, selected_text_hint, callback: (
+                    captured.update(
+                        {
+                            "request_click_x": click_x,
+                            "request_click_y": click_y,
+                            "request_selected_text_hint": selected_text_hint,
+                        }
+                    ),
+                    callback(dict(selection_info)),
+                )
+            )
             self.window._show_preview_context_menu_with_cached_selection = (  # type: ignore[method-assign]
                 lambda pos, info, selected_text_hint, **kwargs: captured.update(
                     {
@@ -521,9 +544,18 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             self.window._show_preview_context_menu_with_cached_selection = (  # type: ignore[method-assign]
                 original_show_with_cached_selection
             )
+            self.window._request_preview_context_menu_selection_info = (  # type: ignore[method-assign]
+                original_request_selection_info
+            )
 
         self.assertEqual(captured.get("selected_text_hint"), "Selected from Qt")
-        self.assertEqual(captured.get("info"), {})
+        self.assertEqual(captured.get("info"), selection_info)
+        self.assertEqual(captured.get("request_click_x"), 11)
+        self.assertEqual(captured.get("request_click_y"), 17)
+        self.assertEqual(
+            captured.get("request_selected_text_hint"),
+            "Selected from Qt",
+        )
         kwargs = captured.get("kwargs")
         self.assertIsInstance(kwargs, dict)
         assert isinstance(kwargs, dict)
@@ -555,6 +587,98 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
         self.assertEqual(captured.get("selectedText"), "Selected from Qt")
         self.assertEqual(captured.get("hasSelection"), True)
+
+    def test_context_menu_highlight_keeps_pre_menu_range_when_late_probe_is_empty(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakePreview:
+            @staticmethod
+            def mapToGlobal(pos: QPoint) -> QPoint:
+                return pos
+
+        class _FakeAction:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeMenu:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.actions: list[_FakeAction] = []
+
+            def addAction(self, text: str):
+                action = _FakeAction(text)
+                self.actions.append(action)
+                return action
+
+            @staticmethod
+            def addSeparator() -> None:
+                return None
+
+            def exec(self, *_args, **_kwargs):
+                return next(
+                    action for action in self.actions if action.text == "Highlight"
+                )
+
+        selection_snapshot = {
+            "selectedText": "Alpha",
+            "hasSelection": True,
+            "page": 1,
+            "start": 0,
+            "end": 5,
+            "multiPageSelection": False,
+            "threeUpActive": False,
+            "clickedHighlightId": "",
+        }
+        late_probe = {
+            "selectedText": "Alpha",
+            "hasSelection": True,
+            "page": None,
+            "start": None,
+            "end": None,
+            "multiPageSelection": False,
+            "threeUpActive": False,
+            "clickedHighlightId": "",
+        }
+
+        with (
+            patch.object(
+                self.window,
+                "_current_preview_widget",
+                return_value=_FakePreview(),
+            ),
+            patch.object(
+                self.window,
+                "_request_preview_context_menu_selection_info",
+                side_effect=lambda _x, _y, _hint, callback: callback(
+                    dict(late_probe)
+                ),
+            ),
+            patch.object(
+                self.window,
+                "_add_persistent_preview_highlight",
+                side_effect=lambda info, **kwargs: captured.update(
+                    {"info": info, **kwargs}
+                ),
+            ),
+            patch("pdfexplore.app.QMenu", _FakeMenu),
+        ):
+            self.window._show_preview_context_menu_with_cached_selection(
+                QPoint(11, 17),
+                selection_snapshot,
+                "Alpha",
+                click_x=11,
+                click_y=17,
+            )
+
+        merged = captured.get("info")
+        self.assertIsInstance(merged, dict)
+        assert isinstance(merged, dict)
+        self.assertEqual(merged.get("page"), 1)
+        self.assertEqual(merged.get("start"), 0)
+        self.assertEqual(merged.get("end"), 5)
+        self.assertEqual(captured.get("kind"), "normal")
+        self.assertEqual(captured.get("selected_text_hint"), "Alpha")
 
     def test_preview_zoom_in_out_and_reset_adjust_current_view_only(self) -> None:
         pdf_path = Path(self._tempdir.name) / "zoom.pdf"

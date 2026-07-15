@@ -107,7 +107,11 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - marker badge indicates persistent text highlights,
   - marker sync merges scan results with live/in-memory metadata to reduce badge flicker.
 - If the currently previewed PDF changes on disk, preview auto-refreshes and reports that in the status bar.
-- `Refresh` preserves expanded folders/selection when possible and clears the preview if the active PDF was deleted.
+- `Refresh` preserves expanded folders/selection when possible, invalidates
+  disk-backed sidecar snapshots, rescans marker state, reloads the current
+  PDF's persisted highlights, and clears the preview if the active PDF was
+  deleted. Live tabs for the currently open PDF are not replaced underneath
+  the user; their normal save/switch lifecycle remains authoritative.
 - Effective root persisted to `~/.pdfexplore.cfg` on close (interactive terminal launch without path defaults to current working directory).
 
 ## User Workflow (Narrative)
@@ -178,12 +182,73 @@ From repo root:
   - interactive terminal launch uses current working directory,
   - otherwise falls back to `~/.pdfexplore.cfg`, then `$HOME`.
 
+### Multiple Running Instances
+
+Running more than one `pdfexplore` process is supported, including processes
+that browse and annotate the same directory tree.
+
+- `pdfexplore.sh` takes
+  `${XDG_CACHE_HOME:-$HOME/.cache}/pdfexplore/bootstrap.lock` while it creates
+  or repairs the virtual environment, installs requirements, and verifies
+  runtime imports. The launcher releases this bootstrap lock before starting
+  Qt, so it serializes mutable setup rather than application lifetime. This
+  serialization is used when the system `flock` command is available.
+- Preview pages use Qt WebEngine's default off-the-record profile. They do not
+  share a persistent Chromium profile directory or its single-process lock;
+  application sidecars and the extracted-text cache remain intentionally
+  persistent and are coordinated separately.
+- Per-directory color, view, and highlight sidecars use stable `.lock`
+  companions. Each ordinary save locks, rereads the latest disk payload,
+  merges only the changed PDF name (or applies a tombstone for removal), and
+  atomically replaces the JSON file. Concurrent changes to distinct PDFs are
+  therefore preserved. Same-PDF persistent-highlight range edits lock and
+  transform the latest committed list, preserving unrelated concurrent edits.
+  Same-PDF color and view-session values are resolved by commit order: the last
+  committed complete value wins. Whole-sidecar clear/replace operations
+  intentionally replace that scope.
+- Highlight identifiers use UUID-based values, avoiding identifier collisions
+  between windows.
+- The Recent menu rereads config when opened. During config save, this
+  instance's ordered recent-root events are replayed over the newest history
+  read under the lock. `default_root` is deliberately
+  last-successful-writer-wins; if the short non-blocking config lock cannot be
+  acquired, the save is skipped and the existing file is left untouched for a
+  later navigation/shutdown attempt.
+- Extracted-text cache readers hold the stable process lock only long enough to
+  open and identify an entry; gzip decompression then uses that open inode
+  without blocking writers. Cache commits, metadata repair, per-entry trimming,
+  corrupt-entry cleanup, and GC use short exclusive transactions. Cache payloads and source-path metadata are written through
+  process-unique temporary files and atomic replacement. Corrupt-cache cleanup
+  verifies that the failed file is still the same inode before deleting it, so
+  it cannot remove another process's fresh replacement.
+- A cache-directory activity stamp is touched at startup and, at a throttled
+  cadence, during interaction. Touches are coalesced on a dedicated worker so
+  GUI input never waits on cache-directory creation or writes. A separate
+  probe worker polls the stamp mtime, so GUI-thread idle schedulers do not wait
+  on cache-directory reads either. Prefetch and
+  missing-source GC use the minimum local/shared idle time and recheck it while
+  running, so activity in any instance delays new background work and stops
+  running work at its next safe file, page, or entry boundary. A non-blocking
+  shared background lease allows only one process to run prefetch or GC at a
+  time.
+
+Cross-process sidecar changes are intentionally pull-based rather than pushed
+into every live window. `Refresh`/`F5` invalidates per-directory color, view,
+and highlight read caches, reloads current persisted highlights, rebuilds the
+tree, and starts a fresh marker scan while preserving expansion and selection
+where possible. Existing live tabs are not silently overwritten; newly loaded
+disk state is used by subsequent sidecar reads and normal document lifecycle.
+Stable `.lock` files may remain on disk and should not be manually removed
+while instances are running.
+
 ## Configuration
 
 - Primary config file: `~/.pdfexplore.cfg`.
 - Supports modern JSON payload with default root/recent roots.
 - Includes compatibility handling for legacy single-path config payloads.
-- Recent roots are maintained using short lock-based writes for safer multi-instance behavior.
+- Recent roots are maintained by replaying local navigation events over the
+  latest locked on-disk history; `default_root` follows the
+  last-successful-writer policy described above.
 
 ### Runtime Settings (JSON)
 
@@ -232,7 +297,6 @@ separate, app-local tuning surface for pdfexplore.
 | `min_recent_root_dwell_seconds` | `30.0` | Minimum active-root dwell before history retention. |
 | `config_default_root_key` | `default_root` | Config JSON key for default root. |
 | `config_recent_roots_key` | `recent_roots` | Config JSON key for recent roots. |
-| `config_lock_stale_seconds` | `120.0` | Lock-file stale threshold for cleanup. |
 
 ##### Text cache, prefetch, and search cadence
 
@@ -242,7 +306,8 @@ separate, app-local tuning surface for pdfexplore.
 | `pdf_text_cache_max_chars` | `201326592` | Max total characters in memory text cache. |
 | `pdf_text_disk_cache_max_files` | `8000` | Max disk cache files before trim pressure. |
 | `pdf_text_disk_cache_max_bytes` | `1610612736` | Max disk cache byte budget before trim pressure. |
-| `pdf_text_disk_cache_trim_interval` | `240` | Disk-cache trim trigger interval measured in successful store operations (every Nth store runs a trim pass). |
+| `pdf_text_disk_cache_trim_interval` | `240` | Process-local trim revision checkpoint retained for compatibility; every successful cross-process cache commit also publishes a shared dirty marker, and only eligible idle GC performs the abortable trim. |
+| `pdf_text_disk_cache_touch_interval_seconds` | `60.0` | Minimum age before a successful disk-cache hit refreshes its LRU timestamp; refresh is best-effort and non-blocking. |
 | `pdf_text_cache_gc_interval_seconds` | `30.0` | Cadence of the dedicated missing-source garbage-collection timer. |
 | `pdf_text_cache_gc_idle_seconds` | `10.0` | Sustained no-input period required before a GC batch may start or continue. |
 | `pdf_text_cache_gc_batch_size` | `128` | Maximum memory entries and disk metadata companions checked per idle GC batch. |
@@ -250,6 +315,8 @@ separate, app-local tuning surface for pdfexplore.
 | `prefetch_batch_size` | `1` | Number of PDFs prefetched per idle cycle. |
 | `prefetch_idle_seconds` | `10.0` | Sustained idle period required before prefetch can run. |
 | `prefetch_batch_cooldown_seconds` | `1.0` | Minimum pause between completed prefetch batches. |
+| `multi_instance_activity_touch_interval_seconds` | `0.25` | Minimum interval between coalesced, asynchronous writes to the activity heartbeat shared by all running instances; this lets activity in one process suppress or cancel idle prefetch/GC in another without blocking GUI input or writing on every event. |
+| `multi_instance_activity_probe_interval_seconds` | `0.5` | Cadence for off-GUI-thread reads of the shared activity heartbeat; idle schedulers use the cached observation instead of synchronously touching the cache filesystem. |
 | `prefetch_heavy_use_window_seconds` | `1.2` | Sliding window for interaction-pressure checks. |
 | `prefetch_heavy_use_event_threshold` | `14` | Interaction count threshold that triggers temporary prefetch pause. |
 | `prefetch_heavy_use_pause_seconds` | `1.2` | Pause duration after heavy interaction threshold is exceeded. |
@@ -278,19 +345,32 @@ separate, app-local tuning surface for pdfexplore.
 
 ##### pdf_text_disk_cache_trim_interval deep dive
 
-`pdf_text_disk_cache_trim_interval` controls how often the on-disk text cache is
-trimmed after writes.
+`pdf_text_disk_cache_trim_interval` controls the process-local revision
+checkpoint for the on-disk text cache. Cross-process correctness does not rely
+on that private counter: every successful commit also atomically refreshes
+`.pdfexplore-trim-dirty`, which any instance can consume during eligible idle
+GC.
 
 - A counter increments after each successful compressed cache write.
-- When `store_count % pdf_text_disk_cache_trim_interval == 0`, a trim pass runs.
-- Default `240` means trim runs on the 240th, 480th, 720th, ... successful store.
+- When `store_count % pdf_text_disk_cache_trim_interval == 0`, that process's
+  local trim revision also becomes due.
+- The shared dirty marker makes the next eligible idle GC pass consider quota
+  trimming after a commit from any process, even when the writer exits or has
+  not reached its local checkpoint.
+- A trim clears only the exact marker inode it observed before scanning. If a
+  writer refreshes the marker during the scan, the newer marker survives for a
+  later idle pass.
+- Directory enumeration and sorting run outside the global cache lock and check
+  cancellation throughout. Each candidate deletion takes a short non-blocking
+  exclusive transaction and revalidates file identity first.
 - Trim pass ordering is recency-first (newest `mtime` kept first).
 - A file is kept only if both limits remain satisfied:
   - `pdf_text_disk_cache_max_files`
   - `pdf_text_disk_cache_max_bytes`
 - Any remaining older entries are deleted.
-- Cache reads update file `mtime`, so recently used entries are less likely to
-  be removed during future trims.
+- Cache reads update file `mtime` at most once per
+  `pdf_text_disk_cache_touch_interval_seconds`, best-effort, so recently used
+  entries are less likely to be removed without serializing every hit.
 
 Tuning guidance:
 
@@ -325,6 +405,8 @@ Each numeric value is validated with clamp bounds before use.
 | `search_indicator_markers_per_page_max` | `48` | `1..500` | Per-page marker cap before clustering/pruning pressure. |
 | `search_indicator_yield_every_batches` | `3` | `1..50` | Event-loop yield cadence for responsive progressive builds. |
 | `search_indicator_publish_interval_ms` | `90` | `16..2000` | Minimum interval between progressive right-rail DOM publications. |
+| `persistent_highlight_fill_color` | `rgba(102, 86, 178, 0.24)` | non-empty CSS color | Translucent fill for normal persistent highlights. |
+| `persistent_highlight_important_fill_color` | `rgba(225, 214, 255, 0.36)` | non-empty CSS color | Translucent fill for important persistent highlights. |
 
 #### `tree` section key reference
 
@@ -372,6 +454,14 @@ General conversion rule: `MiB * 1024 * 1024`.
 
 - Sidecar parsing is defensive: malformed entries are ignored where possible.
 - Legacy and partial shapes are tolerated in key paths (especially views).
+- Ordinary per-file changes are serialized under stable companion lock files,
+  merged against the latest disk payload, and committed by atomic replacement.
+  Tombstones remove only the named PDF entry. Same-PDF highlight range
+  operations transform the latest entry while locked; same-PDF color and view
+  conflicts are last-commit-wins.
+- If a transactional highlight add/remove cannot be committed, the viewer and
+  in-process snapshot are restored from the unchanged disk payload and the UI
+  reports the save failure instead of claiming success.
 - Sidecars are the only durable writes; source PDFs are never edited.
 
 ### Sidecar Quick Reference
@@ -392,7 +482,8 @@ General conversion rule: `MiB * 1024 * 1024`.
 - Automatic extracted-text prefetch is enabled, low-priority, single-file, and
   throttled by both interaction detection and an inter-batch cooldown. Source/cache
   probes run in its worker rather than on the GUI thread. Input anywhere in the
-  app cancels queued work, and extraction yields at page boundaries.
+  app cancels queued work, and extraction yields at page boundaries. The idle
+  test also observes the activity heartbeat shared by other instances.
 - Extracted-text garbage collection uses an independent 30-second cadence,
   requires 10 seconds of sustained input idle, scans bounded batches on the
   low-priority pool, and yields between entries when interaction or search
@@ -400,7 +491,20 @@ General conversion rule: `MiB * 1024 * 1024`.
   the GUI thread only publishes cache-badge changes. Overdue GC gets first refusal
   on the shared idle pool after each prefetch batch so warming cannot starve it.
   It stays available when automatic prefetch is disabled and never wakes or
-  rescans prefetch scope itself.
+  rescans prefetch scope itself. Prefetch and GC contend for one non-blocking
+  cross-process background lease, preventing duplicate idle maintenance across
+  simultaneously idle windows.
+- Disk-cache readers and writers coordinate with a stable cross-process lock:
+  readers open/fstat under shared mode and decompress the retained inode after
+  release; mutations use short exclusive transactions, and file/metadata
+  replacements remain atomic. Quota trim and GC take the exclusive lock only
+  per candidate. Path-stable hash-striped producer locks ensure one process
+  extracts a canonical PDF source at a time, even if the source is replaced
+  while another process waits; waiters cancel cooperatively, retry the new
+  signature, or reuse the committed result. Successful commits refresh the
+  shared trim-dirty marker so quota enforcement is not process-local.
+  Do not delete cache, producer, or background-lease lock files while an
+  instance is running.
 - A source is treated as missing only on a definite `FileNotFoundError`; permission
   or transient filesystem errors preserve the cached text.
 - Tree marker scans run in background workers and are merged with live state.
@@ -443,13 +547,15 @@ between the two apps.
 
 - `prefetch_enabled` defaults to `true`; set it to `false` only to opt out.
 - The app is considered idle enough when no recent interaction pressure or active
-  search scan is blocking prefetch.
+  search scan is blocking prefetch and the shared multi-instance activity stamp
+  is also old enough.
 - Prefetch starts after 10 seconds of sustained inactivity, warms at most one
   PDF, waits at least one second, and updates cache badges progressively.
 - Input on native controls or inside the pdf.js document cancels a queued batch;
   a running extraction stops safely at its next page boundary and never commits
-  partial text. Viewer activity uses a throttled private console sentinel rather
-  than a QApplication-wide filter over Chromium's private widgets.
+  partial text. Activity from another process has the same effect through the
+  shared heartbeat. Viewer activity uses a throttled private console sentinel
+  rather than a QApplication-wide filter over Chromium's private widgets.
 - Independently, every 30 seconds the GC timer may offer one bounded
   missing-source cleanup pass after at least 10 seconds without input; it does
   not enable, wake, or rescan scope prefetch.
