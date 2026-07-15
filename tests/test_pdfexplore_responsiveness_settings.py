@@ -12,13 +12,17 @@ class PdfExploreResponsivenessSettingsTests(unittest.TestCase):
         self.assertEqual(APP_SETTINGS.get("search_worker_chunk_size"), 8)
         self.assertEqual(APP_SETTINGS.get("search_progress_publish_interval_ms"), 100)
         self.assertEqual(APP_SETTINGS.get("preview_widget_cache_max_entries"), 2)
-        self.assertIs(APP_SETTINGS.get("prefetch_enabled"), False)
+        self.assertIs(APP_SETTINGS.get("prefetch_enabled"), True)
+        self.assertEqual(APP_SETTINGS.get("prefetch_idle_seconds"), 10.0)
+        self.assertEqual(APP_SETTINGS.get("prefetch_batch_cooldown_seconds"), 1.0)
 
         self.assertEqual(PdfExploreWindow.SEARCH_THREAD_POOL_MAX_THREADS, 1)
         self.assertEqual(PdfExploreWindow.SEARCH_WORKER_CHUNK_SIZE, 8)
         self.assertEqual(PdfExploreWindow.SEARCH_PROGRESS_PUBLISH_INTERVAL_MS, 100)
         self.assertEqual(PdfExploreWindow.PREVIEW_WIDGET_CACHE_MAX_ENTRIES, 2)
-        self.assertIs(PdfExploreWindow.PREFETCH_ENABLED, False)
+        self.assertIs(PdfExploreWindow.PREFETCH_ENABLED, True)
+        self.assertEqual(PdfExploreWindow.PREFETCH_IDLE_SECONDS, 10.0)
+        self.assertEqual(PdfExploreWindow.PREFETCH_BATCH_COOLDOWN_SECONDS, 1.0)
 
 
 if __name__ == "__main__":

@@ -21,13 +21,16 @@ same shell philosophy as `mdexplore`.
   qualifying-window behavior for `NEAR(...)` searches.
 - Its extracted-text cache performs bounded garbage-collection passes on an
   independent 30-second cadence after 10 seconds of input idle, removing
-  memory/disk entries and cache badges for PDFs that no longer exist even while
-  automatic prefetch is disabled.
+  memory/disk entries and cache badges for PDFs that no longer exist independently
+  of automatic prefetch. Filesystem validation and deletion stay on the idle
+  worker and yield between entries when input resumes.
 - It bounds live PDF WebEngine previews with a two-entry least-recently-used cache
   by default; evicted pages are discarded to prevent cumulative browser-memory growth.
-- Automatic extracted-text prefetch is disabled by default. Search extraction uses
-  one worker thread, eight-PDF chunks, and debounced partial-result publication so
-  background text work causes less UI contention.
+- Automatic extracted-text prefetch resumes after 10 seconds idle, warms one PDF
+  at a time with a one-second inter-batch cooldown, and moves cache probes off the
+  GUI thread. Input across native controls and inside pdf.js cancels queued work
+  immediately, and running extraction yields between PDF pages. Search extraction
+  remains single-threaded and debounced.
 - Its viewer bridge filters bridge-owned DOM mutations, coalesces marker
   publications, ignores identical overlay payloads, and avoids full-document
   overlay/index work during ordinary scrolling while preserving pdf.js's

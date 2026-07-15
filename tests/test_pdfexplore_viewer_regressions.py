@@ -230,6 +230,25 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             220.0,
         )
 
+    def test_viewer_pointer_activity_resets_background_idle_clock(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        previous = time.monotonic() - self.window.PREFETCH_IDLE_SECONDS - 1.0
+        self.window._last_user_interaction_at = previous
+
+        self.run_current_viewer_js(
+            "document.dispatchEvent(new PointerEvent("
+            "'pointerdown', { bubbles: true, buttons: 1 })); true;"
+        )
+        self.wait_until(
+            lambda: self.window._last_user_interaction_at > previous,
+            timeout_ms=3000,
+        )
+
+        self.assertLess(
+            time.monotonic() - self.window._last_user_interaction_at,
+            1.0,
+        )
+
     def test_dark_mode_applies_to_loaded_and_new_pdf_viewers(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
 

@@ -140,15 +140,43 @@ OKULAR_EDIT_LAUNCHER = Path(
         )
     )
 )
+VIEWER_ACTIVITY_CONSOLE_MESSAGE = "__pdfexplore_user_activity__"
+
+
+class PdfPreviewPage(QWebEnginePage):
+    """WebEngine page that forwards throttled viewer activity to the window."""
+
+    def __init__(self, activity_handler, parent=None) -> None:
+        """Initialize the page-level activity bridge."""
+        super().__init__(parent)
+        self._activity_handler = activity_handler
+
+    def javaScriptConsoleMessage(  # noqa: N802
+        self,
+        level,
+        message: str,
+        line_number: int,
+        source_id: str,
+    ) -> None:
+        """Consume the private activity sentinel emitted by the viewer bridge."""
+        if str(message).strip() == VIEWER_ACTIVITY_CONSOLE_MESSAGE:
+            try:
+                if callable(self._activity_handler):
+                    self._activity_handler()
+            except Exception:
+                pass
+            return
+        super().javaScriptConsoleMessage(level, message, line_number, source_id)
 
 
 class PdfPreviewWebView(QWebEngineView):
     """WebEngine view that lets the app intercept hotkeys before pdf.js consumes them."""
 
-    def __init__(self, key_handler, parent=None) -> None:
+    def __init__(self, key_handler, activity_handler, parent=None) -> None:
         """Initialize instance state."""
         super().__init__(parent)
         self._key_handler = key_handler
+        self.setPage(PdfPreviewPage(activity_handler, self))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Handle keyPressEvent."""
@@ -187,9 +215,12 @@ class PdfExploreWindow(QMainWindow):
     PDF_TEXT_CACHE_GC_BATCH_SIZE = int(
         _app_setting("pdf_text_cache_gc_batch_size", 128)
     )
-    PREFETCH_ENABLED = bool(_app_setting("prefetch_enabled", False))
+    PREFETCH_ENABLED = bool(_app_setting("prefetch_enabled", True))
     PREFETCH_BATCH_SIZE = int(_app_setting("prefetch_batch_size", 1))
-    PREFETCH_IDLE_SECONDS = float(_app_setting("prefetch_idle_seconds", 0.8))
+    PREFETCH_IDLE_SECONDS = float(_app_setting("prefetch_idle_seconds", 10.0))
+    PREFETCH_BATCH_COOLDOWN_SECONDS = float(
+        _app_setting("prefetch_batch_cooldown_seconds", 1.0)
+    )
     PREFETCH_HEAVY_USE_WINDOW_SECONDS = float(_app_setting("prefetch_heavy_use_window_seconds", 1.2))
     PREFETCH_HEAVY_USE_EVENT_THRESHOLD = int(_app_setting("prefetch_heavy_use_event_threshold", 14))
     PREFETCH_HEAVY_USE_PAUSE_SECONDS = float(_app_setting("prefetch_heavy_use_pause_seconds", 1.2))
@@ -250,12 +281,14 @@ class PdfExploreWindow(QMainWindow):
         self._pdf_text_disk_cache_lock = Lock()
         self._pdf_text_disk_cache_store_count = 0
         self._pdf_text_disk_cache_dir = self._build_pdf_text_disk_cache_dir()
-        self._last_pdf_text_cache_gc_at = 0.0
+        self._last_pdf_text_cache_gc_at = time.monotonic()
         self._pdf_text_cache_gc_memory_cursor = ""
         self._pdf_text_cache_gc_disk_cursor = ""
         self._active_pdf_text_cache_gc_worker: PdfTextCacheGcWorker | None = None
         self._prefetch_scope_key = ""
         self._prefetch_cursor = 0
+        self._prefetch_last_prioritized_current_path = ""
+        self._next_scope_prefetch_at = 0.0
         self._last_user_interaction_at = time.monotonic()
         self._recent_interaction_timestamps: deque[float] = deque(maxlen=96)
         self._prefetch_paused_until = 0.0
@@ -750,10 +783,12 @@ class PdfExploreWindow(QMainWindow):
         self._set_root_directory(self.root)
         self._update_window_title()
         self._update_up_button_state()
+        # Track input across this window's controls without installing a
+        # QApplication-wide filter. Global Qt filters can intercept private
+        # QtWebEngine renderer widgets and destabilize Chromium event delivery.
         self.installEventFilter(self)
-        self.tree.installEventFilter(self)
-        self.tree.viewport().installEventFilter(self)
-        self.match_input.installEventFilter(self)
+        for widget in self.findChildren(QWidget):
+            widget.installEventFilter(self)
 
     def _lookup_cached_pdf_text(
         self,
@@ -801,6 +836,13 @@ class PdfExploreWindow(QMainWindow):
             removed = self._pdf_text_cache.pop(path_key, None)
             if removed is not None:
                 self._pdf_text_cache_total_chars -= len(removed[2])
+        with self._cached_pdf_path_keys_lock:
+            if path_key in self._cached_pdf_path_keys:
+                self._cached_pdf_path_keys.discard(path_key)
+                self._cached_pdf_path_keys_revision += 1
+        self._prefetch_last_prioritized_current_path = ""
+        self._request_cached_badge_sync()
+        self._request_scope_prefetch()
 
     def _record_cached_pdf_path_key(self, path_key: str) -> None:
         """Handle record cached pdf path key."""
@@ -850,6 +892,22 @@ class PdfExploreWindow(QMainWindow):
         now = time.monotonic()
         self._last_user_interaction_at = now
         self._recent_interaction_timestamps.append(now)
+
+        current_request_id = self._prefetch_request_id
+        has_current_prefetch = any(
+            worker.request_id == current_request_id
+            for worker in self._active_prefetch_workers
+        )
+        gc_worker = self._active_pdf_text_cache_gc_worker
+        has_current_gc = bool(
+            gc_worker is not None and gc_worker.request_id == current_request_id
+        )
+        if has_current_prefetch or has_current_gc:
+            # A queued/running current-document warmup may not have reached its
+            # loader yet. Let the next idle period prioritize it again.
+            self._prefetch_last_prioritized_current_path = ""
+            self._cancel_scope_prefetch()
+            self._request_scope_prefetch()
 
         window_seconds = float(self.PREFETCH_HEAVY_USE_WINDOW_SECONDS)
         cutoff = now - window_seconds
@@ -927,6 +985,12 @@ class PdfExploreWindow(QMainWindow):
                 self.PREFETCH_VIEWER_ACTIVITY_PAUSE_SECONDS,
                 cancel_inflight=True,
             )
+
+    def _on_viewer_user_activity(self, path_key: str) -> None:
+        """Reset idle work from activity reported inside the pdf.js document."""
+        if self._closing or self._current_preview_path_key() != str(path_key):
+            return
+        self._mark_user_interaction()
 
     def _is_pdf_text_cached_for_path(
         self,
@@ -1166,16 +1230,34 @@ class PdfExploreWindow(QMainWindow):
         # Sorting is intentionally deferred to the worker thread.
         return list(path_keys)
 
-    def _apply_pdf_text_cache_gc_payload(self, payload: object) -> tuple[int, int]:
-        """Delete confirmed stale cache data under the appropriate locks."""
+    def _apply_pdf_text_cache_gc_payload(
+        self,
+        payload: object,
+        should_abort=None,
+    ) -> tuple[int, int]:
+        """Delete confirmed stale cache data under the appropriate locks.
+
+        This method is widget-free and may run on the low-priority GC thread.
+        It revalidates every deletion candidate and yields between entries when
+        user/search activity invalidates the idle request.
+        """
         if not isinstance(payload, dict):
             return 0, 0
 
-        missing_sources = {
-            str(value)
-            for value in payload.get("missing_memory_path_keys", [])
-            if value and self._pdf_source_definitely_missing(str(value))
-        }
+        def _aborted() -> bool:
+            return bool(callable(should_abort) and should_abort())
+
+        missing_sources: set[str] = set()
+        for value in payload.get("missing_memory_path_keys", []):
+            if _aborted():
+                break
+            path_key = str(value or "")
+            if not path_key or not self._pdf_source_definitely_missing(path_key):
+                continue
+            if _aborted():
+                break
+            missing_sources.add(path_key)
+
         disk_entries = payload.get("missing_disk_entries", [])
         if not isinstance(disk_entries, list):
             disk_entries = []
@@ -1184,6 +1266,8 @@ class PdfExploreWindow(QMainWindow):
         cache_dir = self._pdf_text_disk_cache_dir
         with self._pdf_text_disk_cache_lock:
             for entry in disk_entries:
+                if _aborted():
+                    break
                 if not isinstance(entry, dict):
                     continue
                 source_path = str(entry.get("source_path", "")).strip()
@@ -1191,10 +1275,11 @@ class PdfExploreWindow(QMainWindow):
                 metadata_path = Path(str(entry.get("metadata_path", "")))
                 if (
                     not source_path
-                    or not self._pdf_source_definitely_missing(source_path)
                     or cache_path.parent != cache_dir
                     or metadata_path != self._pdf_text_disk_cache_metadata_path(cache_path)
                 ):
+                    continue
+                if not self._pdf_source_definitely_missing(source_path) or _aborted():
                     continue
                 removed = False
                 try:
@@ -1210,34 +1295,66 @@ class PdfExploreWindow(QMainWindow):
             stale_metadata_paths = payload.get("stale_metadata_paths", [])
             if isinstance(stale_metadata_paths, list):
                 for raw_path in stale_metadata_paths:
+                    if _aborted():
+                        break
                     metadata_path = Path(str(raw_path))
                     if (
                         metadata_path.parent != cache_dir
                         or not metadata_path.name.endswith(".txt.gz.meta.json")
                     ):
                         continue
+                    cache_path = metadata_path.with_name(
+                        metadata_path.name[: -len(".meta.json")]
+                    )
                     try:
+                        if cache_path.is_file():
+                            current_payload = json.loads(
+                                metadata_path.read_text(encoding="utf-8")
+                            )
+                            current_source = str(
+                                current_payload.get("source_path", "")
+                                if isinstance(current_payload, dict)
+                                else ""
+                            ).strip()
+                            if current_source and Path(current_source).is_absolute():
+                                # A writer repaired/recreated this companion after
+                                # the scan. Preserve the now-valid metadata.
+                                continue
+                        if _aborted():
+                            break
                         metadata_path.unlink(missing_ok=True)
                     except Exception:
-                        pass
+                        # Malformed metadata is still stale; an unlink failure is
+                        # harmless and can be retried by a later idle pass.
+                        try:
+                            if not _aborted():
+                                metadata_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
 
         removed_memory_entries = 0
-        if missing_sources:
+        committed_missing_sources: set[str] = set()
+        if missing_sources and not _aborted():
             with self._pdf_text_cache_lock:
                 for path_key in missing_sources:
+                    if _aborted():
+                        break
                     removed = self._pdf_text_cache.pop(path_key, None)
-                    if removed is None:
-                        continue
-                    self._pdf_text_cache_total_chars -= len(removed[2])
-                    removed_memory_entries += 1
+                    committed_missing_sources.add(path_key)
+                    if removed is not None:
+                        self._pdf_text_cache_total_chars -= len(removed[2])
+                        removed_memory_entries += 1
                 self._pdf_text_cache_total_chars = max(
                     0,
                     self._pdf_text_cache_total_chars,
                 )
 
+        if committed_missing_sources:
             with self._cached_pdf_path_keys_lock:
                 previous_count = len(self._cached_pdf_path_keys)
-                self._cached_pdf_path_keys.difference_update(missing_sources)
+                self._cached_pdf_path_keys.difference_update(
+                    committed_missing_sources
+                )
                 if len(self._cached_pdf_path_keys) != previous_count:
                     self._cached_pdf_path_keys_revision += 1
 
@@ -1270,14 +1387,10 @@ class PdfExploreWindow(QMainWindow):
             return False
 
         request_id = self._prefetch_request_id
-        worker = PdfTextCacheGcWorker(
-            request_id,
-            self._snapshot_pdf_text_cache_gc_path_keys(),
-            self._pdf_text_disk_cache_dir,
-            memory_cursor=self._pdf_text_cache_gc_memory_cursor,
-            disk_cursor=self._pdf_text_cache_gc_disk_cursor,
-            batch_size=max(1, int(self.PDF_TEXT_CACHE_GC_BATCH_SIZE)),
-            should_abort=lambda req=request_id: (
+
+        def _should_abort_gc(req: int = request_id) -> bool:
+            """Yield promptly once this no longer remains an idle request."""
+            return bool(
                 self._closing
                 or req != self._prefetch_request_id
                 or self._prefetch_temporarily_paused()
@@ -1290,7 +1403,17 @@ class PdfExploreWindow(QMainWindow):
                     and self._search_scan_completed_workers
                     < self._search_scan_expected_workers
                 )
-            ),
+            )
+
+        worker = PdfTextCacheGcWorker(
+            request_id,
+            self._snapshot_pdf_text_cache_gc_path_keys(),
+            self._pdf_text_disk_cache_dir,
+            memory_cursor=self._pdf_text_cache_gc_memory_cursor,
+            disk_cursor=self._pdf_text_cache_gc_disk_cursor,
+            batch_size=max(1, int(self.PDF_TEXT_CACHE_GC_BATCH_SIZE)),
+            should_abort=_should_abort_gc,
+            payload_applier=self._apply_pdf_text_cache_gc_payload,
         )
         self._last_pdf_text_cache_gc_at = now
         self._active_pdf_text_cache_gc_worker = worker
@@ -1304,10 +1427,12 @@ class PdfExploreWindow(QMainWindow):
         payload: object,
         _error_text: str,
     ) -> None:
-        """Apply one worker result and return the idle pool to prefetching."""
+        """Publish one worker result and return the idle pool to prefetching."""
         worker = self._active_pdf_text_cache_gc_worker
         if worker is not None and worker.request_id == request_id:
             self._active_pdf_text_cache_gc_worker = None
+        if request_id != self._prefetch_request_id:
+            return
         if isinstance(payload, dict):
             self._pdf_text_cache_gc_memory_cursor = str(
                 payload.get("memory_cursor", "") or ""
@@ -1315,8 +1440,8 @@ class PdfExploreWindow(QMainWindow):
             self._pdf_text_cache_gc_disk_cursor = str(
                 payload.get("disk_cursor", "") or ""
             )
-        self._apply_pdf_text_cache_gc_payload(payload)
         self._request_cached_badge_sync()
+        self._request_scope_prefetch()
 
     def _on_pdf_text_cache_gc_timer(self) -> None:
         """Offer one idle worker slot to GC without waking scope prefetch."""
@@ -1325,6 +1450,12 @@ class PdfExploreWindow(QMainWindow):
     def _cancel_scope_prefetch(self) -> None:
         """Handle cancel scope prefetch."""
         self._prefetch_request_id += 1
+        for worker in tuple(self._active_prefetch_workers):
+            try:
+                if self._prefetch_pool.tryTake(worker):
+                    self._active_prefetch_workers.discard(worker)
+            except Exception:
+                pass
         gc_worker = self._active_pdf_text_cache_gc_worker
         if gc_worker is not None:
             try:
@@ -1355,10 +1486,21 @@ class PdfExploreWindow(QMainWindow):
             self._scope_prefetch_timer.start()
             return
 
-        if (time.monotonic() - self._last_user_interaction_at) < float(
-            self.PREFETCH_IDLE_SECONDS
-        ):
-            self._scope_prefetch_timer.start()
+        idle_elapsed = time.monotonic() - self._last_user_interaction_at
+        idle_required = float(self.PREFETCH_IDLE_SECONDS)
+        if idle_elapsed < idle_required:
+            remaining_ms = int(max(0.0, idle_required - idle_elapsed) * 1000) + 1
+            self._scope_prefetch_timer.start(
+                max(int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS), remaining_ms)
+            )
+            return
+
+        now = time.monotonic()
+        if now < self._next_scope_prefetch_at:
+            remaining_ms = int((self._next_scope_prefetch_at - now) * 1000)
+            self._scope_prefetch_timer.start(
+                max(int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS), remaining_ms)
+            )
             return
 
         if (
@@ -1376,7 +1518,11 @@ class PdfExploreWindow(QMainWindow):
             self._scope_prefetch_timer.start()
             return
 
-        candidates = self._list_visible_pdf_files_in_tree()
+        # QFileSystemModel loads directories asynchronously. Prefetch consumes
+        # only rows already present in the model so an idle pass never forces a
+        # directory fetch or performs a fallback filesystem walk on the GUI
+        # thread.
+        candidates = self._list_visible_pdf_files_in_tree(fetch_more=False)
         if not candidates:
             return
 
@@ -1384,6 +1530,7 @@ class PdfExploreWindow(QMainWindow):
         if current_scope_key != self._prefetch_scope_key:
             self._prefetch_scope_key = current_scope_key
             self._prefetch_cursor = 0
+            self._prefetch_last_prioritized_current_path = ""
 
         total_candidates = len(candidates)
         if total_candidates <= 0:
@@ -1394,38 +1541,31 @@ class PdfExploreWindow(QMainWindow):
         visited = 0
         target_batch_size = max(1, int(self.PREFETCH_BATCH_SIZE))
 
-        prioritized_current_key: str | None = None
+        prioritized_current_identity: str | None = None
         current = self.current_file
-        if (
-            isinstance(current, Path)
-            and current.suffix.lower() == ".pdf"
-            and current.is_file()
-            and not self._is_pdf_text_cached_for_path(
-                current,
-                mark_cached_badge=True,
-            )
-        ):
-            try:
-                prioritized_current = current.resolve()
-            except Exception:
-                prioritized_current = current
-            batch.append(prioritized_current)
-            prioritized_current_key = self._path_key(prioritized_current)
+        if isinstance(current, Path) and current.suffix.lower() == ".pdf":
+            current_identity = self._path_identity_without_io(current)
+            if current_identity != self._prefetch_last_prioritized_current_path:
+                batch.append(current)
+                prioritized_current_identity = current_identity
+                self._prefetch_last_prioritized_current_path = current_identity
 
         while visited < total_candidates and len(batch) < target_batch_size:
             candidate = candidates[cursor]
-            candidate_key = self._path_key(candidate)
-            if prioritized_current_key and candidate_key == prioritized_current_key:
+            candidate_identity = self._path_identity_without_io(candidate)
+            if (
+                prioritized_current_identity
+                and candidate_identity == prioritized_current_identity
+            ):
                 # Skip duplicate insertion when the current file is also in the
                 # regular rotating candidate stream.
                 cursor = (cursor + 1) % total_candidates
                 visited += 1
                 continue
-            if not self._is_pdf_text_cached_for_path(
-                candidate,
-                mark_cached_badge=True,
-            ):
-                batch.append(candidate)
+            # Every visible candidate is worker-probed in rotation. Cache badge
+            # state is intentionally not used as a validity index: signatures
+            # can change and disk entries can be trimmed outside this pass.
+            batch.append(candidate)
             cursor = (cursor + 1) % total_candidates
             visited += 1
         self._prefetch_cursor = cursor
@@ -1438,12 +1578,24 @@ class PdfExploreWindow(QMainWindow):
         worker = PdfTextPrefetchWorker(
             request_id,
             batch,
-            lambda path, req=request_id: self._read_pdf_text(
+            lambda path, req=request_id: self._prefetch_pdf_text(
                 path,
-                should_abort=lambda: req != self._prefetch_request_id,
+                should_abort=lambda: (
+                    self._closing
+                    or req != self._prefetch_request_id
+                    or (
+                        time.monotonic() - self._last_user_interaction_at
+                        < float(self.PREFETCH_IDLE_SECONDS)
+                    )
+                ),
             ),
             should_abort=lambda req=request_id: (
-                req != self._prefetch_request_id
+                self._closing
+                or req != self._prefetch_request_id
+                or (
+                    time.monotonic() - self._last_user_interaction_at
+                    < float(self.PREFETCH_IDLE_SECONDS)
+                )
                 or (
                     self._search_scan_expected_workers > 0
                     and self._search_scan_completed_workers
@@ -1470,8 +1622,14 @@ class PdfExploreWindow(QMainWindow):
                 break
         if worker_to_remove is not None:
             self._active_prefetch_workers.remove(worker_to_remove)
+        self._next_scope_prefetch_at = (
+            time.monotonic() + float(self.PREFETCH_BATCH_COOLDOWN_SECONDS)
+        )
         self._request_cached_badge_sync()
-        self._request_scope_prefetch()
+        # Give overdue cleanup first refusal on the shared low-priority pool so
+        # a continuous sequence of one-file warmup batches cannot starve GC.
+        if not self._maybe_start_pdf_text_cache_gc():
+            self._request_scope_prefetch()
 
     def _register_global_shortcut(self, sequence: QKeySequence, callback) -> None:
         """Handle register global shortcut."""
@@ -1600,6 +1758,14 @@ class PdfExploreWindow(QMainWindow):
         """Handle path key."""
         try:
             return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    @staticmethod
+    def _path_identity_without_io(path: Path) -> str:
+        """Return a stable lexical identity without touching the filesystem."""
+        try:
+            return os.path.normcase(os.path.abspath(os.fspath(path)))
         except Exception:
             return str(path)
 
@@ -2245,6 +2411,14 @@ class PdfExploreWindow(QMainWindow):
         self._record_cached_pdf_path_key(path_key)
         return text
 
+    def _prefetch_pdf_text(self, path: Path, *, should_abort=None) -> str:
+        """Probe or warm one text-cache entry entirely off the GUI thread."""
+        if callable(should_abort) and should_abort():
+            return ""
+        if self._is_pdf_text_cached_for_path(path, mark_cached_badge=True):
+            return ""
+        return self._read_pdf_text(path, should_abort=should_abort)
+
     def _list_pdf_files_non_recursive(self, directory: Path) -> list[Path]:
         """Handle list pdf files non recursive."""
         if not directory.is_dir():
@@ -2271,6 +2445,8 @@ class PdfExploreWindow(QMainWindow):
 
         root_index = self.tree.rootIndex()
         if not root_index.isValid():
+            if not fetch_more:
+                return []
             files = self._list_pdf_files_non_recursive(self._highlight_scope_directory())
             self._visible_tree_pdf_cache = list(files)
             self._visible_tree_pdf_cache_dirty = False
@@ -2282,15 +2458,11 @@ class PdfExploreWindow(QMainWindow):
 
         def _append_file(path: Path) -> None:
             """Handle append file."""
-            try:
-                resolved = path.resolve()
-            except Exception:
-                resolved = path
-            key = str(resolved)
+            key = self._path_identity_without_io(path)
             if key in seen:
                 return
             seen.add(key)
-            files.append(resolved)
+            files.append(path)
 
         def _walk_visible_children(parent_index) -> None:
             """Handle walk visible children."""
@@ -2304,19 +2476,11 @@ class PdfExploreWindow(QMainWindow):
                 if not index.isValid():
                     continue
                 path = Path(self.model.filePath(index))
-                try:
-                    if path.is_file() and path.suffix.lower() == ".pdf":
-                        _append_file(path)
-                        continue
-                except Exception:
-                    continue
-
-                try:
-                    is_dir = path.is_dir()
-                except Exception:
-                    is_dir = False
+                is_dir = bool(self.model.isDir(index))
                 if is_dir and self.tree.isExpanded(index):
                     _walk_visible_children(index)
+                elif not is_dir and path.suffix.lower() == ".pdf":
+                    _append_file(path)
 
         _walk_visible_children(root_index)
         self._visible_tree_pdf_cache = list(files)
@@ -3069,7 +3233,10 @@ class PdfExploreWindow(QMainWindow):
     def _create_preview_widget(self, path: Path) -> QWebEngineView:
         """Handle create preview widget."""
         path_key = self._path_key(path)
-        preview = PdfPreviewWebView(self._handle_custom_shortcut_key_event)
+        preview = PdfPreviewWebView(
+            self._handle_custom_shortcut_key_event,
+            lambda key=path_key: self._on_viewer_user_activity(key),
+        )
         preview.installEventFilter(self)
         preview.setProperty("pdfexplore_path_key", path_key)
         preview_settings = preview.settings()

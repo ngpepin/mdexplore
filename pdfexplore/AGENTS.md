@@ -165,8 +165,8 @@ C4Component
 - User navigates tree, opens PDFs, adds highlights, runs searches.
 - Search workers evaluate visible-scope candidates in configured chunks and
   coalesce partial UI publications.
-- When explicitly enabled, the prefetch worker warms text cache opportunistically
-  while idle; automatic prefetch is disabled by default.
+- The enabled-by-default prefetch worker waits for sustained idle, warms one PDF
+  off the GUI thread, then observes an inter-batch cooldown.
 
 4. Synchronization
 
@@ -188,15 +188,24 @@ C4Component
     - default to one extraction thread, eight candidate PDFs per job, and a
       100 ms partial-result publication interval to reduce GUI churn.
 - Prefetch workers:
-    - are disabled by default and run only when `prefetch_enabled` is true,
+    - are enabled by default and remain opt-out through `prefetch_enabled`,
     - run low-priority,
-    - should pause/cancel under interaction pressure,
+    - perform source/cache probes off the GUI thread,
+    - wait for 10 seconds of sustained inactivity and one second between batches
+      by default,
+    - combine native widget filters with the viewer bridge's throttled activity
+      sentinel, remove cancelled queued runnables from active bookkeeping, and
+      yield running extraction between pages,
+    - must not treat the cache-badge path set as a cache-validity index,
     - should prefer current-document warmup before broader scope.
 - Text-cache garbage-collection workers:
     - share the low-priority idle worker pool with prefetch,
     - are offered by an independent 30-second timer only after 10 seconds of
       sustained input idle, including while prefetch is disabled,
-    - inspect bounded batches and stop when user/search pressure returns,
+    - inspect and delete bounded batches off the GUI thread and stop between
+      entries when user/search pressure returns,
+    - receive first refusal on the shared idle pool after prefetch completion when
+      their independent cadence is overdue,
     - may evict extracted text only after the source path is definitively missing,
     - must not evict on permission or transient filesystem errors.
 - Marker scan workers:
@@ -266,7 +275,8 @@ Recommended validation sequence:
 ## Failure Modes to Watch
 
 - Marker disappearance after search or tab switch.
-- Prefetch running while disabled, or starving indefinitely while explicitly enabled and idle.
+- Prefetch ignoring an explicit opt-out, failing to publish cache badges, or
+  running continuously without its idle/cooldown gates.
 - Unbounded growth in live WebEngine pages while opening many PDFs.
 - Overlay MutationObserver feedback loops or ordinary-scroll full-document scans.
 - Excessive UI stalls on root change due to marker merge overhead.
@@ -282,8 +292,9 @@ Recommended validation sequence:
 ## Maintenance Guidance
 
 - Prefer sharing generic behavior through `mdexplore_app` for long-term parity.
-- Keep optional prefetch disabled by default and interaction-first when enabled;
-  regressions should bias toward smooth UI.
+- Keep prefetch interaction-first: one file per batch, worker-side cache probes,
+  app-wide idle tracking, page-level cancellation, rotating badge validation,
+  and an inter-batch cooldown are required.
 - Keep extracted-text garbage collection idle-only and bounded. Disk entries use
   atomic `.txt.gz.meta.json` companions to retain their source-PDF path; legacy
   entries remain readable and gain metadata when they are next loaded.

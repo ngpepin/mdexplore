@@ -93,10 +93,12 @@ It is designed for people who review many PDFs and need stable annotation/sessio
     remains in that cache,
   - an eviction discards the least-recently-used WebEngine page so returning to
     that PDF reloads its viewer instead of retaining unbounded browser memory.
-- Extracted-text cache + optional idle prefetch:
-  - automatic visible-scope prefetch is disabled by default to avoid competing
-    with navigation and scrolling, and can be enabled with `prefetch_enabled`,
-  - when enabled, likely-next PDFs are warmed in small, interaction-aware batches,
+- Extracted-text cache + idle prefetch:
+  - automatic visible-scope prefetch is enabled by default but waits for 10
+    seconds idle, warms one PDF at a time, and pauses between batches,
+  - cache probes and extraction run off the GUI thread; native-control input and
+    pdf.js pointer/key/wheel activity cancel queued work, while running extraction
+    yields between pages,
   - cached-text badge reflects both memory and disk cache hits,
   - idle garbage collection removes memory/disk text entries whose source PDF
     has been deleted and clears the corresponding cache badge.
@@ -152,10 +154,12 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - click interactions can interrupt and resume builds to keep navigation immediate,
   - identical search/highlight payloads are ignored rather than rebuilding overlays.
 - Prefetch action:
-  - when explicitly enabled, an idle timer evaluates interaction/search pressure
-    before scheduling optional cache warming,
+  - an idle timer evaluates interaction/search pressure before scheduling
+    enabled-by-default, single-file cache warming,
+  - source/cache probes and extraction stay on the low-priority worker,
   - the independent GC timer continues to offer bounded missing-source cleanup
-    even when prefetch is disabled.
+    even when prefetch is disabled; validation/deletion stays on that worker and
+    yields between cache entries when activity resumes.
 - Marker update action:
   - sidecar scan worker emits marker sets,
   - app merges scan state with live state,
@@ -242,9 +246,10 @@ separate, app-local tuning surface for pdfexplore.
 | `pdf_text_cache_gc_interval_seconds` | `30.0` | Cadence of the dedicated missing-source garbage-collection timer. |
 | `pdf_text_cache_gc_idle_seconds` | `10.0` | Sustained no-input period required before a GC batch may start or continue. |
 | `pdf_text_cache_gc_batch_size` | `128` | Maximum memory entries and disk metadata companions checked per idle GC batch. |
-| `prefetch_enabled` | `false` | Enables optional automatic visible-scope extracted-text warming; disabled by default for responsiveness. |
+| `prefetch_enabled` | `true` | Enables automatic idle visible-scope extracted-text warming. |
 | `prefetch_batch_size` | `1` | Number of PDFs prefetched per idle cycle. |
-| `prefetch_idle_seconds` | `0.8` | Idle-delay threshold before prefetch can run. |
+| `prefetch_idle_seconds` | `10.0` | Sustained idle period required before prefetch can run. |
+| `prefetch_batch_cooldown_seconds` | `1.0` | Minimum pause between completed prefetch batches. |
 | `prefetch_heavy_use_window_seconds` | `1.2` | Sliding window for interaction-pressure checks. |
 | `prefetch_heavy_use_event_threshold` | `14` | Interaction count threshold that triggers temporary prefetch pause. |
 | `prefetch_heavy_use_pause_seconds` | `1.2` | Pause duration after heavy interaction threshold is exceeded. |
@@ -347,9 +352,9 @@ General conversion rule: `MiB * 1024 * 1024`.
 - Change one setting group at a time (cache, prefetch, bridge markers) and verify interaction responsiveness after each change.
 - Keep `viewer_bridge` concurrency and entry limits balanced: high values increase throughput but can delay interaction-priority jumps.
 - For low-memory systems, reduce `pdf_text_cache_max_chars` first, then `pdf_text_disk_cache_max_bytes`.
-- Leave `prefetch_enabled` off unless automatic warming is worth its extraction
-  cost; if enabled, lower `prefetch_batch_size` and/or increase pause-related
-  seconds values when heavy-document navigation slows.
+- Leave `prefetch_batch_size` at one for smooth interaction. If unusually heavy
+  PDFs still interfere, increase `prefetch_idle_seconds` or
+  `prefetch_batch_cooldown_seconds`; disable prefetch only as a last resort.
 - Lower `preview_widget_cache_max_entries` when browser-process memory is more
   important than instant return to recently opened PDFs.
 
@@ -384,11 +389,16 @@ General conversion rule: `MiB * 1024 * 1024`.
   Python PDF extraction jobs contending with each other, workers receive eight
   candidates at a time, and intermediate partial results use a 100 ms debounced
   UI publication by default (final completion publishes immediately).
-- Automatic extracted-text prefetch is off by default. When enabled, it remains
-  low-priority and is throttled by interaction detection.
+- Automatic extracted-text prefetch is enabled, low-priority, single-file, and
+  throttled by both interaction detection and an inter-batch cooldown. Source/cache
+  probes run in its worker rather than on the GUI thread. Input anywhere in the
+  app cancels queued work, and extraction yields at page boundaries.
 - Extracted-text garbage collection uses an independent 30-second cadence,
   requires 10 seconds of sustained input idle, scans bounded batches on the
-  low-priority pool, and yields when interaction or search pressure returns.
+  low-priority pool, and yields between entries when interaction or search
+  pressure returns. Source checks and cache-file deletion remain on the worker;
+  the GUI thread only publishes cache-badge changes. Overdue GC gets first refusal
+  on the shared idle pool after each prefetch batch so warming cannot starve it.
   It stays available when automatic prefetch is disabled and never wakes or
   rescans prefetch scope itself.
 - A source is treated as missing only on a definite `FileNotFoundError`; permission
@@ -426,15 +436,20 @@ between the two apps.
 ### Performance Tradeoffs
 
 - Throughput is intentionally sacrificed during active interaction periods to keep UI feel stable.
-- Optional prefetch uses small batches to avoid large contiguous extraction spikes.
+- Idle prefetch uses small batches to avoid large contiguous extraction spikes.
 - Marker sync work is root-scoped to reduce unnecessary model churn after root changes.
 
-### What Optional “Idle Prefetch” Means Here
+### What “Idle Prefetch” Means Here
 
-- Set `prefetch_enabled` to `true` to opt into automatic extracted-text warming.
+- `prefetch_enabled` defaults to `true`; set it to `false` only to opt out.
 - The app is considered idle enough when no recent interaction pressure or active
-  search scan is blocking that optional prefetch.
-- Enabled prefetch warms text cache for likely-next PDFs and updates cache badges progressively.
+  search scan is blocking prefetch.
+- Prefetch starts after 10 seconds of sustained inactivity, warms at most one
+  PDF, waits at least one second, and updates cache badges progressively.
+- Input on native controls or inside the pdf.js document cancels a queued batch;
+  a running extraction stops safely at its next page boundary and never commits
+  partial text. Viewer activity uses a throttled private console sentinel rather
+  than a QApplication-wide filter over Chromium's private widgets.
 - Independently, every 30 seconds the GC timer may offer one bounded
   missing-source cleanup pass after at least 10 seconds without input; it does
   not enable, wake, or rescan scope prefetch.

@@ -87,6 +87,8 @@
     "persistent_highlight_important_marker_color",
     "rgba(154, 132, 220, 0.96)"
   );
+  const HOST_ACTIVITY_CONSOLE_MESSAGE = "__pdfexplore_user_activity__";
+  const HOST_ACTIVITY_NOTIFY_INTERVAL_MS = 120;
 
   // Bridge runtime state. Search-indicator fields intentionally track both
   // completed and in-flight builds so marker rendering can stay progressive
@@ -129,7 +131,24 @@
     searchTextCacheKey: "",
     searchTextByPage: new Map(),
     searchTextPromiseByPage: new Map(),
+    lastHostActivityNotificationAt: 0,
   };
+
+  function notifyHostUserActivity() {
+    const now = Date.now();
+    if (
+      now - Number(state.lastHostActivityNotificationAt || 0)
+      < HOST_ACTIVITY_NOTIFY_INTERVAL_MS
+    ) {
+      return;
+    }
+    state.lastHostActivityNotificationAt = now;
+    try {
+      console.debug(HOST_ACTIVITY_CONSOLE_MESSAGE);
+    } catch (_error) {
+      // Host activity reporting is best-effort and must never affect pdf.js.
+    }
+  }
 
   function computeThreeUpScale(currentViewer) {
     if (!currentViewer) {
@@ -2134,6 +2153,21 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     setDarkMode(state.darkModeActive);
     ensureObservers();
     if (!state.installed) {
+      document.addEventListener("pointerdown", notifyHostUserActivity, true);
+      document.addEventListener("keydown", notifyHostUserActivity, true);
+      document.addEventListener("wheel", notifyHostUserActivity, {
+        capture: true,
+        passive: true,
+      });
+      document.addEventListener("touchstart", notifyHostUserActivity, {
+        capture: true,
+        passive: true,
+      });
+      document.addEventListener("pointermove", (event) => {
+        if (event && Number(event.buttons || 0) !== 0) {
+          notifyHostUserActivity();
+        }
+      }, true);
       document.addEventListener("keydown", (event) => {
         if (!isThreeUpToggleShortcutEvent(event)) {
           return;

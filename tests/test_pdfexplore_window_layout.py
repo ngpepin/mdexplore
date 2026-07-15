@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QEvent, Qt
 from PySide6.QtGui import QClipboard, QIcon, QKeyEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from pdfexplore.app import PdfExploreWindow
@@ -87,6 +89,22 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertFalse(self.window._preview_dark_mode)
         self.assertEqual(self.window.dark_mode_btn.text(), "Dark")
         self.assertIn("setDarkMode(false)", captured_sources[-1])
+
+    def test_toolbar_input_resets_background_idle_clock(self) -> None:
+        previous = time.monotonic() - self.window.PREFETCH_IDLE_SECONDS - 1.0
+        self.window._last_user_interaction_at = previous
+
+        QTest.mouseClick(
+            self.window.dark_mode_btn,
+            Qt.MouseButton.LeftButton,
+        )
+        QApplication.processEvents()
+
+        self.assertGreater(self.window._last_user_interaction_at, previous)
+        self.assertLess(
+            time.monotonic() - self.window._last_user_interaction_at,
+            1.0,
+        )
 
     def test_near_query_groups_are_forwarded_to_pdf_viewer(self) -> None:
         captured_sources: list[str] = []

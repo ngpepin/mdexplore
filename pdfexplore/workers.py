@@ -202,11 +202,11 @@ class PdfTextCacheGcWorkerSignals(QObject):
 
 
 class PdfTextCacheGcWorker(QRunnable):
-    """Find text-cache entries whose source PDFs no longer exist.
+    """Find and optionally apply bounded missing-source cache cleanup.
 
-    The worker is deliberately read-only. It performs bounded filesystem checks
-    away from the GUI thread and returns deletion candidates to the main window,
-    which applies them under the cache locks.
+    Filesystem checks always run here. The optional payload applier lets the
+    owning window perform guarded cache deletion under its locks on this same
+    background thread, leaving only badge publication for the GUI thread.
     """
 
     METADATA_SUFFIX = ".txt.gz.meta.json"
@@ -221,6 +221,7 @@ class PdfTextCacheGcWorker(QRunnable):
         disk_cursor: str = "",
         batch_size: int = 128,
         should_abort=None,
+        payload_applier=None,
     ) -> None:
         """Store one bounded garbage-collection pass configuration."""
         super().__init__()
@@ -231,6 +232,7 @@ class PdfTextCacheGcWorker(QRunnable):
         self.disk_cursor = str(disk_cursor or "")
         self.batch_size = max(1, int(batch_size))
         self.should_abort = should_abort
+        self.payload_applier = payload_applier
         self.signals = PdfTextCacheGcWorkerSignals()
         self.setAutoDelete(False)
 
@@ -289,6 +291,9 @@ class PdfTextCacheGcWorker(QRunnable):
             "disk_cursor": self.disk_cursor,
         }
         try:
+            if self._aborted():
+                self._emit_finished(payload, "")
+                return
             memory_batch, memory_cursor = self._rotating_batch(
                 self.memory_path_keys,
                 self.memory_cursor,
@@ -301,6 +306,9 @@ class PdfTextCacheGcWorker(QRunnable):
                 if self._source_is_missing(path_key):
                     payload["missing_memory_path_keys"].append(path_key)
 
+            if self._aborted():
+                self._emit_finished(payload, "")
+                return
             metadata_paths: list[Path] = []
             try:
                 metadata_paths = list(
@@ -308,6 +316,9 @@ class PdfTextCacheGcWorker(QRunnable):
                 )
             except OSError:
                 metadata_paths = []
+            if self._aborted():
+                self._emit_finished(payload, "")
+                return
             metadata_names = [path.name for path in metadata_paths]
             disk_batch, disk_cursor = self._rotating_batch(
                 metadata_names,
@@ -315,6 +326,9 @@ class PdfTextCacheGcWorker(QRunnable):
                 self.batch_size,
             )
             payload["disk_cursor"] = disk_cursor
+            if self._aborted():
+                self._emit_finished(payload, "")
+                return
 
             for metadata_name in disk_batch:
                 if self._aborted():
@@ -348,6 +362,13 @@ class PdfTextCacheGcWorker(QRunnable):
                             "metadata_path": str(metadata_path),
                         }
                     )
+            if not self._aborted() and callable(self.payload_applier):
+                removed_memory, removed_disk = self.payload_applier(
+                    payload,
+                    self._aborted,
+                )
+                payload["removed_memory_entries"] = int(removed_memory)
+                payload["removed_disk_entries"] = int(removed_disk)
             self._emit_finished(payload, "")
         except Exception as exc:
             self._emit_finished(payload, str(exc))

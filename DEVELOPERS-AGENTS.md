@@ -756,10 +756,16 @@ R.PDFOVERLAY.07 :: [newer restore/layout action begins] => X(allow stale delayed
 - The preview widget cache is a bounded LRU (`preview_widget_cache_max_entries`,
   default `2`). Eviction must detach and discard the old `QWebEngineView`/page so
   opening many documents cannot retain an unbounded set of pdf.js renderers.
-- Automatic extracted-text prefetch is configurable with `prefetch_enabled` and
-  is disabled by default. Missing-source garbage collection is independent: its
-  dedicated timer runs at a 30-second cadence, requires 10 seconds of sustained
-  input idle, and must not wake or rescan prefetch scope.
+- Automatic extracted-text prefetch is configurable with `prefetch_enabled`,
+  enabled by default, and limited to one worker-side-probed PDF after 10 idle
+  seconds with a one-second inter-batch cooldown. Native input filters plus the
+  viewer bridge's throttled activity sentinel invalidate the request; extraction
+  yields between pages. Missing-source garbage collection is
+  independent: its dedicated timer runs at a 30-second cadence, requires 10
+  seconds of sustained input idle, and must not wake or rescan prefetch scope.
+  Its source checks and cache-file deletions stay on the worker and yield between
+  entries; the GUI thread only publishes returned badge state. An overdue GC pass
+  gets first refusal on the idle pool after each prefetch batch.
 - PDF search extraction defaults to one worker thread with eight candidate PDFs
   per worker job. Partial result/model updates are debounced to 100 ms so worker
   completion does not repeatedly sort and repaint the entire tree.

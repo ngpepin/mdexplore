@@ -54,6 +54,8 @@ class PdfExploreAssetTests(unittest.TestCase):
         self.assertIn("some(mutationNeedsHighlightRefresh)", source)
         self.assertIn("viewRestoreId", source)
         self.assertIn("restoreIsCurrent", source)
+        self.assertIn("__pdfexplore_user_activity__", source)
+        self.assertIn('document.addEventListener("pointerdown"', source)
 
     def test_cached_badge_asset_exists(self) -> None:
         root = Path(__file__).resolve().parent.parent
