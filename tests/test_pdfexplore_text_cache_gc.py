@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
@@ -153,6 +153,49 @@ class PdfTextCacheGcWindowTests(unittest.TestCase):
         self.assertFalse(cache_path.exists())
         self.assertFalse(metadata_path.exists())
 
+    def test_text_extraction_cancellation_between_pages_does_not_cache_partial_text(
+        self,
+    ) -> None:
+        source = self.root / "cancelled.pdf"
+        source.write_bytes(b"pdf")
+        first_page = Mock()
+        first_page.extract_text.return_value = "partial first page"
+        second_page = Mock()
+        second_page.extract_text.return_value = "second page"
+        reader = Mock(pages=[first_page, second_page])
+        abort_checks = 0
+
+        def should_abort() -> bool:
+            nonlocal abort_checks
+            abort_checks += 1
+            # Entry check, page-one check, then cancel before page two.
+            return abort_checks >= 3
+
+        with (
+            patch("pdfexplore.app.PdfReader", return_value=reader),
+            patch.object(self.window, "_lookup_cached_pdf_text", return_value=None),
+            patch.object(
+                self.window,
+                "_load_pdf_text_from_disk_cache",
+                return_value=None,
+            ),
+            patch.object(self.window, "_store_cached_pdf_text") as store_memory,
+            patch.object(self.window, "_store_pdf_text_to_disk_cache") as store_disk,
+            patch.object(self.window, "_record_cached_pdf_path_key") as record_badge,
+        ):
+            extracted = self.window._read_pdf_text(
+                source,
+                should_abort=should_abort,
+            )
+
+        self.assertEqual(extracted, "")
+        self.assertEqual(abort_checks, 3)
+        first_page.extract_text.assert_called_once_with()
+        second_page.extract_text.assert_not_called()
+        store_memory.assert_not_called()
+        store_disk.assert_not_called()
+        record_badge.assert_not_called()
+
     def test_gc_starts_only_after_idle_threshold(self) -> None:
         self.window._last_pdf_text_cache_gc_at = 0.0
         with patch.object(self.window._prefetch_pool, "start") as start:
@@ -162,13 +205,52 @@ class PdfTextCacheGcWindowTests(unittest.TestCase):
 
             self.window._prefetch_paused_until = 0.0
             self.window._last_user_interaction_at = (
-                time.monotonic() - self.window.PREFETCH_IDLE_SECONDS - 1.0
+                time.monotonic() - self.window.PDF_TEXT_CACHE_GC_IDLE_SECONDS - 1.0
             )
             self.assertTrue(self.window._maybe_start_pdf_text_cache_gc())
             start.assert_called_once()
             worker, priority = start.call_args.args
             self.assertIsInstance(worker, PdfTextCacheGcWorker)
             self.assertEqual(priority, -2)
+
+    def test_gc_timer_does_not_rescan_visible_tree_on_gui_thread(self) -> None:
+        self.window._prefetch_paused_until = 0.0
+        self.window._last_pdf_text_cache_gc_at = 0.0
+        self.window._last_user_interaction_at = (
+            time.monotonic() - self.window.PDF_TEXT_CACHE_GC_IDLE_SECONDS - 1.0
+        )
+        with (
+            patch.object(self.window._prefetch_pool, "start") as start,
+            patch.object(
+                self.window,
+                "_list_visible_pdf_files_in_tree",
+            ) as visible_tree_scan,
+        ):
+            self.window._on_pdf_text_cache_gc_timer()
+
+        start.assert_called_once()
+        visible_tree_scan.assert_not_called()
+
+    def test_disk_cache_probe_does_not_read_metadata_on_gui_thread(self) -> None:
+        source = self.root / "cached.pdf"
+        source.write_bytes(b"pdf")
+        stat = source.stat()
+        path_key = self.window._path_key(source)
+        cache_path = self.window._pdf_text_disk_cache_file_path(
+            path_key,
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cached")
+
+        with patch.object(
+            self.window,
+            "_ensure_pdf_text_disk_cache_metadata_locked",
+        ) as ensure_metadata:
+            self.assertTrue(self.window._is_pdf_text_cached_for_path(source))
+
+        ensure_metadata.assert_not_called()
 
 
 if __name__ == "__main__":

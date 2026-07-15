@@ -42,6 +42,11 @@ The system should feel predictable under stress: opening a new root, expanding f
     - Right-rail search markers should appear progressively during long scans.
     - Newly visible markers should be clickable immediately.
     - Marker build throughput may be reduced or interrupted to preserve click-to-jump responsiveness.
+- Viewer-resource invariant:
+    - Live per-document `QWebEngineView` pages must remain bounded by the preview
+      least-recently-used cache (two by default).
+    - Eviction must detach and discard the WebEngine page, not merely remove its
+      lookup key while leaving browser memory resident.
 
 ## Key Sidecars
 
@@ -158,8 +163,10 @@ C4Component
 3. Interactive Work
 
 - User navigates tree, opens PDFs, adds highlights, runs searches.
-- Search workers fan out by visible-scope candidate chunks.
-- Prefetch worker warms text cache opportunistically when idle.
+- Search workers evaluate visible-scope candidates in configured chunks and
+  coalesce partial UI publications.
+- When explicitly enabled, the prefetch worker warms text cache opportunistically
+  while idle; automatic prefetch is disabled by default.
 
 4. Synchronization
 
@@ -177,13 +184,18 @@ C4Component
 
 - Search workers:
     - should be cancellation-aware by request id,
-    - must never manipulate widgets directly.
+    - must never manipulate widgets directly,
+    - default to one extraction thread, eight candidate PDFs per job, and a
+      100 ms partial-result publication interval to reduce GUI churn.
 - Prefetch workers:
+    - are disabled by default and run only when `prefetch_enabled` is true,
     - run low-priority,
     - should pause/cancel under interaction pressure,
     - should prefer current-document warmup before broader scope.
 - Text-cache garbage-collection workers:
     - share the low-priority idle worker pool with prefetch,
+    - are offered by an independent 30-second timer only after 10 seconds of
+      sustained input idle, including while prefetch is disabled,
     - inspect bounded batches and stop when user/search pressure returns,
     - may evict extracted text only after the source path is definitively missing,
     - must not evict on permission or transient filesystem errors.
@@ -199,10 +211,24 @@ C4Component
 - Normal and important left-gutter markers must remain visually distinct and use
   the shared mdexplore marker-color settings.
 - Per-page extracted text should be cached and reused for repeated searches in the same open PDF.
-- Marker generation should run in bounded concurrent batches and publish partial results each batch.
+- Marker generation should run in bounded concurrent batches; partial right-rail
+  DOM publications should be coalesced by `search_indicator_publish_interval_ms`
+  (90 ms by default).
 - Long builds should periodically yield to the event loop so input/paint are not starved.
 - Marker click navigation should be allowed to interrupt active marker builds, then resume automatically.
 - Do not block marker click handlers on build completion.
+- Mutation observation must ignore bridge-owned highlight/rail DOM nodes so
+  overlay painting cannot schedule another overlay paint indefinitely.
+- Identical persistent-highlight and search payloads must be treated as
+  idempotent; do not rebuild indexes, highlight rectangles, or rail markers.
+- Delayed view-state restore callbacks must be generation-guarded so entering
+  three-up or applying a newer restore invalidates stale retries.
+- Ordinary scrolling must not invalidate all page-text indexes, repaint every
+  overlay, or scan every page rectangle. Restrict all-page geometry work to
+  layouts such as three-up that require a nearest-page calculation.
+- Preserve pdf.js `#viewerContainer` as an absolute, overflow-enabled,
+  viewport-bounded scroll host; a document-height relative container breaks
+  navigation, restoration, and render virtualization.
 - Right-gutter search highlights and markers for `NEAR(...)` queries must be
   restricted to qualifying proximity windows, matching shared variadic NEAR semantics.
 
@@ -212,6 +238,9 @@ C4Component
 - Keep repaint pressure low during heavy tree mutation.
 - Coalesce badge updates where practical.
 - Prefer root-scoped filtering before expensive merging.
+- Keep the preview widget cache bounded and update its LRU position on reuse;
+  returning to an evicted PDF may reload it rather than retaining unbounded
+  WebEngine processes/pages.
 
 ## Contributor Playbook
 
@@ -237,7 +266,9 @@ Recommended validation sequence:
 ## Failure Modes to Watch
 
 - Marker disappearance after search or tab switch.
-- Prefetch starving indefinitely while UI is idle.
+- Prefetch running while disabled, or starving indefinitely while explicitly enabled and idle.
+- Unbounded growth in live WebEngine pages while opening many PDFs.
+- Overlay MutationObserver feedback loops or ordinary-scroll full-document scans.
 - Excessive UI stalls on root change due to marker merge overhead.
 - Crash paths around viewer creation or event/filter hooks.
 - Sidecar parse errors cascading into badge/model state resets.
@@ -251,10 +282,15 @@ Recommended validation sequence:
 ## Maintenance Guidance
 
 - Prefer sharing generic behavior through `mdexplore_app` for long-term parity.
-- Keep prefetch throttling interaction-first; regressions should bias toward smooth UI.
+- Keep optional prefetch disabled by default and interaction-first when enabled;
+  regressions should bias toward smooth UI.
 - Keep extracted-text garbage collection idle-only and bounded. Disk entries use
   atomic `.txt.gz.meta.json` companions to retain their source-PDF path; legacy
-  entries remain readable and gain metadata when they are next accessed.
+  entries remain readable and gain metadata when they are next loaded.
+- GC uses its own 30-second cadence timer after 10 seconds of sustained input
+  idle and may share the low-priority worker pool, but it must remain independent
+  of the `prefetch_enabled` setting and must not wake scope prefetch, traverse the
+  visible tree, or read disk metadata on the GUI-thread cache-hit path.
 - Treat marker badge continuity as correctness-critical: highlight and cache badges must survive tab switches, searches, and root navigation.
 - Treat marker click latency as correctness-critical in the viewer bridge: visual marker speed without click responsiveness is a regression.
 - Preserve current UX contracts:

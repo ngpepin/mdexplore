@@ -18,8 +18,10 @@
     "pdf_text_disk_cache_max_files": 8000,
     "pdf_text_disk_cache_max_bytes": 1610612736,
     "pdf_text_disk_cache_trim_interval": 240,
-    "pdf_text_cache_gc_interval_seconds": 5.0,
+    "pdf_text_cache_gc_interval_seconds": 30.0,
+    "pdf_text_cache_gc_idle_seconds": 10.0,
     "pdf_text_cache_gc_batch_size": 128,
+    "prefetch_enabled": false,
     "prefetch_batch_size": 1,
     "prefetch_idle_seconds": 0.8,
     "prefetch_heavy_use_window_seconds": 1.2,
@@ -35,8 +37,11 @@
     "viewer_ready_timer_interval_ms": 160,
     "view_state_poll_timer_interval_ms": 900,
     "file_change_watch_interval_ms": 1200,
-    "search_thread_pool_max_threads": 2,
+    "search_thread_pool_max_threads": 1,
+    "search_worker_chunk_size": 8,
+    "search_progress_publish_interval_ms": 100,
     "prefetch_thread_pool_max_threads": 1,
+    "preview_widget_cache_max_entries": 2,
     "tree_marker_scan_thread_pool_max_threads": 1,
     "highlight_colors": [
       {
@@ -85,7 +90,8 @@
     "search_indicator_concurrency_min": 2,
     "search_indicator_concurrency_max": 4,
     "search_indicator_markers_per_page_max": 48,
-    "search_indicator_yield_every_batches": 3
+    "search_indicator_yield_every_batches": 3,
+    "search_indicator_publish_interval_ms": 90
   },
   "tree": {
     "color_file_name": ".pdfexplore-colors.json",

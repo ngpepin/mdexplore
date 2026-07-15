@@ -75,6 +75,9 @@
   const SEARCH_INDICATOR_YIELD_EVERY_BATCHES = Math.round(
     configNumber("search_indicator_yield_every_batches", 3, 1, 50)
   );
+  const SEARCH_INDICATOR_PUBLISH_INTERVAL_MS = Math.round(
+    configNumber("search_indicator_publish_interval_ms", 90, 16, 2000)
+  );
   const NEAR_WORD_GAP = Math.round(configNumber("near_word_gap", 50, 1, 10000));
   const PERSISTENT_HIGHLIGHT_MARKER_COLOR = configString(
     "persistent_highlight_marker_color",
@@ -92,13 +95,16 @@
     installed: false,
     eventBusHooksInstalled: false,
     persistentEntries: [],
+    persistentEntriesSignature: "",
     searchTerms: [],
     nearTermGroups: [],
+    searchRequestSignature: "",
     lastClickedHighlightId: "",
     lastSelectionPayload: null,
     lastSelectionTimestamp: 0,
     lastViewState: null,
     refreshHandle: 0,
+    refreshNeedsIndexInvalidation: false,
     observer: null,
     darkModeActive: false,
     threeUpActive: false,
@@ -111,11 +117,13 @@
     threeUpNormalSpreadMode: SpreadMode.NONE,
     pendingRestoreViewState: null,
     pendingRestoreUntil: 0,
+    viewRestoreId: 0,
     searchIndicatorBuildId: 0,
     searchIndicatorSignature: "",
     searchIndicatorPendingSignature: "",
     searchIndicatorEntries: [],
     searchIndicatorResumeHandle: 0,
+    searchIndicatorPublishHandle: 0,
     scrollToFirstSearchHit: false,
     activeScrollHost: null,
     searchTextCacheKey: "",
@@ -433,7 +441,8 @@ html, body {
   top: 0 !important;
 }
 #viewerContainer {
-  position: relative !important;
+  position: absolute !important;
+  overflow: auto !important;
   background: #0f1218 !important;
   scrollbar-width: none !important;
   -ms-overflow-style: none !important;
@@ -939,8 +948,6 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         }
       };
       node.addEventListener("mousedown", activateMarker);
-      node.addEventListener("pointerdown", activateMarker);
-      node.addEventListener("click", activateMarker);
       rail.appendChild(node);
     }
     window.requestAnimationFrame(() => syncHighlightIndicatorRailBounds(rail));
@@ -955,7 +962,29 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       window.clearTimeout(state.searchIndicatorResumeHandle);
       state.searchIndicatorResumeHandle = 0;
     }
+    if (state.searchIndicatorPublishHandle) {
+      window.clearTimeout(state.searchIndicatorPublishHandle);
+      state.searchIndicatorPublishHandle = 0;
+    }
     state.searchTextPromiseByPage = new Map();
+  }
+
+  function scheduleSearchIndicatorPublish() {
+    if (state.searchIndicatorPublishHandle) {
+      return;
+    }
+    state.searchIndicatorPublishHandle = window.setTimeout(() => {
+      state.searchIndicatorPublishHandle = 0;
+      refreshSearchIndicators(state.searchIndicatorEntries);
+    }, SEARCH_INDICATOR_PUBLISH_INTERVAL_MS);
+  }
+
+  function flushSearchIndicatorPublish() {
+    if (state.searchIndicatorPublishHandle) {
+      window.clearTimeout(state.searchIndicatorPublishHandle);
+      state.searchIndicatorPublishHandle = 0;
+    }
+    refreshSearchIndicators(state.searchIndicatorEntries);
   }
 
   // User clicks should win over marker throughput. Interrupt the active build,
@@ -1568,7 +1597,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       // throughout long scans.
       if (entries.length > 0) {
         state.searchIndicatorEntries = entries.slice();
-        refreshSearchIndicators(state.searchIndicatorEntries);
+        scheduleSearchIndicatorPublish();
       }
 
       processedBatches += 1;
@@ -1603,7 +1632,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     // Reuse completed entries when the query/document signature is unchanged.
     if (state.searchIndicatorSignature === signature && state.searchIndicatorEntries.length) {
-      refreshSearchIndicators(state.searchIndicatorEntries);
+      syncSearchIndicatorRailBounds();
       return;
     }
     if (state.searchIndicatorPendingSignature === signature) {
@@ -1633,7 +1662,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         state.searchIndicatorEntries = Array.isArray(entries) ? entries.slice() : [];
         state.searchIndicatorSignature = signature;
         state.searchIndicatorPendingSignature = "";
-        refreshSearchIndicators(state.searchIndicatorEntries);
+        flushSearchIndicatorPublish();
       })
       .catch(() => {
         if (buildId !== state.searchIndicatorBuildId) {
@@ -1748,8 +1777,6 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         jumpToSearchIndicatorTarget(candidate.target);
       };
       node.addEventListener("mousedown", activateMarker);
-      node.addEventListener("pointerdown", activateMarker);
-      node.addEventListener("click", activateMarker);
       rail.appendChild(node);
     }
     if (state.scrollToFirstSearchHit && state.searchIndicatorEntries.length) {
@@ -1986,10 +2013,12 @@ html.pdfexplore-dark-mode .page .xfaLayer {
           const host = ensureOverlayHost(pageEl);
           const rects = rectsForRange(pageEl, range, host);
           paintRects(pageEl, rects, "search", "");
-          for (const rect of rects) {
-            const fallback = renderedSearchIndicatorEntry(pageEl, rect);
-            if (fallback) {
-              renderedFallbackEntries.push(fallback);
+          if (!state.searchIndicatorEntries.length) {
+            for (const rect of rects) {
+              const fallback = renderedSearchIndicatorEntry(pageEl, rect);
+              if (fallback) {
+                renderedFallbackEntries.push(fallback);
+              }
             }
           }
         }
@@ -2007,19 +2036,58 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   }
 
   function refreshHighlights() {
-    invalidatePageIndexes();
     refreshPersistentHighlights();
     refreshSearchHighlights();
   }
 
-  function scheduleRefresh() {
+  function scheduleRefresh(invalidateIndexes = false) {
+    state.refreshNeedsIndexInvalidation = (
+      state.refreshNeedsIndexInvalidation || Boolean(invalidateIndexes)
+    );
     if (state.refreshHandle) {
-      window.cancelAnimationFrame(state.refreshHandle);
+      return;
     }
     state.refreshHandle = window.requestAnimationFrame(() => {
       state.refreshHandle = 0;
+      if (state.refreshNeedsIndexInvalidation) {
+        state.refreshNeedsIndexInvalidation = false;
+        invalidatePageIndexes();
+      }
       refreshHighlights();
     });
+  }
+
+  function isBridgeOverlayNode(node) {
+    const element = node instanceof Element
+      ? node
+      : (node && node.parentElement ? node.parentElement : null);
+    if (!element) {
+      return false;
+    }
+    return (
+      element.matches(".pdfexplore-overlay-host, .pdfexplore-highlight-rect")
+      || Boolean(element.closest(".pdfexplore-overlay-host"))
+    );
+  }
+
+  function mutationNeedsHighlightRefresh(record) {
+    if (!record) {
+      return false;
+    }
+    if (record.type === "characterData") {
+      return !isBridgeOverlayNode(record.target);
+    }
+    if (record.type !== "childList") {
+      return false;
+    }
+    const changedNodes = [
+      ...Array.from(record.addedNodes || []),
+      ...Array.from(record.removedNodes || []),
+    ];
+    if (!changedNodes.length) {
+      return !isBridgeOverlayNode(record.target);
+    }
+    return changedNodes.some((node) => !isBridgeOverlayNode(node));
   }
 
   function locateClickedHighlightId(clientX, clientY) {
@@ -2045,7 +2113,11 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!root) {
       return;
     }
-    state.observer = new MutationObserver(() => scheduleRefresh());
+    state.observer = new MutationObserver((records) => {
+      if (Array.from(records || []).some(mutationNeedsHighlightRefresh)) {
+        scheduleRefresh(true);
+      }
+    });
     state.observer.observe(root, {
       childList: true,
       subtree: true,
@@ -2094,6 +2166,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         // Track the dominant scroll host to avoid attaching marker semantics to
         // short-range internal scroll containers created by pdf.js layouts.
         const source = event && event.currentTarget ? event.currentTarget : null;
+        let activeHostChanged = false;
         if (source) {
           const mappedSource = source === window
             ? (document.scrollingElement || document.documentElement || document.body)
@@ -2104,28 +2177,28 @@ html.pdfexplore-dark-mode .page .xfaLayer {
             ...scrollHostCandidates().map((candidate) => scrollRangeForHost(candidate)),
           );
           if (sourceRange >= Math.max(24, dominantRange * 0.5)) {
+            activeHostChanged = state.activeScrollHost !== mappedSource;
             state.activeScrollHost = mappedSource;
           }
         }
-        syncSearchIndicatorRailBounds();
-        syncHighlightIndicatorRailBounds();
-        const currentAppForCenter = app();
-        const currentViewerForCenter = viewer();
-        const activeContainer = primaryScrollContainer();
-        if (currentAppForCenter && currentViewerForCenter && activeContainer) {
-          const centerPage = pageNearestViewportCenter(
-            currentAppForCenter,
-            currentViewerForCenter,
-            activeContainer
-          );
-          if (state.threeUpActive) {
+        if (activeHostChanged) {
+          syncSearchIndicatorRailBounds();
+          syncHighlightIndicatorRailBounds();
+        }
+        if (state.threeUpActive) {
+          const currentAppForCenter = app();
+          const currentViewerForCenter = viewer();
+          const activeContainer = primaryScrollContainer();
+          if (currentAppForCenter && currentViewerForCenter && activeContainer) {
+            const centerPage = pageNearestViewportCenter(
+              currentAppForCenter,
+              currentViewerForCenter,
+              activeContainer
+            );
             state.threeUpCenterPage = centerPage;
           }
         }
         state.lastViewState = capturePersistedViewState();
-        if (state.persistentEntries.length || state.searchTerms.length) {
-          scheduleRefresh();
-        }
       };
       const scrollTargets = new Set([
         viewerContainer(),
@@ -2158,13 +2231,10 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     ) {
       const refreshFromPdfJs = () => {
         state.lastViewState = capturePersistedViewState();
-        scheduleRefresh();
+        scheduleRefresh(true);
       };
       currentApp.eventBus.on("updateviewarea", () => {
         state.lastViewState = capturePersistedViewState();
-        if (state.persistentEntries.length || state.searchTerms.length) {
-          scheduleRefresh();
-        }
       });
       currentApp.eventBus.on("pagerendered", refreshFromPdfJs);
       currentApp.eventBus.on("pagesloaded", refreshFromPdfJs);
@@ -2172,7 +2242,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       state.eventBusHooksInstalled = true;
     }
     state.lastViewState = capturePersistedViewState();
-    scheduleRefresh();
+    scheduleRefresh(true);
     return true;
   }
 
@@ -2225,6 +2295,12 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
   }
 
+  function cancelPendingViewRestore() {
+    state.viewRestoreId += 1;
+    state.pendingRestoreViewState = null;
+    state.pendingRestoreUntil = 0;
+  }
+
   function applyViewState(stateValue) {
     const currentApp = app();
     const currentViewer = viewer();
@@ -2234,6 +2310,18 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     const scale = String(stateValue.scale || "page-width");
     const page = Number.parseInt(stateValue.page, 10);
+    state.viewRestoreId += 1;
+    const restoreId = state.viewRestoreId;
+    const restoreIsCurrent = () => restoreId === state.viewRestoreId;
+    const reapplyState = () => {
+      if (!restoreIsCurrent()) {
+        return false;
+      }
+      applyPageState(currentApp, currentViewer, page);
+      applyScrollState(container, stateValue);
+      state.lastViewState = capturePersistedViewState();
+      return true;
+    };
     currentViewer.currentScaleValue = scale || "page-width";
     state.lastViewState = {
       page: Number.isFinite(page) && page > 0 ? page : Number(currentApp.page || currentViewer.currentPageNumber || 1),
@@ -2246,43 +2334,32 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     state.pendingRestoreUntil = Date.now() + RESTORE_STABILIZE_MS;
     applyPageState(currentApp, currentViewer, page);
     window.requestAnimationFrame(() => {
-      applyPageState(currentApp, currentViewer, page);
-      applyScrollState(container, stateValue);
-      state.lastViewState = capturePersistedViewState();
+      if (!reapplyState()) {
+        return;
+      }
       window.requestAnimationFrame(() => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
-        state.lastViewState = capturePersistedViewState();
+        reapplyState();
       });
       window.setTimeout(() => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
-        state.lastViewState = capturePersistedViewState();
+        reapplyState();
       }, 80);
       window.setTimeout(() => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
-        state.lastViewState = capturePersistedViewState();
+        reapplyState();
       }, 220);
       window.setTimeout(() => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
-        state.lastViewState = capturePersistedViewState();
+        reapplyState();
       }, 450);
       window.setTimeout(() => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
-        state.lastViewState = capturePersistedViewState();
+        reapplyState();
       }, 900);
     });
     if (currentApp.eventBus && typeof currentApp.eventBus.on === "function") {
       const reapply = () => {
-        applyPageState(currentApp, currentViewer, page);
-        applyScrollState(container, stateValue);
         if (currentApp.eventBus && typeof currentApp.eventBus.off === "function") {
           currentApp.eventBus.off("pagerendered", reapply);
           currentApp.eventBus.off("pagesloaded", reapply);
         }
+        reapplyState();
       };
       currentApp.eventBus.on("pagerendered", reapply);
       currentApp.eventBus.on("pagesloaded", reapply);
@@ -2299,7 +2376,13 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.threeUpActive) {
       return true;
     }
-    const baseline = capturePersistedViewState();
+    const pendingBaseline = (
+      state.pendingRestoreViewState
+      && Date.now() <= Number(state.pendingRestoreUntil || 0)
+    )
+      ? cloneStateObject(state.pendingRestoreViewState)
+      : null;
+    const baseline = pendingBaseline || capturePersistedViewState();
     state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
       ? baseline
       : {
@@ -2321,8 +2404,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       ? currentViewer.spreadMode
       : SpreadMode.NONE;
     state.threeUpCenterPage = Number.parseInt(state.threeUpBaselineViewState.page, 10) || 1;
-    state.pendingRestoreViewState = null;
-    state.pendingRestoreUntil = 0;
+    cancelPendingViewRestore();
     state.threeUpActive = true;
     applyThreeUpLayout(currentViewer);
     applyPageState(
@@ -2430,6 +2512,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       resultPayload.ok = leaveThreeUpMode({ restoreBaseline: true, onePageScale: 1.0 });
       return resultPayload;
     }
+    cancelPendingViewRestore();
     const currentViewer = viewer();
     if (!currentViewer) {
       resultPayload.ok = false;
@@ -2478,6 +2561,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!currentApp) {
       return false;
     }
+    cancelPendingViewRestore();
     currentApp.page = 1;
     const container = viewerContainer();
     if (container) {
@@ -2519,6 +2603,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!Number.isFinite(nextScale) || nextScale <= 0) {
       return false;
     }
+    cancelPendingViewRestore();
     if (state.threeUpActive) {
       state.threeUpOnePageScale = clampZoomScale(nextScale);
       state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
@@ -2543,6 +2628,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
     }
+    cancelPendingViewRestore();
     currentViewer.currentScaleValue = "page-width";
     state.threeUpOnePageScale = onePageScaleFromViewer(currentViewer);
     state.threeUpBaselineScaleValue = "page-width";
@@ -2617,21 +2703,45 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   }
 
   function setPersistentHighlights(entries) {
-    state.persistentEntries = Array.isArray(entries) ? entries.slice() : [];
+    const nextEntries = Array.isArray(entries) ? entries.slice() : [];
+    const signature = JSON.stringify(nextEntries);
+    if (signature === state.persistentEntriesSignature) {
+      return true;
+    }
+    state.persistentEntries = nextEntries;
+    state.persistentEntriesSignature = signature;
     if (!state.persistentEntries.length) {
       clearHighlightIndicators();
     }
     scheduleRefresh();
-    window.setTimeout(scheduleRefresh, 60);
-    window.setTimeout(scheduleRefresh, 180);
-    window.setTimeout(scheduleRefresh, 420);
-    window.setTimeout(scheduleRefresh, 900);
+    window.setTimeout(scheduleRefresh, 120);
+    window.setTimeout(scheduleRefresh, 600);
     return true;
   }
 
   function setSearchTerms(terms, nearGroups = [], scrollToFirst = false) {
-    state.searchTerms = Array.isArray(terms) ? terms.slice() : [];
-    state.nearTermGroups = normalizedNearTermGroups(nearGroups);
+    const nextTerms = normalizedSearchTerms(terms);
+    const nextNearGroups = normalizedNearTermGroups(nearGroups);
+    const signature = JSON.stringify([nextTerms, nextNearGroups]);
+    if (signature === state.searchRequestSignature) {
+      if (scrollToFirst && state.searchIndicatorEntries.length) {
+        const firstTarget = state.searchIndicatorEntries.reduce((best, candidate) => {
+          if (!best) {
+            return candidate;
+          }
+          return Number(candidate.ratio) < Number(best.ratio) ? candidate : best;
+        }, null);
+        if (firstTarget) {
+          window.requestAnimationFrame(() => jumpToSearchIndicatorTarget(firstTarget));
+        }
+      } else if (scrollToFirst) {
+        state.scrollToFirstSearchHit = true;
+      }
+      return true;
+    }
+    state.searchTerms = nextTerms;
+    state.nearTermGroups = nextNearGroups;
+    state.searchRequestSignature = signature;
     state.scrollToFirstSearchHit = Boolean(scrollToFirst);
     scheduleSearchIndicatorBuild(state.searchTerms, state.nearTermGroups);
     scheduleRefresh();
@@ -2639,8 +2749,12 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   }
 
   function clearSearchTerms() {
+    if (!state.searchRequestSignature && !state.searchTerms.length) {
+      return true;
+    }
     state.searchTerms = [];
     state.nearTermGroups = [];
+    state.searchRequestSignature = "";
     state.scrollToFirstSearchHit = false;
     clearSearchIndicatorBuildState();
     clearSearchIndicators();

@@ -741,6 +741,33 @@ are limited to qualifying variadic proximity windows. Page/range metadata gives
 unrendered PDF pages an immediate marker position, refined from live geometry
 after pdf.js renders the target page.
 
+The pdfexplore responsiveness contract adds these implementation constraints:
+
+```text
+R.PDFOVERLAY.01 :: [mutation belongs to bridge highlight/rail DOM] => X(schedule another overlay refresh)
+R.PDFOVERLAY.02 :: [ordinary viewer scroll] => X(invalidate all page-text indexes or repaint every overlay)
+R.PDFOVERLAY.03 :: [ordinary viewer scroll and three-up inactive] => X(scan every page rectangle)
+R.PDFOVERLAY.04 :: [highlight/search payload signature unchanged] => X(rebuild overlay DOM)
+R.PDFOVERLAY.05 :: [progressive search rail active] => O(coalesce DOM publications; default interval = 90ms)
+R.PDFOVERLAY.06 :: [pdf.js viewer active] => O(keep #viewerContainer absolute, overflow-enabled, and viewport-bounded)
+R.PDFOVERLAY.07 :: [newer restore/layout action begins] => X(allow stale delayed restore callbacks to overwrite it)
+```
+
+- The preview widget cache is a bounded LRU (`preview_widget_cache_max_entries`,
+  default `2`). Eviction must detach and discard the old `QWebEngineView`/page so
+  opening many documents cannot retain an unbounded set of pdf.js renderers.
+- Automatic extracted-text prefetch is configurable with `prefetch_enabled` and
+  is disabled by default. Missing-source garbage collection is independent: its
+  dedicated timer runs at a 30-second cadence, requires 10 seconds of sustained
+  input idle, and must not wake or rescan prefetch scope.
+- PDF search extraction defaults to one worker thread with eight candidate PDFs
+  per worker job. Partial result/model updates are debounced to 100 ms so worker
+  completion does not repeatedly sort and repaint the entire tree.
+- The viewer MutationObserver must distinguish pdf.js/text-layer changes from
+  bridge-owned overlay changes. Only real render/text mutations should invalidate
+  page indexes; repeated identical persistent-highlight/search commands are
+  idempotent.
+
 ### 9. View, Tab, and Session Rules
 
 #### 9.1 Tab constraints
@@ -1713,6 +1740,8 @@ viewer-bridge interaction semantics), also update
 - pdfexplore extracted-text disk entries use atomic source-path metadata companions;
   idle, bounded garbage collection may remove an entry only after its source PDF
   is definitively missing, never for permission or transient filesystem errors.
+  Its independent default cadence is 30 seconds after 10 seconds of sustained
+  input idle, including when automatic prefetch is disabled.
 - Update `UML.md` when extracted boundaries, architecture, or major control-flow  
 ownership changes.
 

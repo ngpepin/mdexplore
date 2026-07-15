@@ -69,7 +69,13 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
         visible_index = self.window.model.index(str(visible_dir))
         self.assertTrue(visible_index.isValid())
         self.window.tree.expand(visible_index)
-        QApplication.processEvents()
+        deadline = time.monotonic() + 3.0
+        while (
+            self.window.model.rowCount(visible_index) <= 0
+            and time.monotonic() < deadline
+        ):
+            QApplication.processEvents()
+            time.sleep(0.01)
 
         files = self.window._list_visible_pdf_files_in_tree()
         file_keys = {self.window._path_key(path) for path in files}
@@ -105,6 +111,31 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
         }
         self.assertIn(self.window._path_key(visible_pdf), match_keys)
         self.assertNotIn(self.window._path_key(hidden_pdf), match_keys)
+
+    def test_search_startup_does_not_probe_each_candidate_cache_on_gui_thread(
+        self,
+    ) -> None:
+        candidates = [self.root / f"candidate-{index}.pdf" for index in range(3)]
+        self.window.match_input.setText("needle")
+
+        with (
+            patch.object(
+                self.window,
+                "_list_visible_pdf_files_in_tree",
+                return_value=candidates,
+            ),
+            patch.object(
+                self.window,
+                "_is_pdf_text_cached_for_path",
+                side_effect=AssertionError("synchronous cache probe"),
+            ) as cache_probe,
+            patch.object(self.window.thread_pool, "start") as start_worker,
+        ):
+            self.window._run_match_search_now()
+
+        cache_probe.assert_not_called()
+        start_worker.assert_called_once()
+        self.window._active_search_workers.clear()
 
     def test_search_scan_publishes_partial_hits_before_all_workers_finish(self) -> None:
         first_pdf = self.root / "first.pdf"

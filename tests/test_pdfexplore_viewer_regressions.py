@@ -161,6 +161,33 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         return dict(result)
 
+    def test_pdfjs_viewer_container_remains_the_bounded_scroll_host(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        metrics = self.run_current_viewer_js_json(
+            "(() => {"
+            " const container = document.getElementById('viewerContainer');"
+            " const style = container ? getComputedStyle(container) : null;"
+            " return {"
+            "   position: style?.position || '',"
+            "   overflowY: style?.overflowY || '',"
+            "   clientHeight: Number(container?.clientHeight || 0),"
+            "   scrollHeight: Number(container?.scrollHeight || 0),"
+            "   viewportHeight: Number(window.innerHeight || 0)"
+            " };"
+            "})()"
+        )
+
+        self.assertEqual(metrics.get("position"), "absolute")
+        self.assertIn(metrics.get("overflowY"), {"auto", "scroll"})
+        self.assertGreater(
+            float(metrics.get("scrollHeight", 0)),
+            float(metrics.get("clientHeight", 0)) + 100,
+        )
+        self.assertLessEqual(
+            float(metrics.get("clientHeight", 0)),
+            float(metrics.get("viewportHeight", 0)) + 10,
+        )
+
     def test_scroll_state_restores_after_switching_documents_in_live_viewer(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         desired_state = {
@@ -317,6 +344,79 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             list(initial_overlay.get("ids", [])),
         )
 
+    def test_persistent_overlay_stays_stable_when_idle_scrolled_and_reapplied(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        payload = [
+            {
+                "id": "stable-overlay",
+                "page": 1,
+                "start": 0,
+                "end": 5,
+                "kind": "normal",
+                "text": "Alpha",
+            }
+        ]
+        self.window._current_text_highlights = payload
+        self.window._apply_persistent_text_highlights()
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll('.pdfexplore-highlight-rect.normal[data-highlight-id=\"stable-overlay\"]').length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+
+        # Let the bridge's delayed rendering retries (and the window's restore
+        # retries) settle before checking for an observer-driven repaint loop.
+        self.wait_ms(1800)
+        tagged = self.run_current_viewer_js_json(
+            "(() => {"
+            " window.__pdfexploreTestStableOverlay = document.querySelector("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id=\"stable-overlay\"]'"
+            " );"
+            " return {tagged: !!window.__pdfexploreTestStableOverlay};"
+            "})()"
+        )
+        self.assertEqual(tagged.get("tagged"), True)
+
+        self.wait_ms(300)
+        idle_state = self.run_current_viewer_js_json(
+            "(() => {"
+            " const current = document.querySelector("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id=\"stable-overlay\"]'"
+            " );"
+            " return {"
+            "   same: current === window.__pdfexploreTestStableOverlay,"
+            "   connected: !!window.__pdfexploreTestStableOverlay?.isConnected"
+            " };"
+            "})()"
+        )
+        self.assertEqual(idle_state.get("same"), True)
+        self.assertEqual(idle_state.get("connected"), True)
+
+        self.run_current_viewer_js(
+            "(() => {"
+            f" window.__pdfexploreBridge.setPersistentHighlights({json.dumps(payload)});"
+            " const container = document.getElementById('viewerContainer');"
+            " if (container) container.dispatchEvent(new Event('scroll'));"
+            " return true;"
+            "})()"
+        )
+        self.wait_ms(350)
+        reapplied_state = self.run_current_viewer_js_json(
+            "(() => {"
+            " const current = document.querySelector("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id=\"stable-overlay\"]'"
+            " );"
+            " return {"
+            "   same: current === window.__pdfexploreTestStableOverlay,"
+            "   connected: !!window.__pdfexploreTestStableOverlay?.isConnected"
+            " };"
+            "})()"
+        )
+        self.assertEqual(reapplied_state.get("same"), True)
+        self.assertEqual(reapplied_state.get("connected"), True)
+
     def test_search_scrollbar_indicators_render_and_clear(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         self.run_current_viewer_js(
@@ -357,6 +457,56 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             ),
             timeout_ms=12000,
         )
+
+    def test_identical_search_terms_and_scroll_preserve_marker_identity(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.setSearchTerms([{text: 'line 170', caseSensitive: false}]);"
+        )
+        self.wait_until(
+            lambda: any(
+                int(page) > 1
+                for page in self.run_current_viewer_js_json(
+                    "({pages: Array.from(document.querySelectorAll('.pdfexplore-search-indicator')).map((n) => Number(n.dataset.pageNumber || 0))})"
+                ).get("pages", [])
+            ),
+            timeout_ms=12000,
+        )
+        self.wait_ms(500)
+        tagged = self.run_current_viewer_js_json(
+            "(() => {"
+            " window.__pdfexploreTestSearchMarker = document.querySelector("
+            "   '.pdfexplore-search-indicator[data-page-number]'"
+            " );"
+            " return {tagged: !!window.__pdfexploreTestSearchMarker};"
+            "})()"
+        )
+        self.assertEqual(tagged.get("tagged"), True)
+
+        self.run_current_viewer_js(
+            "(() => {"
+            " window.__pdfexploreBridge.setSearchTerms("
+            "   [{text: 'line 170', caseSensitive: false}]"
+            " );"
+            " const container = document.getElementById('viewerContainer');"
+            " if (container) container.dispatchEvent(new Event('scroll'));"
+            " return true;"
+            "})()"
+        )
+        self.wait_ms(400)
+        marker_state = self.run_current_viewer_js_json(
+            "(() => {"
+            " const current = document.querySelector("
+            "   '.pdfexplore-search-indicator[data-page-number]'"
+            " );"
+            " return {"
+            "   same: current === window.__pdfexploreTestSearchMarker,"
+            "   connected: !!window.__pdfexploreTestSearchMarker?.isConnected"
+            " };"
+            "})()"
+        )
+        self.assertEqual(marker_state.get("same"), True)
+        self.assertEqual(marker_state.get("connected"), True)
 
     def test_search_scrollbar_indicator_click_jumps_to_target_page(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
@@ -586,12 +736,30 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             "return rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height } : {}; "
             "})()"
         )
+        # pdf.js may finish a page-fit scroll adjustment while the persistent
+        # overlay is being created. Compare both rectangles in the same settled
+        # viewport rather than treating the earlier screen coordinate as fixed.
+        live_selection_rect = self.run_current_viewer_js_json(
+            "(() => { "
+            "const selection = window.getSelection(); "
+            "if (!selection || selection.rangeCount < 1) return {}; "
+            "const rect = selection.getRangeAt(0).getBoundingClientRect(); "
+            "return { top: rect.top, left: rect.left, width: rect.width, height: rect.height }; "
+            "})()"
+        )
+        self.assertGreater(float(selection_rect.get("width", 0)), 0)
         self.assertLessEqual(
-            abs(float(overlay_rect.get("top", 0)) - float(selection_rect.get("top", 0))),
+            abs(
+                float(overlay_rect.get("top", 0))
+                - float(live_selection_rect.get("top", 0))
+            ),
             12.0,
         )
         self.assertLessEqual(
-            abs(float(overlay_rect.get("left", 0)) - float(selection_rect.get("left", 0))),
+            abs(
+                float(overlay_rect.get("left", 0))
+                - float(live_selection_rect.get("left", 0))
+            ),
             12.0,
         )
 

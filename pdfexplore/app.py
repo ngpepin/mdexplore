@@ -32,7 +32,7 @@ from PySide6.QtCore import (
     QUrl,
 )
 from PySide6.QtGui import QAction, QClipboard, QIcon, QKeyEvent, QKeySequence, QShortcut
-from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -179,11 +179,15 @@ class PdfExploreWindow(QMainWindow):
     PDF_TEXT_DISK_CACHE_MAX_BYTES = int(_app_setting("pdf_text_disk_cache_max_bytes", 384 * 1024 * 1024))
     PDF_TEXT_DISK_CACHE_TRIM_INTERVAL = int(_app_setting("pdf_text_disk_cache_trim_interval", 24))
     PDF_TEXT_CACHE_GC_INTERVAL_SECONDS = float(
-        _app_setting("pdf_text_cache_gc_interval_seconds", 5.0)
+        _app_setting("pdf_text_cache_gc_interval_seconds", 30.0)
+    )
+    PDF_TEXT_CACHE_GC_IDLE_SECONDS = float(
+        _app_setting("pdf_text_cache_gc_idle_seconds", 10.0)
     )
     PDF_TEXT_CACHE_GC_BATCH_SIZE = int(
         _app_setting("pdf_text_cache_gc_batch_size", 128)
     )
+    PREFETCH_ENABLED = bool(_app_setting("prefetch_enabled", False))
     PREFETCH_BATCH_SIZE = int(_app_setting("prefetch_batch_size", 1))
     PREFETCH_IDLE_SECONDS = float(_app_setting("prefetch_idle_seconds", 0.8))
     PREFETCH_HEAVY_USE_WINDOW_SECONDS = float(_app_setting("prefetch_heavy_use_window_seconds", 1.2))
@@ -199,8 +203,15 @@ class PdfExploreWindow(QMainWindow):
     VIEWER_READY_TIMER_INTERVAL_MS = int(_app_setting("viewer_ready_timer_interval_ms", 160))
     VIEW_STATE_POLL_TIMER_INTERVAL_MS = int(_app_setting("view_state_poll_timer_interval_ms", 900))
     FILE_CHANGE_WATCH_INTERVAL_MS = int(_app_setting("file_change_watch_interval_ms", 1200))
-    SEARCH_THREAD_POOL_MAX_THREADS = int(_app_setting("search_thread_pool_max_threads", 2))
+    SEARCH_THREAD_POOL_MAX_THREADS = int(_app_setting("search_thread_pool_max_threads", 1))
+    SEARCH_WORKER_CHUNK_SIZE = int(_app_setting("search_worker_chunk_size", 8))
+    SEARCH_PROGRESS_PUBLISH_INTERVAL_MS = int(
+        _app_setting("search_progress_publish_interval_ms", 100)
+    )
     PREFETCH_THREAD_POOL_MAX_THREADS = int(_app_setting("prefetch_thread_pool_max_threads", 1))
+    PREVIEW_WIDGET_CACHE_MAX_ENTRIES = int(
+        _app_setting("preview_widget_cache_max_entries", 2)
+    )
     TREE_MARKER_SCAN_THREAD_POOL_MAX_THREADS = int(
         _app_setting("tree_marker_scan_thread_pool_max_threads", 1)
     )
@@ -239,7 +250,7 @@ class PdfExploreWindow(QMainWindow):
         self._pdf_text_disk_cache_lock = Lock()
         self._pdf_text_disk_cache_store_count = 0
         self._pdf_text_disk_cache_dir = self._build_pdf_text_disk_cache_dir()
-        self._last_pdf_text_cache_gc_at = time.monotonic()
+        self._last_pdf_text_cache_gc_at = 0.0
         self._pdf_text_cache_gc_memory_cursor = ""
         self._pdf_text_cache_gc_disk_cursor = ""
         self._active_pdf_text_cache_gc_worker: PdfTextCacheGcWorker | None = None
@@ -281,6 +292,7 @@ class PdfExploreWindow(QMainWindow):
             + viewer_bridge_payload
         )
         self._preview_widgets_by_path: dict[str, QWebEngineView] = {}
+        self._preview_widget_lru: OrderedDict[str, None] = OrderedDict()
         self._viewer_bridge_ready_by_path: dict[str, bool] = {}
         self._viewer_pending_restore_state_by_path: dict[str, dict | None] = {}
         self._preview_signatures_by_path: dict[str, tuple[int, int]] = {}
@@ -288,6 +300,8 @@ class PdfExploreWindow(QMainWindow):
         self._gpu_context_available = bool(gpu_context_available)
         self._global_shortcuts: list[QShortcut] = []
         self._closing = False
+        self._view_state_capture_in_flight = False
+        self._view_state_capture_serial = 0
 
         self.thread_pool = QThreadPool(self)
         # pypdf text extraction is Python-heavy; keeping search concurrency low
@@ -329,10 +343,28 @@ class PdfExploreWindow(QMainWindow):
         )
         self._tree_search_refresh_timer.timeout.connect(self._run_match_search)
 
+        self._search_progress_publish_timer = QTimer(self)
+        self._search_progress_publish_timer.setSingleShot(True)
+        self._search_progress_publish_timer.setInterval(
+            max(16, int(self.SEARCH_PROGRESS_PUBLISH_INTERVAL_MS))
+        )
+        self._search_progress_publish_timer.timeout.connect(
+            self._publish_search_scan_progress
+        )
+
         self._scope_prefetch_timer = QTimer(self)
         self._scope_prefetch_timer.setSingleShot(True)
         self._scope_prefetch_timer.setInterval(int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS))
         self._scope_prefetch_timer.timeout.connect(self._start_scope_prefetch)
+
+        self._pdf_text_cache_gc_timer = QTimer(self)
+        self._pdf_text_cache_gc_timer.setInterval(
+            max(100, int(float(self.PDF_TEXT_CACHE_GC_INTERVAL_SECONDS) * 1000))
+        )
+        self._pdf_text_cache_gc_timer.timeout.connect(
+            self._on_pdf_text_cache_gc_timer
+        )
+        self._pdf_text_cache_gc_timer.start()
 
         self._cached_badge_sync_timer = QTimer(self)
         self._cached_badge_sync_timer.setSingleShot(True)
@@ -370,6 +402,7 @@ class PdfExploreWindow(QMainWindow):
         self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
         self.model.setNameFilters(["*.pdf"])
         self.model.setNameFilterDisables(False)
+        self.model.directoryLoaded.connect(self._on_model_directory_loaded)
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
@@ -931,8 +964,6 @@ class PdfExploreWindow(QMainWindow):
                 exists = cache_path.is_file()
             except Exception:
                 return False
-            if exists:
-                self._ensure_pdf_text_disk_cache_metadata_locked(cache_path, path_key)
         if exists and mark_cached_badge:
             self._record_cached_pdf_path_key(path_key)
         return exists
@@ -1132,7 +1163,8 @@ class PdfExploreWindow(QMainWindow):
             path_keys = set(self._pdf_text_cache.keys())
         with self._cached_pdf_path_keys_lock:
             path_keys.update(self._cached_pdf_path_keys)
-        return sorted(path_keys)
+        # Sorting is intentionally deferred to the worker thread.
+        return list(path_keys)
 
     def _apply_pdf_text_cache_gc_payload(self, payload: object) -> tuple[int, int]:
         """Delete confirmed stale cache data under the appropriate locks."""
@@ -1222,7 +1254,9 @@ class PdfExploreWindow(QMainWindow):
         now = time.monotonic()
         if self._prefetch_temporarily_paused():
             return False
-        if (now - self._last_user_interaction_at) < float(self.PREFETCH_IDLE_SECONDS):
+        if (now - self._last_user_interaction_at) < float(
+            self.PDF_TEXT_CACHE_GC_IDLE_SECONDS
+        ):
             return False
         if (
             self._search_scan_expected_workers > 0
@@ -1249,7 +1283,7 @@ class PdfExploreWindow(QMainWindow):
                 or self._prefetch_temporarily_paused()
                 or (
                     time.monotonic() - self._last_user_interaction_at
-                    < float(self.PREFETCH_IDLE_SECONDS)
+                    < float(self.PDF_TEXT_CACHE_GC_IDLE_SECONDS)
                 )
                 or (
                     self._search_scan_expected_workers > 0
@@ -1283,7 +1317,10 @@ class PdfExploreWindow(QMainWindow):
             )
         self._apply_pdf_text_cache_gc_payload(payload)
         self._request_cached_badge_sync()
-        self._request_scope_prefetch()
+
+    def _on_pdf_text_cache_gc_timer(self) -> None:
+        """Offer one idle worker slot to GC without waking scope prefetch."""
+        self._maybe_start_pdf_text_cache_gc()
 
     def _cancel_scope_prefetch(self) -> None:
         """Handle cancel scope prefetch."""
@@ -1299,24 +1336,9 @@ class PdfExploreWindow(QMainWindow):
 
     def _request_scope_prefetch(self) -> None:
         """Schedule one prefetch pass through the scope timer."""
-        if self._closing:
+        if self._closing or not self.PREFETCH_ENABLED:
             return
         self._scope_prefetch_timer.start()
-
-    def _request_next_pdf_text_cache_gc_check(self) -> None:
-        """Keep idle GC alive even when there is no prefetch work remaining."""
-        if self._closing:
-            return
-        interval_seconds = max(0.1, float(self.PDF_TEXT_CACHE_GC_INTERVAL_SECONDS))
-        remaining_seconds = max(
-            0.1,
-            interval_seconds - (time.monotonic() - self._last_pdf_text_cache_gc_at),
-        )
-        delay_ms = max(
-            int(self.SCOPE_PREFETCH_TIMER_INTERVAL_MS),
-            int(remaining_seconds * 1000),
-        )
-        self._scope_prefetch_timer.start(delay_ms)
 
     def _start_scope_prefetch(self) -> None:
         """Start one low-priority cache-warming batch for visible PDFs.
@@ -1326,6 +1348,9 @@ class PdfExploreWindow(QMainWindow):
         - prioritizes the currently open document first,
         - advances with a cursor so warmup progresses across the visible set.
         """
+        if self._closing or not self.PREFETCH_ENABLED:
+            return
+
         if self._prefetch_temporarily_paused():
             self._scope_prefetch_timer.start()
             return
@@ -1347,12 +1372,12 @@ class PdfExploreWindow(QMainWindow):
             self._scope_prefetch_timer.start()
             return
 
-        if self._maybe_start_pdf_text_cache_gc():
+        if self._active_pdf_text_cache_gc_worker is not None:
+            self._scope_prefetch_timer.start()
             return
 
         candidates = self._list_visible_pdf_files_in_tree()
         if not candidates:
-            self._request_next_pdf_text_cache_gc_check()
             return
 
         current_scope_key = self._path_key(self._highlight_scope_directory())
@@ -1406,7 +1431,6 @@ class PdfExploreWindow(QMainWindow):
         self._prefetch_cursor = cursor
         if not batch:
             self._request_cached_badge_sync()
-            self._request_next_pdf_text_cache_gc_check()
             return
 
         self._cancel_scope_prefetch()
@@ -1414,7 +1438,10 @@ class PdfExploreWindow(QMainWindow):
         worker = PdfTextPrefetchWorker(
             request_id,
             batch,
-            self._read_pdf_text,
+            lambda path, req=request_id: self._read_pdf_text(
+                path,
+                should_abort=lambda: req != self._prefetch_request_id,
+            ),
             should_abort=lambda req=request_id: (
                 req != self._prefetch_request_id
                 or (
@@ -1827,6 +1854,15 @@ class PdfExploreWindow(QMainWindow):
         self._visible_tree_pdf_cache_dirty = True
         self._visible_tree_pdf_cache_fetch_more_complete = False
 
+    def _on_model_directory_loaded(self, _path_text: str) -> None:
+        """Refresh async QFileSystemModel visibility after a directory loads."""
+        self._invalidate_visible_tree_pdf_cache()
+        match_input = getattr(self, "match_input", None)
+        if match_input is not None and match_input.text().strip():
+            self._rerun_active_search_for_scope()
+        else:
+            self._request_scope_prefetch()
+
     def _pause_prefetch_temporarily(
         self,
         seconds: float,
@@ -1836,7 +1872,16 @@ class PdfExploreWindow(QMainWindow):
         """Handle pause prefetch temporarily."""
         pause_until = time.monotonic() + max(0.0, float(seconds))
         self._prefetch_paused_until = max(self._prefetch_paused_until, pause_until)
-        if cancel_inflight:
+        current_request_id = self._prefetch_request_id
+        has_current_worker = any(
+            worker.request_id == current_request_id
+            for worker in self._active_prefetch_workers
+        )
+        gc_worker = self._active_pdf_text_cache_gc_worker
+        has_current_gc = bool(
+            gc_worker is not None and gc_worker.request_id == current_request_id
+        )
+        if cancel_inflight and (has_current_worker or has_current_gc):
             self._cancel_scope_prefetch()
 
     def _reset_search_scan_state(self) -> None:
@@ -1852,13 +1897,26 @@ class PdfExploreWindow(QMainWindow):
 
     def _cancel_pending_search_scan(self) -> None:
         """Handle cancel pending search scan."""
+        self._search_progress_publish_timer.stop()
         self._search_request_id += 1
+        for worker in list(self._active_search_workers):
+            try:
+                if self.thread_pool.tryTake(worker):
+                    self._active_search_workers.discard(worker)
+            except Exception:
+                pass
         self.thread_pool.clear()
         self._reset_search_scan_state()
 
     def _cancel_pending_tree_marker_scan(self) -> None:
         """Handle cancel pending tree marker scan."""
         self._tree_marker_scan_request_id += 1
+        for worker in list(self._active_tree_marker_scan_workers):
+            try:
+                if self._tree_marker_scan_pool.tryTake(worker):
+                    self._active_tree_marker_scan_workers.discard(worker)
+            except Exception:
+                pass
         self._tree_marker_scan_pool.clear()
 
     def _rerun_active_search_for_scope(self) -> None:
@@ -2096,6 +2154,7 @@ class PdfExploreWindow(QMainWindow):
                 )
         preview = self._preview_widget_for_path(path)
         self.preview_stack.setCurrentWidget(preview)
+        self._trim_preview_widget_cache(protected_path_keys={path_key})
         self._viewer_bridge_ready_by_path[path_key] = False
         preview.setUrl(self._viewer_url_for_pdf(path))
         self.statusBar().showMessage(
@@ -2134,8 +2193,10 @@ class PdfExploreWindow(QMainWindow):
         path = Path(path_key)
         return path.parent, path.name
 
-    def _read_pdf_text(self, path: Path) -> str:
+    def _read_pdf_text(self, path: Path, *, should_abort=None) -> str:
         """Handle read pdf text."""
+        if callable(should_abort) and should_abort():
+            return ""
         try:
             stat = path.stat()
         except Exception:
@@ -2165,6 +2226,8 @@ class PdfExploreWindow(QMainWindow):
         try:
             reader = PdfReader(str(path))
             for page in reader.pages:
+                if callable(should_abort) and should_abort():
+                    return ""
                 try:
                     extracted = page.extract_text() or ""
                 except Exception:
@@ -2175,6 +2238,8 @@ class PdfExploreWindow(QMainWindow):
             text = ""
         else:
             text = "\n\n".join(parts)
+        if callable(should_abort) and should_abort():
+            return ""
         self._store_cached_pdf_text(path_key, stat.st_mtime_ns, stat.st_size, text)
         self._store_pdf_text_to_disk_cache(path_key, stat.st_mtime_ns, stat.st_size, text)
         self._record_cached_pdf_path_key(path_key)
@@ -2476,6 +2541,7 @@ class PdfExploreWindow(QMainWindow):
 
     def _run_match_search(self) -> None:
         """Run match search."""
+        self._search_progress_publish_timer.stop()
         query = self.match_input.text().strip()
         if not query:
             self._clear_match_results()
@@ -2483,15 +2549,6 @@ class PdfExploreWindow(QMainWindow):
         scope = self._highlight_scope_directory()
         candidates = self._list_visible_pdf_files_in_tree(fetch_more=False)
         prioritized_candidates = list(candidates)
-        if prioritized_candidates:
-            cached_candidates: list[Path] = []
-            uncached_candidates: list[Path] = []
-            for candidate in prioritized_candidates:
-                if self._is_pdf_text_cached_for_path(candidate, mark_cached_badge=True):
-                    cached_candidates.append(candidate)
-                else:
-                    uncached_candidates.append(candidate)
-            prioritized_candidates = cached_candidates + uncached_candidates
         self._cancel_scope_prefetch()
         self._cancel_pending_search_scan()
         request_id = self._search_request_id
@@ -2536,9 +2593,9 @@ class PdfExploreWindow(QMainWindow):
             self._clear_match_results()
             return
 
-        # One-file chunks provide truly progressive match pills as each file is
-        # extracted/cached and scanned.
-        chunk_size = 1
+        # Small multi-file chunks preserve progressive results without creating
+        # one QRunnable, queued signal, and tree repaint per PDF.
+        chunk_size = max(1, int(self.SEARCH_WORKER_CHUNK_SIZE))
         started_workers = 0
         for start in range(0, len(prioritized_candidates), chunk_size):
             chunk = prioritized_candidates[start : start + chunk_size]
@@ -2550,7 +2607,10 @@ class PdfExploreWindow(QMainWindow):
                 predicate,
                 hit_counter,
                 filename_patterns,
-                self._read_pdf_text,
+                lambda path, req=request_id: self._read_pdf_text(
+                    path,
+                    should_abort=lambda: req != self._search_request_id,
+                ),
                 should_abort=lambda req=request_id: req != self._search_request_id,
             )
             self._active_search_workers.add(worker)
@@ -2560,7 +2620,8 @@ class PdfExploreWindow(QMainWindow):
 
         self._search_scan_expected_workers = started_workers
         self.statusBar().showMessage(
-            f"Searching {len(candidates)} visible PDF file(s) in tree under {scope} using {started_workers} worker(s)..."
+            f"Searching {len(candidates)} visible PDF file(s) in tree under {scope} "
+            f"in {started_workers} batch(es)..."
         )
 
     def _publish_search_scan_progress(self) -> None:
@@ -2603,6 +2664,11 @@ class PdfExploreWindow(QMainWindow):
         if error:
             self._search_scan_error_count += 1
 
+        current_preview_key = self._current_preview_path_key()
+        current_preview_was_matched = bool(
+            current_preview_key
+            and current_preview_key in self._search_scan_match_counts
+        )
         if isinstance(match_counts, dict):
             for raw_path_key, raw_count in match_counts.items():
                 if not isinstance(raw_path_key, str):
@@ -2623,22 +2689,41 @@ class PdfExploreWindow(QMainWindow):
                 if isinstance(raw_path_key, str):
                     self._search_scan_filename_match_paths.add(raw_path_key)
 
-        self._publish_search_scan_progress()
+        search_complete = (
+            self._search_scan_completed_workers >= self._search_scan_expected_workers
+        )
+        if search_complete:
+            self._search_progress_publish_timer.stop()
+            self._publish_search_scan_progress()
+        elif self._search_scan_completed_workers == 1:
+            # Surface the first useful result promptly, then debounce later
+            # batches so large searches do not repaint the tree continuously.
+            self._publish_search_scan_progress()
+        elif not self._search_progress_publish_timer.isActive():
+            self._search_progress_publish_timer.start()
 
-        current_preview_key = self._current_preview_path_key()
-        if current_preview_key and current_preview_key in self._search_scan_match_counts:
+        if (
+            current_preview_key
+            and not current_preview_was_matched
+            and current_preview_key in self._search_scan_match_counts
+        ):
             self._apply_active_search_to_viewer()
 
-        if self._search_scan_completed_workers < self._search_scan_expected_workers:
+        if not search_complete:
             scope = self._search_scan_scope or self._highlight_scope_directory()
-            self.statusBar().showMessage(
-                (
-                    f"Searching {self._search_scan_total_candidates} visible PDF file(s) in tree under {scope}... "
-                    f"matched {len(self.current_match_files)} so far "
-                    f"({self._search_scan_completed_workers}/{self._search_scan_expected_workers} files processed). "
-                    "Full results will complete after all visible files are extracted/cached."
+            status_stride = max(1, self._search_scan_expected_workers // 10)
+            if (
+                self._search_scan_completed_workers == 1
+                or self._search_scan_completed_workers % status_stride == 0
+            ):
+                self.statusBar().showMessage(
+                    (
+                        f"Searching {self._search_scan_total_candidates} visible PDF file(s) in tree under {scope}... "
+                        f"matched {len(self._search_scan_match_counts)} so far "
+                        f"({self._search_scan_completed_workers}/{self._search_scan_expected_workers} batches processed). "
+                        "Full results will complete after all visible files are extracted/cached."
+                    )
                 )
-            )
             return
 
         # Re-apply marker sets once at completion so marker continuity stays
@@ -2661,6 +2746,7 @@ class PdfExploreWindow(QMainWindow):
 
     def _clear_match_results(self) -> None:
         """Handle clear match results."""
+        self._search_progress_publish_timer.stop()
         self._tree_search_refresh_timer.stop()
         self._cancel_pending_search_scan()
         self.current_match_files = []
@@ -3000,15 +3086,74 @@ class PdfExploreWindow(QMainWindow):
         )
         self.preview_stack.addWidget(preview)
         self._preview_widgets_by_path[path_key] = preview
+        self._touch_preview_widget_lru(path_key)
         self._viewer_bridge_ready_by_path[path_key] = False
         self._viewer_pending_restore_state_by_path[path_key] = None
         return preview
+
+    def _touch_preview_widget_lru(self, path_key: str) -> None:
+        """Record one full PDF viewer as the most recently used."""
+        if not path_key:
+            return
+        self._preview_widget_lru.pop(path_key, None)
+        self._preview_widget_lru[path_key] = None
+
+    def _evict_preview_widget(self, path_key: str) -> bool:
+        """Discard one WebEngine document and release its renderer process."""
+        preview = self._preview_widgets_by_path.pop(path_key, None)
+        self._preview_widget_lru.pop(path_key, None)
+        self._viewer_bridge_ready_by_path.pop(path_key, None)
+        self._viewer_pending_restore_state_by_path.pop(path_key, None)
+        self._preview_signatures_by_path.pop(path_key, None)
+        if preview is None:
+            return False
+        if self.preview_stack.currentWidget() is preview:
+            self.preview_stack.setCurrentWidget(self._empty_preview)
+        try:
+            preview.loadFinished.disconnect()
+        except Exception:
+            pass
+        try:
+            preview.stop()
+        except Exception:
+            pass
+        try:
+            preview.page().setLifecycleState(
+                QWebEnginePage.LifecycleState.Discarded
+            )
+        except Exception:
+            pass
+        self.preview_stack.removeWidget(preview)
+        preview.deleteLater()
+        return True
+
+    def _trim_preview_widget_cache(
+        self,
+        *,
+        protected_path_keys: set[str] | None = None,
+    ) -> None:
+        """Bound the number of heavyweight PDF.js/WebEngine documents."""
+        limit = max(1, int(self.PREVIEW_WIDGET_CACHE_MAX_ENTRIES))
+        protected = set(protected_path_keys or ())
+        while len(self._preview_widgets_by_path) > limit:
+            candidate_key = next(
+                (
+                    path_key
+                    for path_key in self._preview_widget_lru
+                    if path_key not in protected
+                ),
+                None,
+            )
+            if candidate_key is None:
+                break
+            self._evict_preview_widget(candidate_key)
 
     def _preview_widget_for_path(self, path: Path) -> QWebEngineView:
         """Handle preview widget for path."""
         path_key = self._path_key(path)
         existing = self._preview_widgets_by_path.get(path_key)
         if existing is not None:
+            self._touch_preview_widget_lru(path_key)
             return existing
         return self._create_preview_widget(path)
 
@@ -3088,7 +3233,7 @@ class PdfExploreWindow(QMainWindow):
         path_key: str | None,
         restore_state: dict | None,
         *,
-        delays_ms: tuple[int, ...] = (180, 420, 900),
+        delays_ms: tuple[int, ...] = (180, 600),
     ) -> None:
         """Handle schedule followup view restore."""
         if not path_key or not isinstance(restore_state, dict) or not restore_state:
@@ -3116,12 +3261,18 @@ class PdfExploreWindow(QMainWindow):
             and scale == "page-fit"
         ):
             return
+        interaction_marker = float(self._last_user_interaction_at)
 
-        def _reapply(expected_key: str = path_key, state: dict = payload) -> None:
+        def _reapply(
+            expected_key: str = path_key,
+            state: dict = payload,
+            expected_interaction_marker: float = interaction_marker,
+        ) -> None:
             """Handle reapply."""
             if (
                 self._current_preview_path_key() != expected_key
                 or not self._viewer_bridge_ready_by_path.get(expected_key, False)
+                or self._last_user_interaction_at != expected_interaction_marker
             ):
                 return
             self._run_viewer_js(
@@ -3483,6 +3634,24 @@ class PdfExploreWindow(QMainWindow):
         ):
             return None
 
+        capture_serial = 0
+        if not blocking:
+            if self._view_state_capture_in_flight:
+                return None
+            self._view_state_capture_in_flight = True
+            self._view_state_capture_serial += 1
+            capture_serial = self._view_state_capture_serial
+
+            def _expire_capture(serial: int = capture_serial) -> None:
+                """Release a lost asynchronous WebEngine callback."""
+                if serial == self._view_state_capture_serial:
+                    self._view_state_capture_in_flight = False
+
+            QTimer.singleShot(
+                max(1000, int(self.VIEW_STATE_POLL_TIMER_INTERVAL_MS) * 2),
+                _expire_capture,
+            )
+
         loop: QEventLoop | None = None
         timeout_timer: QTimer | None = None
         done = False
@@ -3504,12 +3673,27 @@ class PdfExploreWindow(QMainWindow):
         def _on_state(result) -> None:
             """Handle state."""
             nonlocal done, captured_state
+            if capture_serial == self._view_state_capture_serial:
+                self._view_state_capture_in_flight = False
             if not isinstance(result, dict):
                 done = True
                 if loop is not None and loop.isRunning():
                     loop.quit()
                 return
-            previous_state = data.get("state") if isinstance(data.get("state"), dict) else {}
+            latest_data = self._tab_data(index)
+            if (
+                not isinstance(latest_data, dict)
+                or str(latest_data.get("path_key") or "").strip() != path_key
+            ):
+                done = True
+                if loop is not None and loop.isRunning():
+                    loop.quit()
+                return
+            previous_state = (
+                latest_data.get("state")
+                if isinstance(latest_data.get("state"), dict)
+                else {}
+            )
             try:
                 previous_page = int(previous_state.get("page", 1) or 1)
             except Exception:
@@ -3548,13 +3732,17 @@ class PdfExploreWindow(QMainWindow):
                     cancel_inflight=True,
                 )
 
-            data["state"] = result
-            data["progress"] = self._progress_from_view_state(result)
-            self._set_tab_data(index, data)
-            if self._normalize_custom_view_label(data.get("custom_label")) is None:
-                self.view_tabs.setTabText(
-                    index, self._display_label_for_view(self._page_from_view_state(result))
+            next_progress = self._progress_from_view_state(result)
+            if result != previous_state or next_progress != latest_data.get("progress"):
+                latest_data["state"] = result
+                latest_data["progress"] = next_progress
+                self._set_tab_data(index, latest_data)
+            if self._normalize_custom_view_label(latest_data.get("custom_label")) is None:
+                next_label = self._display_label_for_view(
+                    self._page_from_view_state(result)
                 )
+                if self.view_tabs.tabText(index) != next_label:
+                    self.view_tabs.setTabText(index, next_label)
             captured_state = self._clone_json_compatible_dict(result)
             done = True
             if loop is not None and loop.isRunning():
@@ -3921,6 +4109,7 @@ class PdfExploreWindow(QMainWindow):
             self._pending_search_scroll_to_first_path_keys.add(path_key)
         preview = self._preview_widget_for_path(path)
         self.preview_stack.setCurrentWidget(preview)
+        self._trim_preview_widget_cache(protected_path_keys={path_key})
         wanted_state = data.get("state") if isinstance(data.get("state"), dict) else None
         if wanted_state is None:
             wanted_state = self._view_state_for_path_key(path_key) or dict(
@@ -5155,12 +5344,15 @@ class PdfExploreWindow(QMainWindow):
         """Handle closeEvent."""
         self._closing = True
         self._scope_prefetch_timer.stop()
+        self._pdf_text_cache_gc_timer.stop()
         self._cancel_scope_prefetch()
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index, blocking=True)
         self._persist_document_view_session(capture_current=False)
         self._persist_effective_root()
+        for path_key in list(self._preview_widgets_by_path):
+            self._evict_preview_widget(path_key)
         super().closeEvent(event)
 
 

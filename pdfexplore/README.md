@@ -87,12 +87,16 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - hide tab strip when only one unlabeled default view remains,
   - per-document tab sessions persisted/restored from `.pdfexplore-views.json`.
 - PDF preview widget caching:
-  - once a PDF preview widget is created, it remains cached in memory for the app run,
-  - switching away and back avoids full viewer/widget re-instantiation.
-- Idle-aware text prefetch + cache badges:
-  - current open PDF is prioritized for text-cache warming,
-  - visible-scope PDFs are prefetched in small batches,
-  - prefetch backs off during active interaction (especially scrolling),
+  - live `QWebEngineView`/pdf.js pages are retained in a bounded least-recently-used
+    cache (two documents by default),
+  - switching away and back avoids viewer/widget re-instantiation while the PDF
+    remains in that cache,
+  - an eviction discards the least-recently-used WebEngine page so returning to
+    that PDF reloads its viewer instead of retaining unbounded browser memory.
+- Extracted-text cache + optional idle prefetch:
+  - automatic visible-scope prefetch is disabled by default to avoid competing
+    with navigation and scrolling, and can be enabled with `prefetch_enabled`,
+  - when enabled, likely-next PDFs are warmed in small, interaction-aware batches,
   - cached-text badge reflects both memory and disk cache hits,
   - idle garbage collection removes memory/disk text entries whose source PDF
     has been deleted and clears the corresponding cache badge.
@@ -124,31 +128,34 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - memory cache: bounded `OrderedDict`,
   - disk cache: compressed entries under `${XDG_CACHE_HOME:-~/.cache}/mdexplore/pdfexplore-text-cache`,
   - atomic `.txt.gz.meta.json` companions map compressed entries back to source
-    PDFs for idle garbage collection; legacy entries gain metadata when reused.
+    PDFs for idle garbage collection; legacy entries gain metadata when loaded.
 
 ### Data/Control Flow Summary
 
 - Tree selection/open action:
   - GUI updates active file/tab state,
-  - preview widget is reused or created,
+  - preview widget is reused or created and the bounded viewer LRU evicts old
+    WebEngine pages as needed,
   - viewer bridge restores view state and highlights.
 - Search action:
   - visible candidate set is built,
-  - workers evaluate query in chunks,
-  - model receives hit counts and filename match styling.
+  - the extraction pool evaluates candidates in chunks (one thread and eight
+    PDFs per worker by default),
+  - partial worker results are coalesced before the model receives hit counts
+    and filename match styling.
 - Search-indicator action (viewer bridge):
   - term signature is computed from normalized query + current document key,
   - per-page text extraction reuses document-scoped in-memory cache entries,
   - pages are scanned in bounded concurrent batches,
-  - marker entries are published progressively after each batch,
+  - marker entries are published progressively with DOM updates rate-limited,
   - periodic event-loop yields keep input/paint responsive,
-  - click interactions can interrupt and resume builds to keep navigation immediate.
+  - click interactions can interrupt and resume builds to keep navigation immediate,
+  - identical search/highlight payloads are ignored rather than rebuilding overlays.
 - Prefetch action:
-  - idle timer evaluates interaction/search pressure,
-  - current document may be prioritized,
-  - cache-hit/miss results feed badge state,
-  - periodically, the same low-priority pool checks bounded memory and disk-cache
-    batches and deletes extracted text only for definitively missing sources.
+  - when explicitly enabled, an idle timer evaluates interaction/search pressure
+    before scheduling optional cache warming,
+  - the independent GC timer continues to offer bounded missing-source cleanup
+    even when prefetch is disabled.
 - Marker update action:
   - sidecar scan worker emits marker sets,
   - app merges scan state with live state,
@@ -227,13 +234,15 @@ separate, app-local tuning surface for pdfexplore.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `pdf_text_cache_max_entries` | `384` | Max in-memory text cache entries. |
-| `pdf_text_cache_max_chars` | `100663296` | Max total characters in memory text cache. |
-| `pdf_text_disk_cache_max_files` | `1200` | Max disk cache files before trim pressure. |
-| `pdf_text_disk_cache_max_bytes` | `402653184` | Max disk cache byte budget before trim pressure. |
-| `pdf_text_disk_cache_trim_interval` | `24` | Disk-cache trim trigger interval measured in successful store operations (every Nth store runs a trim pass). |
-| `pdf_text_cache_gc_interval_seconds` | `5.0` | Minimum interval between idle missing-source garbage-collection batches. |
+| `pdf_text_cache_max_entries` | `768` | Max in-memory text cache entries. |
+| `pdf_text_cache_max_chars` | `201326592` | Max total characters in memory text cache. |
+| `pdf_text_disk_cache_max_files` | `8000` | Max disk cache files before trim pressure. |
+| `pdf_text_disk_cache_max_bytes` | `1610612736` | Max disk cache byte budget before trim pressure. |
+| `pdf_text_disk_cache_trim_interval` | `240` | Disk-cache trim trigger interval measured in successful store operations (every Nth store runs a trim pass). |
+| `pdf_text_cache_gc_interval_seconds` | `30.0` | Cadence of the dedicated missing-source garbage-collection timer. |
+| `pdf_text_cache_gc_idle_seconds` | `10.0` | Sustained no-input period required before a GC batch may start or continue. |
 | `pdf_text_cache_gc_batch_size` | `128` | Maximum memory entries and disk metadata companions checked per idle GC batch. |
+| `prefetch_enabled` | `false` | Enables optional automatic visible-scope extracted-text warming; disabled by default for responsiveness. |
 | `prefetch_batch_size` | `1` | Number of PDFs prefetched per idle cycle. |
 | `prefetch_idle_seconds` | `0.8` | Idle-delay threshold before prefetch can run. |
 | `prefetch_heavy_use_window_seconds` | `1.2` | Sliding window for interaction-pressure checks. |
@@ -241,10 +250,12 @@ separate, app-local tuning surface for pdfexplore.
 | `prefetch_heavy_use_pause_seconds` | `1.2` | Pause duration after heavy interaction threshold is exceeded. |
 | `prefetch_viewer_activity_pause_seconds` | `1.6` | Pause duration after active viewer interaction. |
 | `prefetch_tree_mutation_pause_seconds` | `0.85` | Pause duration after tree mutation/expand/collapse activity. |
-| `tree_search_refresh_debounce_ms` | `300` | Debounce delay for tree-driven search refreshes. |
+| `tree_search_refresh_debounce_ms` | `900` | Debounce delay for tree-driven search refreshes. |
 | `tree_interaction_visual_relax_ms` | `320` | UI relax window after interaction bursts. |
 | `cached_badge_sync_interval_ms` | `200` | Cadence for cache badge synchronization. |
 | `match_timer_interval_ms` | `320` | Match worker dispatch cadence. |
+| `search_worker_chunk_size` | `8` | Number of candidate PDFs evaluated by each search worker job. |
+| `search_progress_publish_interval_ms` | `100` | Minimum interval for coalescing partial search results into model/UI updates. |
 | `scope_prefetch_timer_interval_ms` | `550` | Prefetch timer cadence for current scope. |
 | `viewer_ready_timer_interval_ms` | `160` | Viewer-ready polling cadence. |
 | `view_state_poll_timer_interval_ms` | `900` | View-state synchronization polling cadence. |
@@ -254,8 +265,9 @@ separate, app-local tuning surface for pdfexplore.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `search_thread_pool_max_threads` | `2` | Search/extraction worker pool max thread count. |
+| `search_thread_pool_max_threads` | `1` | Search/extraction worker pool max thread count; the single-thread default reduces extraction contention with the GUI. |
 | `prefetch_thread_pool_max_threads` | `1` | Prefetch worker pool max thread count. |
+| `preview_widget_cache_max_entries` | `2` | Maximum live per-document `QWebEngineView` pages retained by the preview LRU. |
 | `tree_marker_scan_thread_pool_max_threads` | `1` | Tree marker scan worker pool max thread count. |
 | `highlight_colors` | `Yellow, Green, Blue, Orange, Purple, Light Gray, Medium Gray, Red` | File-highlight palette entries (`name`, `value`). |
 
@@ -266,7 +278,7 @@ trimmed after writes.
 
 - A counter increments after each successful compressed cache write.
 - When `store_count % pdf_text_disk_cache_trim_interval == 0`, a trim pass runs.
-- Default `24` means trim runs on the 24th, 48th, 72nd, ... successful store.
+- Default `240` means trim runs on the 240th, 480th, 720th, ... successful store.
 - Trim pass ordering is recency-first (newest `mtime` kept first).
 - A file is kept only if both limits remain satisfied:
   - `pdf_text_disk_cache_max_files`
@@ -277,11 +289,11 @@ trimmed after writes.
 
 Tuning guidance:
 
-- Lower interval (for example `8` to `16`):
+- Lower interval (for example `80` to `160`):
   - more frequent trim work,
   - tighter disk-footprint control,
   - slightly higher background IO overhead.
-- Higher interval (for example `48` to `96`):
+- Higher interval (for example `480` to `960`):
   - less frequent trim work,
   - larger transient disk growth between trims,
   - occasional larger cleanup bursts.
@@ -307,6 +319,7 @@ Each numeric value is validated with clamp bounds before use.
 | `search_indicator_concurrency_max` | `4` | `search_indicator_concurrency_min..64` | Maximum page-scan concurrency for marker build. |
 | `search_indicator_markers_per_page_max` | `48` | `1..500` | Per-page marker cap before clustering/pruning pressure. |
 | `search_indicator_yield_every_batches` | `3` | `1..50` | Event-loop yield cadence for responsive progressive builds. |
+| `search_indicator_publish_interval_ms` | `90` | `16..2000` | Minimum interval between progressive right-rail DOM publications. |
 
 #### `tree` section key reference
 
@@ -322,10 +335,10 @@ Each numeric value is validated with clamp bounds before use.
 Some cache limits were previously expressed in code as MiB formulas and are
 now explicit integers in JSON.
 
-- `app.pdf_text_cache_max_chars = 100663296`
-  - derived from `96 * 1024 * 1024` (96 MiB).
-- `app.pdf_text_disk_cache_max_bytes = 402653184`
-  - derived from `384 * 1024 * 1024` (384 MiB).
+- `app.pdf_text_cache_max_chars = 201326592`
+  - derived from `192 * 1024 * 1024` (192 MiB).
+- `app.pdf_text_disk_cache_max_bytes = 1610612736`
+  - derived from `1536 * 1024 * 1024` (1536 MiB).
 
 General conversion rule: `MiB * 1024 * 1024`.
 
@@ -334,7 +347,11 @@ General conversion rule: `MiB * 1024 * 1024`.
 - Change one setting group at a time (cache, prefetch, bridge markers) and verify interaction responsiveness after each change.
 - Keep `viewer_bridge` concurrency and entry limits balanced: high values increase throughput but can delay interaction-priority jumps.
 - For low-memory systems, reduce `pdf_text_cache_max_chars` first, then `pdf_text_disk_cache_max_bytes`.
-- For heavy-doc navigation responsiveness, lower `prefetch_batch_size` and/or increase pause-related seconds values.
+- Leave `prefetch_enabled` off unless automatic warming is worth its extraction
+  cost; if enabled, lower `prefetch_batch_size` and/or increase pause-related
+  seconds values when heavy-document navigation slows.
+- Lower `preview_widget_cache_max_entries` when browser-process memory is more
+  important than instant return to recently opened PDFs.
 
 ## Sidecars
 
@@ -363,18 +380,41 @@ General conversion rule: `MiB * 1024 * 1024`.
 
 ## Performance Notes
 
-- Search is worker-based and cancellation-aware.
-- Prefetch is low-priority and throttled by interaction detection.
-- Extracted-text garbage collection shares the idle prefetch pool, scans bounded
-  batches, and yields immediately when interaction or search pressure returns.
+- Search is worker-based and cancellation-aware. The one-thread default avoids
+  Python PDF extraction jobs contending with each other, workers receive eight
+  candidates at a time, and intermediate partial results use a 100 ms debounced
+  UI publication by default (final completion publishes immediately).
+- Automatic extracted-text prefetch is off by default. When enabled, it remains
+  low-priority and is throttled by interaction detection.
+- Extracted-text garbage collection uses an independent 30-second cadence,
+  requires 10 seconds of sustained input idle, scans bounded batches on the
+  low-priority pool, and yields when interaction or search pressure returns.
+  It stays available when automatic prefetch is disabled and never wakes or
+  rescans prefetch scope itself.
 - A source is treated as missing only on a definite `FileNotFoundError`; permission
   or transient filesystem errors preserve the cached text.
 - Tree marker scans run in background workers and are merged with live state.
 - Viewer search-marker generation uses document-scoped page-text cache plus bounded concurrency.
-- Marker builds publish partial rails progressively so long documents become navigable early.
+- Marker builds publish partial rails progressively, with DOM publications
+  coalesced on a 90 ms interval by default (with a final immediate flush), so
+  long documents become navigable early without repeatedly rebuilding the rail
+  for every page batch.
 - Marker clicks are interaction-prioritized: active builds can pause briefly so page jumps feel immediate.
 - Persistent-highlight gutter markers are derived immediately from sidecar page/range
   metadata and refine their placement from live text geometry as pages render.
+- Bridge-owned overlay DOM mutations are ignored by the viewer mutation observer,
+  preventing highlight painting from scheduling itself indefinitely.
+- Ordinary scrolling updates navigation state without invalidating every page-text
+  index, repainting all overlays, or scanning every page rectangle. Whole-document
+  geometry scans remain limited to modes such as three-up that require them.
+- The pdf.js `#viewerContainer` remains an absolute, viewport-bounded scroll host;
+  letting it expand to document height defeats pdf.js navigation and virtualization.
+- Repeated identical persistent-highlight or search payloads are idempotent and do
+  not recreate overlay DOM.
+- View-state restore retries are generation-guarded so a newer zoom/layout action
+  cancels stale callbacks instead of fighting the current viewer state.
+- The preview LRU retains at most two live WebEngine pages by default; evicted
+  viewers are discarded to cap cumulative browser memory.
 - Temporary reduced-paint mode may be used during tree mutation bursts, but marker sync forces full marker visibility when marker state is updated.
 
 `pdfexplore` inherits `SEARCH_CLOSE_WORD_GAP`,
@@ -386,15 +426,18 @@ between the two apps.
 ### Performance Tradeoffs
 
 - Throughput is intentionally sacrificed during active interaction periods to keep UI feel stable.
-- Prefetch uses small batches to avoid large contiguous extraction spikes.
+- Optional prefetch uses small batches to avoid large contiguous extraction spikes.
 - Marker sync work is root-scoped to reduce unnecessary model churn after root changes.
 
-### What “Idle Prefetch” Means Here
+### What Optional “Idle Prefetch” Means Here
 
-- The app is considered idle enough when no recent interaction pressure or active search scan is blocking prefetch.
-- Prefetch warms text cache for likely-next PDFs and updates cache badges progressively.
-- At most once per configured GC interval, idle scheduling gives one bounded pass
-  to missing-source cleanup before continuing cache prefetch.
+- Set `prefetch_enabled` to `true` to opt into automatic extracted-text warming.
+- The app is considered idle enough when no recent interaction pressure or active
+  search scan is blocking that optional prefetch.
+- Enabled prefetch warms text cache for likely-next PDFs and updates cache badges progressively.
+- Independently, every 30 seconds the GC timer may offer one bounded
+  missing-source cleanup pass after at least 10 seconds without input; it does
+  not enable, wake, or rescan scope prefetch.
 
 ## Troubleshooting
 

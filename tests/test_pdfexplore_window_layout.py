@@ -187,6 +187,47 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             first_view,
         )
 
+    def test_preview_widget_cache_is_bounded_and_uses_lru_eviction(self) -> None:
+        first_pdf = Path(self._tempdir.name) / "lru-first.pdf"
+        second_pdf = Path(self._tempdir.name) / "lru-second.pdf"
+        third_pdf = Path(self._tempdir.name) / "lru-third.pdf"
+        _create_pdf_with_text(first_pdf, "first document")
+        _create_pdf_with_text(second_pdf, "second document")
+        _create_pdf_with_text(third_pdf, "third document")
+
+        self.window._open_path_in_active_view(first_pdf)
+        QApplication.processEvents()
+        first_view = self.window._current_preview_widget()
+
+        self.window._open_path_in_active_view(second_pdf)
+        QApplication.processEvents()
+
+        # Reopening the first document makes the second document the LRU entry.
+        self.window._open_path_in_active_view(first_pdf)
+        QApplication.processEvents()
+        self.assertIs(self.window._current_preview_widget(), first_view)
+
+        self.window._open_path_in_active_view(third_pdf)
+        QApplication.processEvents()
+
+        first_key = self.window._path_key(first_pdf)
+        second_key = self.window._path_key(second_pdf)
+        third_key = self.window._path_key(third_pdf)
+        self.assertEqual(self.window.PREVIEW_WIDGET_CACHE_MAX_ENTRIES, 2)
+        self.assertEqual(
+            set(self.window._preview_widgets_by_path),
+            {first_key, third_key},
+        )
+        self.assertNotIn(second_key, self.window._preview_widgets_by_path)
+        self.assertIs(
+            self.window._current_preview_widget(),
+            self.window._preview_widgets_by_path[third_key],
+        )
+        self.assertLessEqual(
+            len(self.window._preview_widgets_by_path),
+            self.window.PREVIEW_WIDGET_CACHE_MAX_ENTRIES,
+        )
+
     def test_persisted_multi_view_session_restores_for_same_pdf(self) -> None:
         pdf_path = Path(self._tempdir.name) / "session.pdf"
         _create_pdf_with_text(pdf_path, "session document")
@@ -678,10 +719,10 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         restore_calls = [
             source for source in captured_sources if "restoreViewState" in source
         ]
-        self.assertEqual(len(restore_calls), 3)
+        self.assertEqual(len(restore_calls), 2)
         self.assertIn('"page": 5', restore_calls[-1])
-        self.assertEqual(len(apply_highlights_calls), 3)
-        self.assertEqual(len(apply_search_calls), 3)
+        self.assertEqual(len(apply_highlights_calls), 2)
+        self.assertEqual(len(apply_search_calls), 2)
 
     def test_event_filter_handles_ctrl_bar_toggle_shortcut(self) -> None:
         calls: list[str] = []

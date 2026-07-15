@@ -45,6 +45,15 @@ class PdfExploreAssetTests(unittest.TestCase):
         self.assertIn("collectNearFocusWindows", source)
         self.assertIn("normalizedNearTermGroups", source)
         self.assertIn("collectSearchIndicatorEntriesForTerms", source)
+        self.assertIn("SEARCH_INDICATOR_PUBLISH_INTERVAL_MS", source)
+        self.assertIn("scheduleSearchIndicatorPublish", source)
+        self.assertIn("persistentEntriesSignature", source)
+        self.assertIn("searchRequestSignature", source)
+        self.assertIn("isBridgeOverlayNode", source)
+        self.assertIn("mutationNeedsHighlightRefresh", source)
+        self.assertIn("some(mutationNeedsHighlightRefresh)", source)
+        self.assertIn("viewRestoreId", source)
+        self.assertIn("restoreIsCurrent", source)
 
     def test_cached_badge_asset_exists(self) -> None:
         root = Path(__file__).resolve().parent.parent

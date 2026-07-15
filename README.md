@@ -19,8 +19,19 @@ same shell philosophy as `mdexplore`.
 - Its PDF preview mirrors mdexplore’s navigation gutters with persistent-highlight
   markers on the left and active search-hit markers on the right, including
   qualifying-window behavior for `NEAR(...)` searches.
-- Its extracted-text cache performs bounded garbage-collection passes while idle,
-  removing memory/disk entries and cache badges for PDFs that no longer exist.
+- Its extracted-text cache performs bounded garbage-collection passes on an
+  independent 30-second cadence after 10 seconds of input idle, removing
+  memory/disk entries and cache badges for PDFs that no longer exist even while
+  automatic prefetch is disabled.
+- It bounds live PDF WebEngine previews with a two-entry least-recently-used cache
+  by default; evicted pages are discarded to prevent cumulative browser-memory growth.
+- Automatic extracted-text prefetch is disabled by default. Search extraction uses
+  one worker thread, eight-PDF chunks, and debounced partial-result publication so
+  background text work causes less UI contention.
+- Its viewer bridge filters bridge-owned DOM mutations, coalesces marker
+  publications, ignores identical overlay payloads, and avoids full-document
+  overlay/index work during ordinary scrolling while preserving pdf.js's
+  viewport-bounded scroll container and render virtualization.
 
 Runtime settings are JSON-externalized:
 
