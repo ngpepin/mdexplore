@@ -7,6 +7,7 @@
     "viewer_bridge_js_relative": "assets/viewer_bridge.js",
     "okular_edit_launcher": "/home/npepin/.local/share/applications-scripts/run-okular.sh",
     "max_document_views": 8,
+    "splitter_tree_default_fraction": 0.307,
     "max_recent_root_directories": 35,
     "recent_root_menu_mru_count": 10,
     "min_recent_root_dwell_seconds": 30.0,

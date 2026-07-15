@@ -49,6 +49,23 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             self.window.path_label.sizePolicy().horizontalPolicy(),
             QSizePolicy.Policy.Ignored,
         )
+
+    def test_default_splitter_tree_fraction_is_narrowed_by_twenty_percent(
+        self,
+    ) -> None:
+        tree_width, viewer_width = self.window.splitter.sizes()
+        total_width = tree_width + viewer_width
+        self.assertGreater(total_width, 0)
+        self.assertAlmostEqual(
+            tree_width / total_width,
+            self.window.SPLITTER_TREE_DEFAULT_FRACTION,
+            delta=0.01,
+        )
+        self.assertAlmostEqual(
+            self.window.SPLITTER_TREE_DEFAULT_FRACTION,
+            0.307,
+            places=3,
+        )
         baseline_width = self.window.centralWidget().minimumSizeHint().width()
         long_text = ("very/deep/pdf/path/" * 24) + "target-file.pdf"
         self.window.path_label.setText(long_text)

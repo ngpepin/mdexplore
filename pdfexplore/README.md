@@ -341,6 +341,7 @@ separate, app-local tuning surface for pdfexplore.
 | `prefetch_thread_pool_max_threads` | `1` | Prefetch worker pool max thread count. |
 | `preview_widget_cache_max_entries` | `2` | Maximum live per-document `QWebEngineView` pages retained by the preview LRU. |
 | `tree_marker_scan_thread_pool_max_threads` | `1` | Tree marker scan worker pool max thread count. |
+| `splitter_tree_default_fraction` | `0.307` | Initial fraction of the tree/viewer splitter assigned to the tree pane. |
 | `highlight_colors` | `Yellow, Green, Blue, Orange, Purple, Light Gray, Medium Gray, Red` | File-highlight palette entries (`name`, `value`). |
 
 ##### pdf_text_disk_cache_trim_interval deep dive

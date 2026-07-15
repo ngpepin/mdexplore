@@ -204,6 +204,10 @@ class PdfExploreWindow(QMainWindow):
     """Main window for browsing and highlighting PDFs."""
 
     MAX_DOCUMENT_VIEWS = int(_app_setting("max_document_views", 8))
+    SPLITTER_TREE_DEFAULT_FRACTION = max(
+        0.05,
+        min(0.8, float(_app_setting("splitter_tree_default_fraction", 0.307))),
+    )
     MAX_RECENT_ROOT_DIRECTORIES = int(_app_setting("max_recent_root_directories", 35))
     RECENT_ROOT_MENU_MRU_COUNT = int(_app_setting("recent_root_menu_mru_count", 10))
     MIN_RECENT_ROOT_DWELL_SECONDS = float(_app_setting("min_recent_root_dwell_seconds", 30.0))
@@ -728,6 +732,11 @@ class PdfExploreWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 3)
+        splitter_units = 1000
+        tree_units = round(
+            splitter_units * float(self.SPLITTER_TREE_DEFAULT_FRACTION)
+        )
+        self.splitter.setSizes([tree_units, splitter_units - tree_units])
 
         central = QWidget()
         layout = QVBoxLayout(central)
