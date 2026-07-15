@@ -9,7 +9,7 @@ from unittest.mock import patch
 from PySide6.QtCore import QPoint, QEvent, Qt
 from PySide6.QtGui import QClipboard, QIcon, QKeyEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtWidgets import QApplication, QPushButton, QSizePolicy, QStyle
 
 from pdfexplore.app import PdfExploreWindow
 
@@ -91,20 +91,62 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             ["Refresh", "Dark", "Add View"],
         )
 
+    def test_top_left_buttons_are_compactly_sized_to_their_labels(self) -> None:
+        top_bar_widget = self.window.centralWidget().layout().itemAt(0).widget()
+        top_bar = top_bar_widget.layout()
+        buttons = {
+            top_bar.itemAt(index).widget().text(): top_bar.itemAt(index).widget()
+            for index in range(top_bar.count())
+            if isinstance(top_bar.itemAt(index).widget(), QPushButton)
+        }
+
+        expected_padding = {
+            "Recent": 12,
+            "^": 10,
+            "Refresh": 12,
+            "Dark": 12,
+            "Add View": 12,
+            "Edit": 12,
+        }
+        for label, padding in expected_padding.items():
+            button = buttons[label]
+            sizing_label = "Light" if label == "Dark" else label
+            text_width = button.fontMetrics().horizontalAdvance(sizing_label)
+            menu_indicator_width = 0
+            if button.menu() is not None:
+                menu_indicator_width = max(
+                    8,
+                    int(
+                        button.style().pixelMetric(
+                            QStyle.PixelMetric.PM_MenuButtonIndicator
+                        )
+                    ),
+                )
+            expected_width = max(20, text_width + menu_indicator_width + padding)
+            self.assertEqual(button.width(), expected_width)
+            self.assertEqual(
+                button.sizePolicy().horizontalPolicy(),
+                QSizePolicy.Policy.Fixed,
+            )
+
     def test_dark_mode_button_toggles_viewer_colors_and_label(self) -> None:
         captured_sources: list[str] = []
         self.window._run_viewer_js = (  # type: ignore[method-assign]
             lambda source, callback=None: captured_sources.append(source)
         )
 
+        initial_width = self.window.dark_mode_btn.width()
+
         self.window.dark_mode_btn.click()
         self.assertTrue(self.window._preview_dark_mode)
         self.assertEqual(self.window.dark_mode_btn.text(), "Light")
+        self.assertEqual(self.window.dark_mode_btn.width(), initial_width)
         self.assertIn("setDarkMode(true)", captured_sources[-1])
 
         self.window.dark_mode_btn.click()
         self.assertFalse(self.window._preview_dark_mode)
         self.assertEqual(self.window.dark_mode_btn.text(), "Dark")
+        self.assertEqual(self.window.dark_mode_btn.width(), initial_width)
         self.assertIn("setDarkMode(false)", captured_sources[-1])
 
     def test_toolbar_input_resets_background_idle_clock(self) -> None:

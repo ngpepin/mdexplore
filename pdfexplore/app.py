@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QStackedWidget,
     QTreeView,
     QVBoxLayout,
@@ -553,22 +554,36 @@ class PdfExploreWindow(QMainWindow):
             self._reload_recent_root_directories_before_menu_open
         )
         self.recent_btn.setMenu(self.recent_menu)
+        self._apply_compact_toolbar_button_width(
+            self.recent_btn, horizontal_padding_px=12, include_menu_indicator=True
+        )
         self._refresh_recent_root_menu()
 
         self.up_btn = QPushButton("^")
+        self._apply_compact_toolbar_button_width(self.up_btn, horizontal_padding_px=10)
         self.up_btn.clicked.connect(self._go_up_directory)
 
         refresh_btn = QPushButton("Refresh")
+        self._apply_compact_toolbar_button_width(refresh_btn, horizontal_padding_px=12)
         refresh_btn.clicked.connect(self._refresh_directory_view)
 
         self.dark_mode_btn = QPushButton("Dark")
+        self._apply_compact_toolbar_button_width(
+            self.dark_mode_btn,
+            horizontal_padding_px=12,
+            sizing_text="Light",
+        )
         self.dark_mode_btn.setToolTip("Show PDFs with dark pages and light text")
         self.dark_mode_btn.clicked.connect(self._toggle_preview_dark_mode)
 
         self.add_view_btn = QPushButton("Add View")
+        self._apply_compact_toolbar_button_width(
+            self.add_view_btn, horizontal_padding_px=12
+        )
         self.add_view_btn.clicked.connect(self._add_document_view)
 
         self.edit_btn = QPushButton("Edit")
+        self._apply_compact_toolbar_button_width(self.edit_btn, horizontal_padding_px=12)
         self.edit_btn.clicked.connect(self._edit_current_file)
         self._update_edit_button_state()
 
@@ -858,6 +873,31 @@ class PdfExploreWindow(QMainWindow):
             widget.installEventFilter(self)
         self._touch_global_activity_stamp(force=True)
         self._start_global_activity_probe_worker()
+
+    def _apply_compact_toolbar_button_width(
+        self,
+        button: QPushButton,
+        *,
+        horizontal_padding_px: int = 12,
+        include_menu_indicator: bool = False,
+        sizing_text: str | None = None,
+    ) -> None:
+        """Size a top-bar button to its label plus slim horizontal padding."""
+        width_text = button.text() if sizing_text is None else sizing_text
+        text_width = button.fontMetrics().horizontalAdvance(width_text or "")
+        menu_indicator_width = 0
+        if include_menu_indicator or button.menu() is not None:
+            menu_indicator_width = max(
+                8,
+                int(
+                    button.style().pixelMetric(
+                        QStyle.PixelMetric.PM_MenuButtonIndicator
+                    )
+                ),
+            )
+        width = text_width + menu_indicator_width + max(8, int(horizontal_padding_px))
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.setFixedWidth(max(20, int(width)))
 
     def _lookup_cached_pdf_text(
         self,
