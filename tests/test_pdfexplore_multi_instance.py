@@ -201,6 +201,31 @@ class PdfExploreMultiInstanceTests(unittest.TestCase):
         QApplication.processEvents()
         return self.window._active_global_activity_probe_worker is None
 
+    def test_view_sidecar_is_written_beside_nested_pdf(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+        pdf_path = nested / "document.pdf"
+        pdf_path.write_bytes(b"pdf")
+        path_key = self.window._path_key(pdf_path)
+        self.window._document_view_sessions[path_key] = _persisted_session(3)
+
+        with (
+            patch.object(self.window, "_save_document_view_session"),
+            patch.object(self.window, "_rebuild_tree_marker_cache"),
+        ):
+            self.window._persist_document_view_session(
+                path_key,
+                capture_current=False,
+            )
+
+        nested_sidecar = nested / VIEWS_FILE_NAME
+        self.assertTrue(nested_sidecar.is_file())
+        self.assertFalse((self.root / VIEWS_FILE_NAME).exists())
+        self.assertEqual(
+            load_files_payload(nested_sidecar),
+            {pdf_path.name: _persisted_session(3)},
+        )
+
     def test_stale_view_cache_merge_preserves_external_pdf(self) -> None:
         local = self.window._directory_view_states(self.root)
         external_session = _persisted_session(8)

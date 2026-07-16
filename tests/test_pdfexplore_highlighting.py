@@ -66,6 +66,30 @@ class PdfExploreHighlightPersistenceTests(unittest.TestCase):
         self.assertEqual(entries[0]["kind"], "normal")
         self.assertEqual(entries[1]["kind"], "important")
 
+    def test_highlight_sidecar_is_written_beside_nested_pdf(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+        pdf_path = nested / "doc.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")
+        path_key = self.window._path_key(pdf_path)
+
+        self.window._replace_persistent_preview_highlight_range(
+            path_key,
+            1,
+            10,
+            20,
+            "normal",
+            "alpha",
+        )
+
+        nested_sidecar = nested / HIGHLIGHTING_FILE_NAME
+        self.assertTrue(nested_sidecar.is_file())
+        self.assertFalse((self.root / HIGHLIGHTING_FILE_NAME).exists())
+        self.assertEqual(
+            load_files_payload(nested_sidecar)[pdf_path.name][0]["text"],
+            "alpha",
+        )
+
     def test_overlapping_highlight_replaces_range_and_preserves_non_overlap(self) -> None:
         pdf_path = self.root / "doc.pdf"
         pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")
