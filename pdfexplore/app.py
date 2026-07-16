@@ -390,6 +390,7 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_total_candidates = 0
         self._search_scan_scope: Path | None = None
         self._search_scan_candidate_order: dict[str, int] = {}
+        self._search_scan_display_paths_by_key: dict[str, set[str]] = {}
         self._search_scan_match_counts: dict[str, int] = {}
         self._search_scan_filename_match_paths: set[str] = set()
         self._search_scan_published_match_count = 0
@@ -2775,6 +2776,7 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_total_candidates = 0
         self._search_scan_scope = None
         self._search_scan_candidate_order.clear()
+        self._search_scan_display_paths_by_key.clear()
         self._search_scan_match_counts.clear()
         self._search_scan_filename_match_paths.clear()
         self._search_scan_published_match_count = 0
@@ -3700,9 +3702,16 @@ class PdfExploreWindow(QMainWindow):
         request_id = self._search_request_id
         self._search_scan_total_candidates = len(candidates)
         self._search_scan_scope = scope
-        self._search_scan_candidate_order = {
-            self._path_key(path): index for index, path in enumerate(candidates)
-        }
+        self._search_scan_candidate_order = {}
+        self._search_scan_display_paths_by_key = {}
+        for index, path in enumerate(candidates):
+            canonical_key = self._path_key(path)
+            self._search_scan_candidate_order.setdefault(canonical_key, index)
+            display_key = self._path_identity_without_io(path)
+            self._search_scan_display_paths_by_key.setdefault(
+                canonical_key,
+                set(),
+            ).add(display_key)
         self.current_match_files = []
         self._current_match_counts = {}
         self.model.clear_search_match_paths()
@@ -3784,6 +3793,16 @@ class PdfExploreWindow(QMainWindow):
         self.model.set_search_match_counts(
             self._current_match_counts,
             filename_match_path_keys=self._search_scan_filename_match_paths,
+            directory_match_paths=[
+                Path(display_path)
+                for path_key in ordered_match_keys
+                for display_path in sorted(
+                    self._search_scan_display_paths_by_key.get(
+                        path_key,
+                        {path_key},
+                    )
+                )
+            ],
         )
         self._search_scan_published_match_count = len(
             self._search_scan_match_counts

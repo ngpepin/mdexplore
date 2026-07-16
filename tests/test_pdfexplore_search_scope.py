@@ -272,6 +272,39 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
 
         self.assertIn(third_key, self.window.model._search_match_counts)
 
+    def test_search_publish_aggregates_under_visible_pdf_symlink_parent(self) -> None:
+        visible_folder = self.root / "topic"
+        target_folder = self.root / "publisher"
+        visible_folder.mkdir()
+        target_folder.mkdir()
+        target_pdf = target_folder / "book.pdf"
+        _create_pdf_with_text(target_pdf, "needle")
+        visible_link = visible_folder / "linked-book.pdf"
+        try:
+            visible_link.symlink_to(target_pdf)
+        except OSError:
+            self.skipTest("symlink creation is not supported")
+
+        canonical_key = self.window._path_key(visible_link)
+        self.window._search_scan_candidate_order = {canonical_key: 0}
+        self.window._search_scan_display_paths_by_key = {
+            canonical_key: {
+                self.window._path_identity_without_io(visible_link),
+            }
+        }
+        self.window._search_scan_match_counts = {canonical_key: 3}
+
+        self.window._publish_search_scan_progress()
+
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(visible_folder),
+            1,
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(target_folder),
+            0,
+        )
+
     def test_window_title_updates_effective_scope_model_state(self) -> None:
         child = self.root / "child"
         child.mkdir()

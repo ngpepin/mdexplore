@@ -121,6 +121,7 @@ from mdexplore_app.constants import (
     MDEXPLORE_PREVIEW_WEBENGINE_INSTANCE_STALE_SECONDS,
     MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT,
     MDEXPLORE_RESTORE_OVERLAY_POLL_INTERVAL_MS,
+    MDEXPLORE_SEARCH_PROGRESS_PUBLISH_INTERVAL_MS,
     MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS,
     MDEXPLORE_STATUS_IDLE_INTERVAL_MS,
     MDEXPLORE_TREE_MARKER_SCAN_POOL_THREADS,
@@ -1543,10 +1544,13 @@ class MdExploreWindow(QMainWindow):
         self._search_scan_total_candidates = 0
         self._search_scan_scope: Path | None = None
         self._search_scan_candidate_order: dict[str, int] = {}
+        self._search_scan_display_paths_by_key: dict[str, set[str]] = {}
         self._search_scan_match_counts: dict[str, int] = {}
         self._search_scan_filename_match_paths: set[str] = set()
+        self._search_scan_published_match_count = 0
         self._search_scan_error_count = 0
         self._visible_tree_markdown_cache: list[Path] = []
+        self._visible_tree_markdown_display_paths_by_key: dict[str, set[str]] = {}
         self._visible_tree_markdown_cache_dirty = True
         self._pending_preview_search_terms: list[tuple[str, bool]] = []
         self._pending_preview_search_close_groups: list[list[tuple[str, bool]]] = []
@@ -1736,6 +1740,14 @@ class MdExploreWindow(QMainWindow):
         )
         self._tree_search_refresh_timer.timeout.connect(
             self._rerun_active_search_for_scope
+        )
+        self._search_progress_publish_timer = QTimer(self)
+        self._search_progress_publish_timer.setSingleShot(True)
+        self._search_progress_publish_timer.setInterval(
+            max(16, int(MDEXPLORE_SEARCH_PROGRESS_PUBLISH_INTERVAL_MS))
+        )
+        self._search_progress_publish_timer.timeout.connect(
+            self._publish_search_scan_progress
         )
         self._scroll_capture_timer = QTimer(self)
         self._scroll_capture_timer.setInterval(int(MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS))
@@ -7251,12 +7263,15 @@ class MdExploreWindow(QMainWindow):
         self._search_scan_total_candidates = 0
         self._search_scan_scope = None
         self._search_scan_candidate_order.clear()
+        self._search_scan_display_paths_by_key.clear()
         self._search_scan_match_counts.clear()
         self._search_scan_filename_match_paths.clear()
+        self._search_scan_published_match_count = 0
         self._search_scan_error_count = 0
 
     def _cancel_pending_search_scan(self) -> None:
         """Drop queued background search scans and invalidate stale results."""
+        self._search_progress_publish_timer.stop()
         self._search_scan_request_id += 1
         for worker in list(self._active_search_scan_workers):
             try:
@@ -7414,9 +7429,22 @@ class MdExploreWindow(QMainWindow):
         request_id = self._search_scan_request_id
         self._search_scan_total_candidates = len(candidates)
         self._search_scan_scope = self.root
-        self._search_scan_candidate_order = {
-            self._path_key(path): index for index, path in enumerate(candidates)
-        }
+        self._search_scan_candidate_order = {}
+        self._search_scan_display_paths_by_key = {}
+        for index, path in enumerate(candidates):
+            canonical_key = self._path_key(path)
+            self._search_scan_candidate_order.setdefault(canonical_key, index)
+            visible_paths = self._visible_tree_markdown_display_paths_by_key.get(
+                canonical_key,
+                {self._path_identity_without_io(path)},
+            )
+            self._search_scan_display_paths_by_key.setdefault(
+                canonical_key,
+                set(),
+            ).update(visible_paths)
+        self.current_match_files = []
+        self.model.clear_search_match_paths()
+        self.tree.viewport().update()
 
         if not candidates:
             self.current_match_files = []
@@ -7483,6 +7511,36 @@ class MdExploreWindow(QMainWindow):
             f"Searching {len(candidates)} visible markdown file(s) in tree under {scope} using {started_workers} worker(s)..."
         )
 
+    def _publish_search_scan_progress(self) -> None:
+        """Publish the currently aggregated search results to the tree."""
+        ordered_match_keys = sorted(
+            self._search_scan_match_counts.keys(),
+            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
+        )
+        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
+        model_counts = {
+            Path(path_key): self._search_scan_match_counts[path_key]
+            for path_key in ordered_match_keys
+        }
+        self.model.set_search_match_counts(
+            model_counts,
+            filename_match_path_keys=self._search_scan_filename_match_paths,
+            directory_match_paths=[
+                Path(display_path)
+                for path_key in ordered_match_keys
+                for display_path in sorted(
+                    self._search_scan_display_paths_by_key.get(
+                        path_key,
+                        {path_key},
+                    )
+                )
+            ],
+        )
+        self._search_scan_published_match_count = len(
+            self._search_scan_match_counts
+        )
+        self.tree.viewport().update()
+
     def _on_search_scan_finished(
         self,
         worker_token,
@@ -7492,7 +7550,7 @@ class MdExploreWindow(QMainWindow):
         filename_match_paths,
         error_text: str,
     ) -> None:
-        """Merge completed search chunk results and apply when all workers finish."""
+        """Merge one completed search chunk and publish bounded progress updates."""
         worker_to_remove = None
         for worker in self._active_search_scan_workers:
             if getattr(worker, "worker_token", None) is worker_token:
@@ -7508,6 +7566,8 @@ class MdExploreWindow(QMainWindow):
         if error_text:
             self._search_scan_error_count += 1
 
+        previous_counts = dict(self._search_scan_match_counts)
+        previous_filename_matches = set(self._search_scan_filename_match_paths)
         if isinstance(match_counts, dict):
             for raw_path_key, raw_count in match_counts.items():
                 if not isinstance(raw_path_key, str):
@@ -7528,23 +7588,43 @@ class MdExploreWindow(QMainWindow):
                 if isinstance(raw_path_key, str):
                     self._search_scan_filename_match_paths.add(raw_path_key)
 
-        if self._search_scan_completed_workers < self._search_scan_expected_workers:
-            return
+        search_complete = (
+            self._search_scan_completed_workers >= self._search_scan_expected_workers
+        )
+        aggregate_match_count = len(self._search_scan_match_counts)
+        results_changed = (
+            previous_counts != self._search_scan_match_counts
+            or previous_filename_matches != self._search_scan_filename_match_paths
+        )
+        if search_complete:
+            # Always publish one final snapshot, including a zero-hit result.
+            self._search_progress_publish_timer.stop()
+            self._publish_search_scan_progress()
+        elif results_changed and aggregate_match_count > 0 and (
+            self._search_scan_published_match_count == 0
+        ):
+            # Show the first file and ancestor-directory pills immediately.
+            self._search_progress_publish_timer.stop()
+            self._publish_search_scan_progress()
+        elif results_changed and not self._search_progress_publish_timer.isActive():
+            # Coalesce later worker completions into bounded repaint intervals.
+            self._search_progress_publish_timer.start()
 
-        ordered_match_keys = sorted(
-            self._search_scan_match_counts.keys(),
-            key=lambda key: self._search_scan_candidate_order.get(key, 10**9),
-        )
-        self.current_match_files = [Path(path_key) for path_key in ordered_match_keys]
-        model_counts = {
-            Path(path_key): self._search_scan_match_counts[path_key]
-            for path_key in ordered_match_keys
-        }
-        self.model.set_search_match_counts(
-            model_counts,
-            filename_match_path_keys=self._search_scan_filename_match_paths,
-        )
-        self.tree.viewport().update()
+        if not search_complete:
+            status_stride = max(1, self._search_scan_expected_workers // 10)
+            if (
+                self._search_scan_completed_workers == 1
+                or self._search_scan_completed_workers % status_stride == 0
+            ):
+                scope_text = str(
+                    self._search_scan_scope or self._highlight_scope_directory()
+                )
+                self.statusBar().showMessage(
+                    f"Searching {self._search_scan_total_candidates} visible markdown file(s) in tree under {scope_text}... "
+                    f"matched {aggregate_match_count} so far "
+                    f"({self._search_scan_completed_workers}/{self._search_scan_expected_workers} batches processed)."
+                )
+            return
 
         if self._search_scan_scope is not None:
             scope_text = str(self._search_scan_scope)
@@ -7599,6 +7679,14 @@ class MdExploreWindow(QMainWindow):
     def _path_key(path: Path) -> str:
         try:
             return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    @staticmethod
+    def _path_identity_without_io(path: Path) -> str:
+        """Return a stable absolute identity without resolving symlinks."""
+        try:
+            return os.path.normcase(os.path.abspath(os.fspath(path)))
         except Exception:
             return str(path)
 
@@ -7909,7 +7997,7 @@ class MdExploreWindow(QMainWindow):
         for entry in entries:
             try:
                 if entry.is_file() and entry.suffix.lower() == ".md":
-                    files.append(entry.resolve())
+                    files.append(entry)
             except Exception:
                 # Ignore files that disappear or become inaccessible mid-scan.
                 pass
@@ -7925,23 +8013,28 @@ class MdExploreWindow(QMainWindow):
             files = self._list_markdown_files_non_recursive(
                 self._highlight_scope_directory()
             )
+            display_paths_by_key: dict[str, set[str]] = {}
+            for path in files:
+                display_paths_by_key.setdefault(self._path_key(path), set()).add(
+                    self._path_identity_without_io(path)
+                )
             self._visible_tree_markdown_cache = list(files)
+            self._visible_tree_markdown_display_paths_by_key = display_paths_by_key
             self._visible_tree_markdown_cache_dirty = False
             return list(files)
 
         files: list[Path] = []
         seen: set[str] = set()
+        display_paths_by_key: dict[str, set[str]] = {}
 
         def _append_file(path: Path) -> None:
-            try:
-                resolved = path.resolve()
-            except Exception:
-                resolved = path
-            key = str(resolved)
-            if key in seen:
+            display_key = self._path_identity_without_io(path)
+            canonical_key = self._path_key(path)
+            display_paths_by_key.setdefault(canonical_key, set()).add(display_key)
+            if display_key in seen:
                 return
-            seen.add(key)
-            files.append(resolved)
+            seen.add(display_key)
+            files.append(path)
 
         def _walk_visible_children(parent_index) -> None:
             if self.model.canFetchMore(parent_index):
@@ -7970,6 +8063,7 @@ class MdExploreWindow(QMainWindow):
 
         _walk_visible_children(root_index)
         self._visible_tree_markdown_cache = list(files)
+        self._visible_tree_markdown_display_paths_by_key = display_paths_by_key
         self._visible_tree_markdown_cache_dirty = False
         return list(files)
 

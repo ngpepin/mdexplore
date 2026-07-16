@@ -154,6 +154,146 @@ class WindowLayoutTests(unittest.TestCase):
             self.window.model.search_hit_count_for_directory(other_folder.parent), 1
         )
 
+    def test_folder_search_counts_and_repaints_follow_visible_symlink_directory(
+        self,
+    ) -> None:
+        root = Path(self._tempdir.name)
+        publisher = root / "publisher"
+        publisher.mkdir()
+        target = publisher / "book.md"
+        target.write_text("alpha", encoding="utf-8")
+        topic = root / "topic"
+        try:
+            topic.symlink_to(publisher, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are not supported")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        topic_index = self._wait_for_tree_index(topic)
+        changed_paths: list[Path] = []
+
+        def _record_changed_path(top_left, _bottom_right, _roles) -> None:
+            if top_left.isValid():
+                changed_paths.append(Path(self.window.model.filePath(top_left)))
+
+        self.window.model.dataChanged.connect(_record_changed_path)
+        self.window.model.set_search_match_counts(
+            {target: 3},
+            directory_match_paths=[topic / target.name],
+        )
+
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(topic),
+            1,
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(publisher),
+            0,
+        )
+        self.assertIn(topic, changed_paths)
+        self.assertTrue(topic_index.isValid())
+
+    def test_search_publishes_symlink_directory_pills_before_all_workers_finish(
+        self,
+    ) -> None:
+        root = Path(self._tempdir.name)
+        publisher = root / "publisher"
+        topic = root / "topic"
+        publisher.mkdir()
+        topic.mkdir()
+        target = publisher / "book.md"
+        target.write_text("alpha", encoding="utf-8")
+        visible_link = topic / "linked-book.md"
+        try:
+            visible_link.symlink_to(target)
+        except OSError:
+            self.skipTest("file symlinks are not supported")
+
+        canonical_key = self.window._path_key(target)
+        self.window._search_scan_request_id = 7
+        self.window._search_scan_total_candidates = 2
+        self.window._search_scan_scope = root
+        self.window._search_scan_candidate_order = {canonical_key: 0}
+        self.window._search_scan_display_paths_by_key = {
+            canonical_key: {
+                self.window._path_identity_without_io(visible_link),
+            }
+        }
+        self.window._search_scan_expected_workers = 2
+        self.window._search_scan_completed_workers = 0
+        self.window._search_scan_match_counts = {}
+        self.window._search_scan_filename_match_paths = set()
+        self.window._search_scan_published_match_count = 0
+
+        self.window._on_search_scan_finished(
+            object(),
+            7,
+            [canonical_key],
+            {canonical_key: 2},
+            [],
+            "",
+        )
+
+        self.assertEqual(self.window._search_scan_completed_workers, 1)
+        self.assertEqual(self.window._search_scan_published_match_count, 1)
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(topic),
+            1,
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(publisher),
+            0,
+        )
+        self.assertFalse(self.window._search_progress_publish_timer.isActive())
+
+    def test_search_coalesces_later_progressive_pill_updates(self) -> None:
+        root = Path(self._tempdir.name)
+        paths = [root / f"doc-{number}.md" for number in range(3)]
+        for path in paths:
+            path.write_text("alpha", encoding="utf-8")
+        keys = [self.window._path_key(path) for path in paths]
+
+        self.window._search_scan_request_id = 11
+        self.window._search_scan_total_candidates = 3
+        self.window._search_scan_scope = root
+        self.window._search_scan_candidate_order = {
+            path_key: index for index, path_key in enumerate(keys)
+        }
+        self.window._search_scan_display_paths_by_key = {
+            path_key: {self.window._path_identity_without_io(path)}
+            for path_key, path in zip(keys, paths)
+        }
+        self.window._search_scan_expected_workers = 3
+        self.window._search_scan_completed_workers = 0
+        self.window._search_scan_match_counts = {}
+        self.window._search_scan_filename_match_paths = set()
+        self.window._search_scan_published_match_count = 0
+
+        self.window._on_search_scan_finished(
+            object(), 11, [keys[0]], {keys[0]: 1}, [], ""
+        )
+        self.assertEqual(len(self.window.current_match_files), 1)
+
+        self.window._on_search_scan_finished(
+            object(), 11, [keys[1]], {keys[1]: 1}, [], ""
+        )
+        self.assertTrue(self.window._search_progress_publish_timer.isActive())
+        self.assertEqual(len(self.window.current_match_files), 1)
+
+        self.window._search_progress_publish_timer.stop()
+        self.window._publish_search_scan_progress()
+        self.assertEqual(len(self.window.current_match_files), 2)
+
+        self.window._on_search_scan_finished(
+            object(), 11, [keys[2]], {keys[2]: 1}, [], ""
+        )
+        self.assertEqual(len(self.window.current_match_files), 3)
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(root),
+            3,
+        )
+
     def test_search_worker_completion_removes_the_exact_worker(self) -> None:
         predicate = search_query.compile_match_predicate("alpha")
         hit_counter = search_query.compile_match_hit_counter("alpha")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt
@@ -362,6 +363,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         match_counts: dict[Path, int],
         *,
         filename_match_path_keys: set[str] | None = None,
+        directory_match_paths: Iterable[Path] | None = None,
     ) -> None:
         previous_counts = self._search_match_counts
         previous_directory_counts = self._directory_search_hit_counts
@@ -375,11 +377,38 @@ class ColorizedExtensionModel(QFileSystemModel):
                 continue
             next_counts[self._path_key(path)] = count
         self._search_match_counts = next_counts
+
+        # File-row state uses canonical identity so symlink aliases share the
+        # same extracted content and hit count. Directory aggregation uses the
+        # lexical path shown in the tree, however: walking a symlink's resolved
+        # target parents would put counts under an unrelated source directory
+        # instead of under the visible alias folder. Keeping these keys lexical
+        # also lets dataChanged address a symlink-directory index directly,
+        # rather than waiting for a later click/scroll to repaint that row.
+        directory_sources: list[Path] = []
+        covered_canonical_keys: set[str] = set()
+        seen_display_keys: set[str] = set()
+        if directory_match_paths is not None:
+            for raw_path in directory_match_paths:
+                path = Path(raw_path)
+                canonical_key = self._path_key(path)
+                if canonical_key not in next_counts:
+                    continue
+                display_key = self._path_identity_without_io(path)
+                if display_key in seen_display_keys:
+                    continue
+                seen_display_keys.add(display_key)
+                covered_canonical_keys.add(canonical_key)
+                directory_sources.append(Path(display_key))
+        for canonical_key in next_counts:
+            if canonical_key not in covered_canonical_keys:
+                directory_sources.append(Path(canonical_key))
+
         directory_counts: dict[str, int] = {}
-        for raw_path_key in next_counts:
-            directory = Path(raw_path_key).parent
+        for source_path in directory_sources:
+            directory = source_path.parent
             while True:
-                directory_key = self._path_key(directory)
+                directory_key = self._path_identity_without_io(directory)
                 directory_counts[directory_key] = (
                     directory_counts.get(directory_key, 0) + 1
                 )
@@ -541,9 +570,15 @@ class ColorizedExtensionModel(QFileSystemModel):
 
     def search_hit_count_for_directory(self, directory: Path) -> int:
         """Return the number of matching descendant files for any directory."""
+        display_key = self._path_identity_without_io(directory)
+        count = self._directory_search_hit_counts.get(display_key)
+        if count is None:
+            # Retain compatibility for callers that pass an already-resolved
+            # regular directory while keeping visible symlink aliases distinct.
+            count = self._directory_search_hit_counts.get(self._path_key(directory), 0)
         return max(
             0,
-            int(self._directory_search_hit_counts.get(self._path_key(directory), 0)),
+            int(count),
         )
 
     def effective_scope_search_hit_count_for_directory(self, directory: Path) -> int:
@@ -582,6 +617,14 @@ class ColorizedExtensionModel(QFileSystemModel):
 
     def _path_key(self, path: Path) -> str:
         return self._path_key_from_raw_path(str(path))
+
+    @staticmethod
+    def _path_identity_without_io(path: Path) -> str:
+        """Return an absolute lexical identity without resolving symlinks."""
+        try:
+            return os.path.normcase(os.path.abspath(os.fspath(path)))
+        except Exception:
+            return str(path)
 
     def _path_key_from_raw_path(self, raw_path: str) -> str:
         cached = self._path_key_cache.get(raw_path)

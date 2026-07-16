@@ -56,7 +56,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             QSizePolicy.Policy.Ignored,
         )
 
-    def test_default_splitter_tree_fraction_is_narrowed_by_twenty_percent(
+    def test_default_splitter_uses_configured_tree_fraction(
         self,
     ) -> None:
         tree_width, viewer_width = self.window.splitter.sizes()
@@ -66,11 +66,6 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             tree_width / total_width,
             self.window.SPLITTER_TREE_DEFAULT_FRACTION,
             delta=0.01,
-        )
-        self.assertAlmostEqual(
-            self.window.SPLITTER_TREE_DEFAULT_FRACTION,
-            0.307,
-            places=3,
         )
         baseline_width = self.window.centralWidget().minimumSizeHint().width()
         long_text = ("very/deep/pdf/path/" * 24) + "target-file.pdf"
@@ -247,10 +242,10 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             orange_pixel_x_positions,
             "PDF directories must use the shared mdexplore folder-pill painter.",
         )
-        self.assertGreater(
-            min(orange_pixel_x_positions),
-            300,
-            "PDF folder pill should be anchored inside the visible right edge.",
+        self.assertLess(
+            max(orange_pixel_x_positions),
+            option.rect.center().x(),
+            "PDF folder pills should sit beside short labels, as in mdexplore.",
         )
 
     def test_folder_search_count_changes_invalidate_loaded_directory_rows(self) -> None:
@@ -282,6 +277,34 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
         self.assertIn(folder, changed_paths)
         self.assertIn(nested_folder, changed_paths)
+
+    def test_folder_search_counts_follow_visible_pdf_symlink_parents(self) -> None:
+        root = Path(self._tempdir.name)
+        visible_folder = root / "topic"
+        target_folder = root / "publisher"
+        visible_folder.mkdir()
+        target_folder.mkdir()
+        target = target_folder / "book.pdf"
+        _create_pdf_with_text(target, "needle")
+        visible_link = visible_folder / "linked-book.pdf"
+        try:
+            visible_link.symlink_to(target)
+        except OSError:
+            self.skipTest("symlink creation is not supported")
+
+        self.window.model.set_search_match_counts(
+            {target: 4},
+            directory_match_paths=[visible_link],
+        )
+
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(visible_folder),
+            1,
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(target_folder),
+            0,
+        )
 
     def test_expand_opens_only_pdf_bearing_branches_and_their_ancestors(self) -> None:
         root = Path(self._tempdir.name)

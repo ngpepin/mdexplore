@@ -150,7 +150,7 @@ gradually decomposed.
 - Effective-root directory row is always bold:
   - aqua-blue (`#7fdfe8`) when no active search matches are under that scope,
   - yellow when active search has matches under that scope.
-- Every directory containing matched descendant files shows an appended orange matching-file-count pill (`1..99`, then `++`), independent of selection.
+- Every directory containing matched descendant files shows an appended orange matching-file-count pill (`1..99`, then `++`), independent of selection. Pills update progressively during a scan and aggregate under the visible tree location of symlinked files/directories.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
 - Copy-time BASE64 image conversion warms image targets in parallel before rewrite for faster large-file copy/export workflows.
@@ -367,6 +367,7 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 | `MDEXPLORE_PDF_POOL_MAX_THREADS` | `1` | PDF write/stamp worker max threads. |
 | `MDEXPLORE_MATCH_TIMER_INTERVAL_MS` | `3000` | Search trigger timer cadence. |
 | `MDEXPLORE_TREE_SEARCH_REFRESH_DEBOUNCE_MS` | `180` | Debounce delay for tree-change search reruns. |
+| `MDEXPLORE_SEARCH_PROGRESS_PUBLISH_INTERVAL_MS` | `100` | Maximum coalescing interval for progressive search-pill updates after the first immediate hit. |
 | `MDEXPLORE_SCROLL_CAPTURE_INTERVAL_MS` | `200` | Scroll state capture timer cadence. |
 | `MDEXPLORE_DIAGRAM_STATE_CAPTURE_INTERVAL_MS` | `250` | Diagram state snapshot timer cadence. |
 | `MDEXPLORE_PREVIEW_ACTION_POLL_INTERVAL_MS` | `220` | Preview action/pending-state poll cadence. |
@@ -859,6 +860,7 @@ Example:
 tree (root + expanded directories).
 - While search is active, expand/collapse and directory/root scope changes  
 automatically rerun the search against the newly visible set.
+- File and recursive directory hit pills appear progressively as worker batches finish; symlink matches count beneath their visible alias path rather than beneath an unrelated resolved target path.
 - Matching files are shown bold+italic in the tree.
 - If filename terms match, filename text is rendered in yellow.
 - The effective-root directory label is bold aqua when idle, and becomes yellow  

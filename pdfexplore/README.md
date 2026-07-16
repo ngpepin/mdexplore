@@ -50,6 +50,8 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - supports tokenized/quoted boolean queries via shared parser helpers,
   - searches PDFs currently visible in the tree (root files plus expanded branches),
   - highlights in-tree match counts and in-view search hits for matched files,
+  - directory pills count matching descendant PDF rows under their visible
+    tree location, including symlinked PDFs whose targets live elsewhere,
   - opening another matched PDF while search is active jumps to its first hit.
 - Right-rail search indicators in preview:
   - markers are generated progressively from top pages to bottom pages,
