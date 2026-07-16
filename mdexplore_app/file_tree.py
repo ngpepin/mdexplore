@@ -428,6 +428,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             Qt.ItemDataRole.FontRole,
         ]
         directory_roles = [
+            Qt.ItemDataRole.DecorationRole,
             Qt.ItemDataRole.DisplayRole,
             Qt.ItemDataRole.ForegroundRole,
             Qt.ItemDataRole.FontRole,

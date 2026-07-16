@@ -223,14 +223,13 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         folder_index = self.window.model.index(str(selected_folder))
         self.assertTrue(folder_index.isValid())
         self.window.model.set_reduce_paint_cost(True)
-        image = QImage(420, 42, QImage.Format.Format_ARGB32)
-        image.fill(0xFFFFFFFF)
-        painter = QPainter(image)
-        option = QStyleOptionViewItem()
-        option.rect = QRect(0, 0, 420, 40)
-        option.widget = self.window.tree
-        self.window.tree.itemDelegate().paint(painter, option, folder_index)
-        painter.end()
+        icon = self.window.model.data(
+            folder_index,
+            Qt.ItemDataRole.DecorationRole,
+        )
+        self.assertIsInstance(icon, QIcon)
+        self.assertFalse(icon.isNull())
+        image = icon.pixmap(self.window.model.decorated_icon_size()).toImage()
 
         orange_pixel_x_positions: list[int] = []
         for y in range(image.height()):
@@ -243,11 +242,14 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
                     and color.alpha() > 200
                 ):
                     orange_pixel_x_positions.append(x)
-        self.assertTrue(orange_pixel_x_positions)
+        self.assertTrue(
+            orange_pixel_x_positions,
+            "PDF folder counts must be present in the native decoration icon.",
+        )
         self.assertLess(
-            max(orange_pixel_x_positions),
-            200,
-            "Folder pill should sit beside the folder label, not at the far edge of the tree.",
+            min(orange_pixel_x_positions),
+            image.width() - self.window.model._ICON_SIZE,
+            "The orange count pill should appear before the native folder icon.",
         )
 
     def test_folder_search_count_changes_invalidate_loaded_directory_rows(self) -> None:
