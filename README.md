@@ -148,8 +148,9 @@ gradually decomposed.
   - `Edit` opens the selected file in MarkText (`/usr/bin/marktext`).
 - Window title shows the current effective root path.
 - Effective-root directory row is always bold:
-  - aqua-blue (`#7fdfe8`) when no active search hits are under that scope,
-  - yellow with an appended hit-count pill when active search has hits under that scope (`1..99`, then `++`).
+  - aqua-blue (`#7fdfe8`) when no active search matches are under that scope,
+  - yellow when active search has matches under that scope.
+- Every directory containing matched descendant files shows an appended orange matching-file-count pill (`1..99`, then `++`), independent of selection.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
 - Copy-time BASE64 image conversion warms image targets in parallel before rewrite for faster large-file copy/export workflows.

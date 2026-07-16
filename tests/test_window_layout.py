@@ -10,6 +10,8 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 import mdexplore
+from mdexplore_app import search as search_query
+from mdexplore_app.workers import SearchScanWorker
 
 
 class WindowLayoutTests(unittest.TestCase):
@@ -126,12 +128,16 @@ class WindowLayoutTests(unittest.TestCase):
         selected_folder.mkdir()
         other_folder.mkdir(parents=True)
         selected_file = selected_folder / "selected.md"
+        selected_nested_folder = selected_folder / "nested"
+        selected_nested_folder.mkdir()
+        selected_nested_file = selected_nested_folder / "nested.md"
         other_file = other_folder / "other.md"
         selected_file.write_text("selected", encoding="utf-8")
+        selected_nested_file.write_text("nested", encoding="utf-8")
         other_file.write_text("other", encoding="utf-8")
 
         self.window.model.set_search_match_counts(
-            {selected_file: 2, other_file: 3}
+            {selected_file: 2, selected_nested_file: 8, other_file: 3}
         )
         self.window.model.set_effective_scope_directory(selected_folder)
 
@@ -139,11 +145,37 @@ class WindowLayoutTests(unittest.TestCase):
             self.window.model.search_hit_count_for_directory(selected_folder), 2
         )
         self.assertEqual(
-            self.window.model.search_hit_count_for_directory(other_folder), 3
+            self.window.model.search_hit_count_for_directory(selected_nested_folder), 1
         )
         self.assertEqual(
-            self.window.model.search_hit_count_for_directory(other_folder.parent), 3
+            self.window.model.search_hit_count_for_directory(other_folder), 1
         )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(other_folder.parent), 1
+        )
+
+    def test_search_worker_completion_removes_the_exact_worker(self) -> None:
+        predicate = search_query.compile_match_predicate("alpha")
+        hit_counter = search_query.compile_match_hit_counter("alpha")
+        first = SearchScanWorker(7, [], predicate, hit_counter, [])
+        second = SearchScanWorker(7, [], predicate, hit_counter, [])
+        self.window._active_search_scan_workers = {first, second}
+        self.window._search_scan_request_id = 7
+        self.window._search_scan_expected_workers = 2
+        self.window._search_scan_completed_workers = 0
+
+        self.window._on_search_scan_finished(
+            first.worker_token,
+            7,
+            [],
+            {},
+            [],
+            "",
+        )
+
+        self.assertNotIn(first, self.window._active_search_scan_workers)
+        self.assertIn(second, self.window._active_search_scan_workers)
+        self.assertEqual(self.window._search_scan_completed_workers, 1)
 
     def test_expand_and_collapse_buttons_are_between_refresh_and_pdf(self) -> None:
         button_labels = [

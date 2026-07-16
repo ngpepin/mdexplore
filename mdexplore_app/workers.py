@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -471,7 +471,7 @@ class TreeMarkerScanWorker(QRunnable):
 class SearchScanWorkerSignals(QObject):
     """Signals emitted by background markdown search workers."""
 
-    finished = Signal(int, object, object, object, str)
+    finished = Signal(object, int, object, object, object, str)
 
 
 class SearchScanWorker(QRunnable):
@@ -491,7 +491,17 @@ class SearchScanWorker(QRunnable):
         self.predicate = predicate
         self.hit_counter = hit_counter
         self.filename_patterns = list(filename_patterns)
+        self.worker_token = object()
+        self._cancel_event = Event()
         self.signals = SearchScanWorkerSignals()
+        # Python owns the runnable until its exact completion callback removes it.
+        # This prevents Qt from deleting a Python QRunnable while a sibling from
+        # the same request is still represented in the active-worker set.
+        self.setAutoDelete(False)
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation between files."""
+        self._cancel_event.set()
 
     def run(self) -> None:
         try:
@@ -500,6 +510,8 @@ class SearchScanWorker(QRunnable):
             filename_match_paths: list[str] = []
 
             for path in self.paths:
+                if self._cancel_event.is_set():
+                    break
                 try:
                     path_key, searchable_content = _load_searchable_markdown_content(path)
                     filename_search_text = path.stem
@@ -521,6 +533,7 @@ class SearchScanWorker(QRunnable):
                 match_counts[path_key] = count if count > 0 else 1
 
             self.signals.finished.emit(
+                self.worker_token,
                 self.request_id,
                 matched_paths,
                 match_counts,
@@ -528,4 +541,11 @@ class SearchScanWorker(QRunnable):
                 "",
             )
         except Exception as exc:
-            self.signals.finished.emit(self.request_id, [], {}, [], str(exc))
+            self.signals.finished.emit(
+                self.worker_token,
+                self.request_id,
+                [],
+                {},
+                [],
+                str(exc),
+            )

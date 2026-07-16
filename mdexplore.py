@@ -7258,7 +7258,13 @@ class MdExploreWindow(QMainWindow):
     def _cancel_pending_search_scan(self) -> None:
         """Drop queued background search scans and invalidate stale results."""
         self._search_scan_request_id += 1
-        self._search_scan_pool.clear()
+        for worker in list(self._active_search_scan_workers):
+            try:
+                worker.cancel()
+                if self._search_scan_pool.tryTake(worker):
+                    self._active_search_scan_workers.discard(worker)
+            except Exception:
+                pass
         self._reset_search_scan_state()
 
     def _merge_live_tree_marker_state(
@@ -7479,6 +7485,7 @@ class MdExploreWindow(QMainWindow):
 
     def _on_search_scan_finished(
         self,
+        worker_token,
         request_id: int,
         matched_paths,
         match_counts,
@@ -7488,7 +7495,7 @@ class MdExploreWindow(QMainWindow):
         """Merge completed search chunk results and apply when all workers finish."""
         worker_to_remove = None
         for worker in self._active_search_scan_workers:
-            if worker.request_id == request_id:
+            if getattr(worker, "worker_token", None) is worker_token:
                 worker_to_remove = worker
                 break
         if worker_to_remove is not None:
@@ -9768,6 +9775,9 @@ class MdExploreWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_restore_overlay_monitor()
+        self._cancel_pending_search_scan()
+        self._search_scan_pool.waitForDone()
+        self._active_search_scan_workers.clear()
         self._cancel_pending_inline_data_image_materialization()
         self._persist_document_view_session()
         self._persist_effective_root()

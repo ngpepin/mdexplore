@@ -6,10 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, QEvent, Qt
-from PySide6.QtGui import QClipboard, QIcon, QKeyEvent
+from PySide6.QtCore import QPoint, QEvent, QRect, Qt
+from PySide6.QtGui import QClipboard, QIcon, QImage, QKeyEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QSizePolicy, QStyle
+from PySide6.QtWidgets import (
+    QApplication,
+    QPushButton,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionViewItem,
+)
 
 from pdfexplore.app import PdfExploreWindow
 
@@ -188,24 +194,56 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         selected_folder.mkdir()
         other_folder.mkdir(parents=True)
         selected_file = selected_folder / "selected.pdf"
+        selected_nested_folder = selected_folder / "nested"
+        selected_nested_folder.mkdir()
+        selected_nested_file = selected_nested_folder / "nested.pdf"
         other_file = other_folder / "other.pdf"
         _create_pdf_with_text(selected_file, "selected")
+        _create_pdf_with_text(selected_nested_file, "nested")
         _create_pdf_with_text(other_file, "other")
 
         self.window.model.set_search_match_counts(
-            {selected_file: 4, other_file: 5}
+            {selected_file: 4, selected_nested_file: 9, other_file: 5}
         )
         self.window.model.set_effective_scope_directory(selected_folder)
 
         self.assertEqual(
-            self.window.model.search_hit_count_for_directory(selected_folder), 4
+            self.window.model.search_hit_count_for_directory(selected_folder), 2
         )
         self.assertEqual(
-            self.window.model.search_hit_count_for_directory(other_folder), 5
+            self.window.model.search_hit_count_for_directory(selected_nested_folder), 1
         )
         self.assertEqual(
-            self.window.model.search_hit_count_for_directory(other_folder.parent), 5
+            self.window.model.search_hit_count_for_directory(other_folder), 1
         )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(other_folder.parent), 1
+        )
+
+        folder_index = self.window.model.index(str(selected_folder))
+        self.assertTrue(folder_index.isValid())
+        self.window.model.set_reduce_paint_cost(True)
+        image = QImage(420, 42, QImage.Format.Format_ARGB32)
+        image.fill(0xFFFFFFFF)
+        painter = QPainter(image)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 420, 40)
+        option.widget = self.window.tree
+        self.window.tree.itemDelegate().paint(painter, option, folder_index)
+        painter.end()
+
+        yellow_pixels = 0
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                if (
+                    abs(color.red() - 243) <= 12
+                    and abs(color.green() - 197) <= 12
+                    and abs(color.blue() - 107) <= 12
+                    and color.alpha() > 200
+                ):
+                    yellow_pixels += 1
+        self.assertGreater(yellow_pixels, 0)
 
     def test_expand_opens_only_pdf_bearing_branches_and_their_ancestors(self) -> None:
         root = Path(self._tempdir.name)

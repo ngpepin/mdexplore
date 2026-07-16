@@ -374,12 +374,12 @@ class ColorizedExtensionModel(QFileSystemModel):
             next_counts[self._path_key(path)] = count
         self._search_match_counts = next_counts
         directory_counts: dict[str, int] = {}
-        for raw_path_key, count in next_counts.items():
+        for raw_path_key in next_counts:
             directory = Path(raw_path_key).parent
             while True:
                 directory_key = self._path_key(directory)
                 directory_counts[directory_key] = (
-                    directory_counts.get(directory_key, 0) + count
+                    directory_counts.get(directory_key, 0) + 1
                 )
                 parent = directory.parent
                 if parent == directory:
@@ -488,7 +488,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         return bool(self._reduce_paint_cost)
 
     def search_hit_count_for_directory(self, directory: Path) -> int:
-        """Return the aggregated descendant search-hit count for any directory."""
+        """Return the number of matching descendant files for any directory."""
         return max(
             0,
             int(self._directory_search_hit_counts.get(self._path_key(directory), 0)),
@@ -949,17 +949,13 @@ class ColorizedExtensionModel(QFileSystemModel):
 class ExtensionTreeItemDelegate(QStyledItemDelegate):
     """Paint filename-only highlight backgrounds for target-extension rows."""
 
-    _DIR_SEARCH_PILL_BG = "#f7e27a"
+    _DIR_SEARCH_PILL_BG = "#f3c56b"
     _DIR_SEARCH_PILL_FG = "#111111"
     _DIR_SEARCH_PILL_GAP = 8
 
     def paint(self, painter: QPainter, option, index) -> None:
         model = index.model()
         if not isinstance(model, ColorizedExtensionModel):
-            super().paint(painter, option, index)
-            return
-
-        if model.is_reduce_paint_cost_enabled():
             super().paint(painter, option, index)
             return
 
@@ -976,6 +972,10 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
                     directory_hit_count,
                 )
                 return
+
+        if model.is_reduce_paint_cost_enabled():
+            super().paint(painter, option, index)
+            return
 
         if not model.matches_file_info(info):
             super().paint(painter, option, index)
@@ -1118,7 +1118,7 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         model: ColorizedExtensionModel,
         directory_hit_count: int,
     ) -> None:
-        """Paint any directory row with its appended descendant search-count pill."""
+        """Paint any directory row with its appended matching-file-count pill."""
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         widget = opt.widget

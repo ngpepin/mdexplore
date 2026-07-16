@@ -27,21 +27,62 @@ class SearchScanWorkerFilenameSurfaceTests(unittest.TestCase):
         emitted = {}
 
         def _on_finished(
+            worker_token,
             request_id: int,
             matched_paths,
             match_counts,
             filename_match_paths,
             error_text: str,
         ) -> None:
+            emitted["worker_token"] = worker_token
             emitted["request_id"] = request_id
             emitted["matched_paths"] = matched_paths
             emitted["match_counts"] = match_counts
             emitted["filename_match_paths"] = filename_match_paths
             emitted["error_text"] = error_text
 
+        self.assertFalse(worker.autoDelete())
         worker.signals.finished.connect(_on_finished)
         worker.run()
+        emitted["expected_worker_token"] = worker.worker_token
         return emitted
+
+    def test_cancelled_worker_emits_empty_result_with_its_token(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mdexplore-search-worker-cancel-") as tmpdir:
+            target = Path(tmpdir) / "alpha.md"
+            target.write_text("alpha\n", encoding="utf-8")
+            predicate = search_query.compile_match_predicate("alpha")
+            hit_counter = search_query.compile_match_hit_counter("alpha")
+            worker = SearchScanWorker(3, [target], predicate, hit_counter, [])
+            emitted = {}
+
+            def _on_finished(
+                worker_token,
+                request_id,
+                matched_paths,
+                match_counts,
+                filename_match_paths,
+                error_text,
+            ) -> None:
+                emitted.update(
+                    worker_token=worker_token,
+                    request_id=request_id,
+                    matched_paths=matched_paths,
+                    match_counts=match_counts,
+                    filename_match_paths=filename_match_paths,
+                    error_text=error_text,
+                )
+
+            worker.signals.finished.connect(_on_finished)
+            worker.cancel()
+            worker.run()
+
+            self.assertIs(emitted["worker_token"], worker.worker_token)
+            self.assertEqual(emitted["request_id"], 3)
+            self.assertEqual(emitted["matched_paths"], [])
+            self.assertEqual(emitted["match_counts"], {})
+            self.assertEqual(emitted["filename_match_paths"], [])
+            self.assertEqual(emitted["error_text"], "")
 
     def test_extension_text_is_excluded_from_filename_query_surface(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mdexplore-search-worker-stem-") as tmpdir:
@@ -52,6 +93,7 @@ class SearchScanWorkerFilenameSurfaceTests(unittest.TestCase):
             result = self._run_worker_once("md", target)
 
             self.assertEqual(result["error_text"], "")
+            self.assertIs(result["worker_token"], result["expected_worker_token"])
             self.assertEqual(result["matched_paths"], [])
             self.assertEqual(result["match_counts"], {})
 
@@ -64,6 +106,7 @@ class SearchScanWorkerFilenameSurfaceTests(unittest.TestCase):
             result = self._run_worker_once("md AND beta", target)
 
             self.assertEqual(result["error_text"], "")
+            self.assertIs(result["worker_token"], result["expected_worker_token"])
             self.assertEqual(result["matched_paths"], [])
             self.assertEqual(result["match_counts"], {})
 
