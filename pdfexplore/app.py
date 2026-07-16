@@ -519,9 +519,11 @@ class PdfExploreWindow(QMainWindow):
         self.tree.setModel(self.model)
         self.tree.setItemDelegate(PdfTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedPdfModel.decorated_icon_size())
+        # Match mdexplore's proven tree/delegate configuration. In particular,
+        # leave row sizing and animation at Qt defaults so the shared delegate's
+        # directory-count pill is measured and painted without PDF-only view
+        # constraints.
         self.tree.setIndentation(14)
-        self.tree.setUniformRowHeights(True)
-        self.tree.setAnimated(False)
         self.tree.setHeaderHidden(True)
         self.tree.hideColumn(1)
         self.tree.hideColumn(2)
