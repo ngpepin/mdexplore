@@ -575,6 +575,7 @@ class PdfExploreWindow(QMainWindow):
         )
         self.dark_mode_btn.setToolTip("Show PDFs with dark pages and light text")
         self.dark_mode_btn.clicked.connect(self._toggle_preview_dark_mode)
+        self.dark_mode_btn.setEnabled(False)
 
         self.add_view_btn = QPushButton("Add View")
         self._apply_compact_toolbar_button_width(
@@ -2855,12 +2856,17 @@ class PdfExploreWindow(QMainWindow):
         self.path_label.setText("")
         self.path_label.setToolTip("")
         self.preview_stack.setCurrentWidget(self._empty_preview)
+        self._update_dark_mode_button_state()
         blocked = self.view_tabs.blockSignals(True)
         while self.view_tabs.count() > 0:
             self.view_tabs.removeTab(0)
         self.view_tabs.blockSignals(blocked)
         self._active_view_tab_index = -1
         self._refresh_view_tabs_visibility()
+
+    def _update_dark_mode_button_state(self) -> None:
+        """Enable dark mode only while a PDF preview is visible."""
+        self.dark_mode_btn.setEnabled(self._current_preview_widget() is not None)
 
     def _update_edit_button_state(self) -> None:
         """Handle update edit button state."""
@@ -2930,6 +2936,7 @@ class PdfExploreWindow(QMainWindow):
                 )
         preview = self._preview_widget_for_path(path)
         self.preview_stack.setCurrentWidget(preview)
+        self._update_dark_mode_button_state()
         self._trim_preview_widget_cache(protected_path_keys={path_key})
         self._viewer_bridge_ready_by_path[path_key] = False
         preview.setUrl(self._viewer_url_for_pdf(path))
@@ -4045,6 +4052,7 @@ class PdfExploreWindow(QMainWindow):
             return False
         if self.preview_stack.currentWidget() is preview:
             self.preview_stack.setCurrentWidget(self._empty_preview)
+            self._update_dark_mode_button_state()
         try:
             preview.loadFinished.disconnect()
         except Exception:
@@ -5045,6 +5053,7 @@ class PdfExploreWindow(QMainWindow):
             self._pending_search_scroll_to_first_path_keys.add(path_key)
         preview = self._preview_widget_for_path(path)
         self.preview_stack.setCurrentWidget(preview)
+        self._update_dark_mode_button_state()
         self._trim_preview_widget_cache(protected_path_keys={path_key})
         wanted_state = data.get("state") if isinstance(data.get("state"), dict) else None
         if wanted_state is None:

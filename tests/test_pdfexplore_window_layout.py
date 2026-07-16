@@ -129,7 +129,28 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
                 QSizePolicy.Policy.Fixed,
             )
 
+    def test_dark_mode_button_is_disabled_without_a_preview(self) -> None:
+        self.assertFalse(self.window.dark_mode_btn.isEnabled())
+
+        pdf_path = Path(self._tempdir.name) / "dark-mode-state.pdf"
+        _create_pdf_with_text(pdf_path, "dark mode state")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        self.assertTrue(self.window.dark_mode_btn.isEnabled())
+
+        pdf_path.unlink()
+        self.window._clear_preview_for_missing_file()
+        QApplication.processEvents()
+
+        self.assertFalse(self.window.dark_mode_btn.isEnabled())
+
     def test_dark_mode_button_toggles_viewer_colors_and_label(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "dark-mode-toggle.pdf"
+        _create_pdf_with_text(pdf_path, "dark mode toggle")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
         captured_sources: list[str] = []
         self.window._run_viewer_js = (  # type: ignore[method-assign]
             lambda source, callback=None: captured_sources.append(source)
@@ -150,6 +171,11 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertIn("setDarkMode(false)", captured_sources[-1])
 
     def test_toolbar_input_resets_background_idle_clock(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "toolbar-input.pdf"
+        _create_pdf_with_text(pdf_path, "toolbar input")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
         previous = time.monotonic() - self.window.PREFETCH_IDLE_SECONDS - 1.0
         self.window._last_user_interaction_at = previous
 
