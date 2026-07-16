@@ -77,7 +77,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
     def test_pdf_tree_uses_pdf_name_filter(self) -> None:
         self.assertEqual(self.window.model.nameFilters(), ["*.pdf"])
 
-    def test_dark_mode_button_sits_between_refresh_and_add_view(self) -> None:
+    def test_expand_and_collapse_buttons_sit_between_refresh_and_dark_mode(self) -> None:
         top_bar_widget = self.window.centralWidget().layout().itemAt(0).widget()
         top_bar = top_bar_widget.layout()
         button_labels = [
@@ -87,8 +87,8 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         ]
         refresh_index = button_labels.index("Refresh")
         self.assertEqual(
-            button_labels[refresh_index : refresh_index + 3],
-            ["Refresh", "Dark", "Add View"],
+            button_labels[refresh_index : refresh_index + 5],
+            ["Refresh", "Expand", "Collapse", "Dark", "Add View"],
         )
 
     def test_top_left_buttons_are_compactly_sized_to_their_labels(self) -> None:
@@ -104,6 +104,8 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             "Recent": 12,
             "^": 10,
             "Refresh": 12,
+            "Expand": 12,
+            "Collapse": 12,
             "Dark": 12,
             "Add View": 12,
             "Edit": 12,
@@ -128,6 +130,68 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
                 button.sizePolicy().horizontalPolicy(),
                 QSizePolicy.Policy.Fixed,
             )
+
+    def _wait_for_tree_index(self, path: Path, timeout_seconds: float = 2.0):
+        deadline = time.monotonic() + timeout_seconds
+        index = self.window.model.index(str(path))
+        while not index.isValid() and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.01)
+            index = self.window.model.index(str(path))
+        self.assertTrue(index.isValid(), f"Tree index did not load for {path}")
+        return index
+
+    def test_expand_opens_only_pdf_bearing_branches_and_their_ancestors(self) -> None:
+        root = Path(self._tempdir.name)
+        pdf_parent = root / "reports"
+        pdf_directory = pdf_parent / "quarterly"
+        pdf_directory.mkdir(parents=True)
+        _create_pdf_with_text(pdf_directory / "results.pdf", "results")
+
+        direct_pdf_directory = root / "invoices"
+        direct_pdf_directory.mkdir()
+        _create_pdf_with_text(direct_pdf_directory / "invoice.pdf", "invoice")
+
+        empty_directory = root / "empty" / "nested"
+        empty_directory.mkdir(parents=True)
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        self.window.expand_btn.click()
+        QApplication.processEvents()
+
+        reports_index = self._wait_for_tree_index(pdf_parent)
+        quarterly_index = self._wait_for_tree_index(pdf_directory)
+        invoices_index = self._wait_for_tree_index(direct_pdf_directory)
+        empty_index = self._wait_for_tree_index(root / "empty")
+
+        self.assertTrue(self.window.tree.isExpanded(reports_index))
+        self.assertTrue(self.window.tree.isExpanded(quarterly_index))
+        self.assertTrue(self.window.tree.isExpanded(invoices_index))
+        self.assertFalse(self.window.tree.isExpanded(empty_index))
+
+    def test_collapse_closes_all_directory_branches(self) -> None:
+        root = Path(self._tempdir.name)
+        pdf_parent = root / "reports"
+        pdf_directory = pdf_parent / "quarterly"
+        pdf_directory.mkdir(parents=True)
+        _create_pdf_with_text(pdf_directory / "results.pdf", "results")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        self.window.expand_btn.click()
+        QApplication.processEvents()
+
+        reports_index = self._wait_for_tree_index(pdf_parent)
+        quarterly_index = self._wait_for_tree_index(pdf_directory)
+        self.assertTrue(self.window.tree.isExpanded(reports_index))
+        self.assertTrue(self.window.tree.isExpanded(quarterly_index))
+
+        self.window.collapse_btn.click()
+        QApplication.processEvents()
+
+        self.assertFalse(self.window.tree.isExpanded(reports_index))
+        self.assertFalse(self.window.tree.isExpanded(quarterly_index))
 
     def test_dark_mode_button_is_disabled_without_a_preview(self) -> None:
         self.assertFalse(self.window.dark_mode_btn.isEnabled())

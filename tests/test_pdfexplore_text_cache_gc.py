@@ -1091,6 +1091,84 @@ class PdfTextCacheGcWindowTests(unittest.TestCase):
 
         self.assertTrue(self.window._cached_badge_sync_timer.isActive())
 
+    def test_immediate_badge_probe_restores_persisted_entries_without_idle_wait(
+        self,
+    ) -> None:
+        cached_sources = [self.root / "cached-one.pdf", self.root / "cached-two.pdf"]
+        uncached_source = self.root / "uncached.pdf"
+        for index, source in enumerate([*cached_sources, uncached_source]):
+            source.write_bytes(f"pdf-{index}".encode("utf-8"))
+
+        cached_keys: list[str] = []
+        for source in cached_sources:
+            source_stat = source.stat()
+            path_key = self.window._path_key(source)
+            cached_keys.append(path_key)
+            self.assertTrue(
+                self.window._store_pdf_text_to_disk_cache(
+                    path_key,
+                    source_stat.st_mtime_ns,
+                    source_stat.st_size,
+                    f"cached text for {source.name}",
+                )
+            )
+
+        # Simulate a fresh process: memory and badge state are empty while the
+        # compressed cache files remain on disk.
+        with self.window._pdf_text_cache_lock:
+            self.window._pdf_text_cache.clear()
+            self.window._pdf_text_cache_total_chars = 0
+        with self.window._cached_pdf_path_keys_lock:
+            self.window._cached_pdf_path_keys.clear()
+            self.window._cached_pdf_path_keys_revision += 1
+        self.window._cached_pdf_path_keys_synced_revision = -1
+        self.window._cache_badge_probe_timer.stop()
+
+        started_workers: list[PdfTextPrefetchWorker] = []
+
+        def _run_immediately(worker: PdfTextPrefetchWorker, *_args) -> None:
+            started_workers.append(worker)
+            worker.run()
+
+        with (
+            patch.object(
+                self.window,
+                "_list_visible_pdf_files_in_tree",
+                return_value=[*cached_sources, uncached_source],
+            ),
+            patch.object(
+                self.window._cache_badge_probe_pool,
+                "start",
+                side_effect=_run_immediately,
+            ),
+            patch.object(self.window, "_prefetch_pdf_text") as text_prefetch,
+        ):
+            self.window._start_cached_badge_probe()
+            QApplication.processEvents()
+
+        self.assertEqual(len(started_workers), 1)
+        self.assertEqual(
+            started_workers[0].paths,
+            [*cached_sources, uncached_source],
+        )
+        text_prefetch.assert_not_called()
+        for path_key in cached_keys:
+            self.assertIn(path_key, self.window._cached_pdf_path_keys)
+        self.assertNotIn(
+            self.window._path_key(uncached_source),
+            self.window._cached_pdf_path_keys,
+        )
+
+    def test_directory_load_requests_immediate_persisted_cache_badge_probe(self) -> None:
+        with (
+            patch.object(self.window, "_request_cached_badge_probe") as request_probe,
+            patch.object(self.window, "_request_scope_prefetch") as request_prefetch,
+        ):
+            self.window._on_model_directory_loaded(str(self.root))
+
+        request_probe.assert_called_once_with()
+        request_prefetch.assert_called_once_with()
+
     def test_idle_prefetch_restores_existing_disk_cache_badge_on_worker_thread(
         self,
     ) -> None:

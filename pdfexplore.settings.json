@@ -36,6 +36,7 @@
     "tree_search_refresh_debounce_ms": 900,
     "tree_interaction_visual_relax_ms": 320,
     "cached_badge_sync_interval_ms": 200,
+    "cache_badge_probe_timer_interval_ms": 75,
     "match_timer_interval_ms": 320,
     "scope_prefetch_timer_interval_ms": 550,
     "viewer_ready_timer_interval_ms": 160,

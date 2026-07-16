@@ -123,6 +123,10 @@ runtime settings in `pdfexplore.settings.json`.
 
 ### Extracted-text cache and idle work
 
+- Restore persisted-cache badges through a coalesced background probe when
+  QFileSystemModel publishes visible rows. The probe may check source
+  signatures and cache-file existence, but must not wait for idle extraction
+  prefetch or decompress cached text.
 - `.pdfexplore-text-cache.lock` is the stable cache transaction lock. Open and
   identify a cache entry under shared mode, then decompress its retained file
   descriptor after releasing the lock. Use short exclusive transactions for

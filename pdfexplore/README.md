@@ -133,6 +133,7 @@ It is designed for people who review many PDFs and need stable annotation/sessio
 - Text caching:
   - memory cache: bounded `OrderedDict`,
   - disk cache: compressed entries under `${XDG_CACHE_HOME:-~/.cache}/mdexplore/pdfexplore-text-cache`,
+  - persisted-cache badges are restored promptly in a background batch when visible tree rows load or expand, without waiting for idle extraction prefetch,
   - atomic `.txt.gz.meta.json` companions map compressed entries back to source
     PDFs for idle garbage collection; legacy entries gain metadata when loaded.
 

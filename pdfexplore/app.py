@@ -253,6 +253,9 @@ class PdfExploreWindow(QMainWindow):
     TREE_SEARCH_REFRESH_DEBOUNCE_MS = int(_app_setting("tree_search_refresh_debounce_ms", 300))
     TREE_INTERACTION_VISUAL_RELAX_MS = int(_app_setting("tree_interaction_visual_relax_ms", 320))
     CACHED_BADGE_SYNC_INTERVAL_MS = int(_app_setting("cached_badge_sync_interval_ms", 200))
+    CACHE_BADGE_PROBE_TIMER_INTERVAL_MS = int(
+        _app_setting("cache_badge_probe_timer_interval_ms", 75)
+    )
     MATCH_TIMER_INTERVAL_MS = int(_app_setting("match_timer_interval_ms", 320))
     SCOPE_PREFETCH_TIMER_INTERVAL_MS = int(_app_setting("scope_prefetch_timer_interval_ms", 550))
     VIEWER_READY_TIMER_INTERVAL_MS = int(_app_setting("viewer_ready_timer_interval_ms", 160))
@@ -394,6 +397,10 @@ class PdfExploreWindow(QMainWindow):
         self._prefetch_pool.setMaxThreadCount(max(1, self.PREFETCH_THREAD_POOL_MAX_THREADS))
         self._prefetch_request_id = 0
         self._active_prefetch_workers: set[PdfTextPrefetchWorker] = set()
+        self._cache_badge_probe_pool = QThreadPool(self)
+        self._cache_badge_probe_pool.setMaxThreadCount(1)
+        self._cache_badge_probe_request_id = 0
+        self._active_cache_badge_probe_workers: set[PdfTextPrefetchWorker] = set()
         self._global_activity_touch_pool = QThreadPool(self)
         self._global_activity_touch_pool.setMaxThreadCount(1)
         self._global_activity_probe_pool = QThreadPool(self)
@@ -445,6 +452,13 @@ class PdfExploreWindow(QMainWindow):
         self._cached_badge_sync_timer.setSingleShot(True)
         self._cached_badge_sync_timer.setInterval(int(self.CACHED_BADGE_SYNC_INTERVAL_MS))
         self._cached_badge_sync_timer.timeout.connect(self._sync_cached_tree_badges)
+
+        self._cache_badge_probe_timer = QTimer(self)
+        self._cache_badge_probe_timer.setSingleShot(True)
+        self._cache_badge_probe_timer.setInterval(
+            max(0, int(self.CACHE_BADGE_PROBE_TIMER_INTERVAL_MS))
+        )
+        self._cache_badge_probe_timer.timeout.connect(self._start_cached_badge_probe)
 
         self._global_activity_touch_timer = QTimer(self)
         self._global_activity_touch_timer.setSingleShot(True)
@@ -566,6 +580,22 @@ class PdfExploreWindow(QMainWindow):
         refresh_btn = QPushButton("Refresh")
         self._apply_compact_toolbar_button_width(refresh_btn, horizontal_padding_px=12)
         refresh_btn.clicked.connect(self._refresh_directory_view)
+
+        self.expand_btn = QPushButton("Expand")
+        self._apply_compact_toolbar_button_width(
+            self.expand_btn, horizontal_padding_px=12
+        )
+        self.expand_btn.setToolTip(
+            "Expand every directory under the current root that contains PDFs"
+        )
+        self.expand_btn.clicked.connect(self._expand_pdf_directories)
+
+        self.collapse_btn = QPushButton("Collapse")
+        self._apply_compact_toolbar_button_width(
+            self.collapse_btn, horizontal_padding_px=12
+        )
+        self.collapse_btn.setToolTip("Collapse all directories under the current root")
+        self.collapse_btn.clicked.connect(self._collapse_all_directories)
 
         self.dark_mode_btn = QPushButton("Dark")
         self._apply_compact_toolbar_button_width(
@@ -698,6 +728,8 @@ class PdfExploreWindow(QMainWindow):
         top_bar.addWidget(self.recent_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
+        top_bar.addWidget(self.expand_btn)
+        top_bar.addWidget(self.collapse_btn)
         top_bar.addWidget(self.dark_mode_btn)
         top_bar.addWidget(self.add_view_btn)
         top_bar.addWidget(self.edit_btn)
@@ -996,6 +1028,77 @@ class PdfExploreWindow(QMainWindow):
         if not needs_sync:
             return
         self._cached_badge_sync_timer.start()
+
+    def _cancel_cached_badge_probe(self) -> None:
+        """Cancel queued persisted-cache discovery and invalidate running work."""
+        self._cache_badge_probe_request_id += 1
+        for worker in tuple(self._active_cache_badge_probe_workers):
+            try:
+                if self._cache_badge_probe_pool.tryTake(worker):
+                    self._active_cache_badge_probe_workers.discard(worker)
+            except Exception:
+                pass
+        self._cache_badge_probe_pool.clear()
+
+    def _request_cached_badge_probe(self) -> None:
+        """Coalesce a prompt background scan for persisted cache entries."""
+        if self._closing:
+            return
+        self._cache_badge_probe_timer.start()
+
+    def _start_cached_badge_probe(self) -> None:
+        """Restore cached icons without waiting for idle extraction prefetch.
+
+        The probe checks current PDF signatures and matching cache-file
+        existence only. It does not decompress text or extract PDF content.
+        """
+        if self._closing:
+            return
+        candidates = self._list_visible_pdf_files_in_tree(fetch_more=False)
+        if not candidates:
+            return
+
+        self._cancel_cached_badge_probe()
+        request_id = self._cache_badge_probe_request_id
+
+        def _should_abort(req: int = request_id) -> bool:
+            return bool(self._closing or req != self._cache_badge_probe_request_id)
+
+        worker = PdfTextPrefetchWorker(
+            request_id,
+            candidates,
+            lambda path: self._is_pdf_text_cached_for_path(
+                path,
+                mark_cached_badge=True,
+                should_abort=_should_abort,
+            ),
+            should_abort=_should_abort,
+        )
+        worker.signals.finished.connect(self._on_cached_badge_probe_finished)
+        self._active_cache_badge_probe_workers.add(worker)
+        try:
+            self._cache_badge_probe_pool.start(worker)
+        except Exception:
+            self._active_cache_badge_probe_workers.discard(worker)
+
+    def _on_cached_badge_probe_finished(
+        self,
+        request_id: int,
+        _probed_count: int,
+        _skipped_count: int,
+        _error_text: str,
+    ) -> None:
+        """Publish icons found by the prompt persisted-cache probe."""
+        worker_to_remove = None
+        for worker in self._active_cache_badge_probe_workers:
+            if worker.request_id == request_id:
+                worker_to_remove = worker
+                break
+        if worker_to_remove is not None:
+            self._active_cache_badge_probe_workers.discard(worker_to_remove)
+        if request_id != self._cache_badge_probe_request_id or self._closing:
+            return
+        self._request_cached_badge_sync()
 
     def _mark_user_interaction(self) -> None:
         """Handle mark user interaction."""
@@ -2634,6 +2737,7 @@ class PdfExploreWindow(QMainWindow):
     def _on_model_directory_loaded(self, _path_text: str) -> None:
         """Refresh async QFileSystemModel visibility after a directory loads."""
         self._invalidate_visible_tree_pdf_cache()
+        self._request_cached_badge_probe()
         match_input = getattr(self, "match_input", None)
         if match_input is not None and match_input.text().strip():
             self._rerun_active_search_for_scope()
@@ -2878,6 +2982,105 @@ class PdfExploreWindow(QMainWindow):
             except Exception:
                 enabled = False
         self.edit_btn.setEnabled(enabled)
+
+    def _pdf_directory_paths_for_expansion(self) -> list[Path]:
+        """Return PDF-bearing directories and the ancestors needed to reveal them."""
+        try:
+            root = self.root.resolve()
+        except Exception:
+            root = self.root
+        if not root.is_dir():
+            return []
+
+        paths: set[Path] = set()
+        for current_text, directory_names, file_names in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            current = Path(current_text)
+            directory_names[:] = sorted(
+                (
+                    name
+                    for name in directory_names
+                    if not (current / name).is_symlink()
+                ),
+                key=str.casefold,
+            )
+            if not any(name.lower().endswith(".pdf") for name in file_names):
+                continue
+
+            candidate = current
+            while candidate != root:
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    break
+                paths.add(candidate)
+                candidate = candidate.parent
+
+        return sorted(
+            paths,
+            key=lambda path: (len(path.relative_to(root).parts), str(path).casefold()),
+        )
+
+    def _expand_pdf_directories(self, _checked: bool = False) -> None:
+        """Expand all PDF-bearing directories beneath the current root."""
+        self._set_tree_interaction_visual_mode(True)
+        self._tree_visual_relax_timer.start()
+        self._pause_prefetch_temporarily(
+            self.PREFETCH_TREE_MUTATION_PAUSE_SECONDS,
+            cancel_inflight=True,
+        )
+
+        paths = self._pdf_directory_paths_for_expansion()
+        expanded_count = 0
+        for path in paths:
+            parent_index = (
+                self.tree.rootIndex()
+                if path.parent == self.root
+                else self.model.index(str(path.parent))
+            )
+            if parent_index.isValid() and self.model.canFetchMore(parent_index):
+                self.model.fetchMore(parent_index)
+                QApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.AllEvents,
+                    10,
+                )
+            index = self.model.index(str(path))
+            if not index.isValid():
+                QApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.AllEvents,
+                    10,
+                )
+                index = self.model.index(str(path))
+            if index.isValid() and not self.tree.isExpanded(index):
+                self.tree.expand(index)
+                expanded_count += 1
+
+        self._invalidate_visible_tree_pdf_cache()
+        if self.match_input.text().strip():
+            self._rerun_active_search_for_scope()
+        else:
+            self._request_scope_prefetch()
+        self.statusBar().showMessage(
+            f"Expanded {expanded_count} PDF directory branch(es)",
+            3000,
+        )
+
+    def _collapse_all_directories(self, _checked: bool = False) -> None:
+        """Collapse every directory branch beneath the current root."""
+        self._set_tree_interaction_visual_mode(True)
+        self._tree_visual_relax_timer.start()
+        self._pause_prefetch_temporarily(
+            self.PREFETCH_TREE_MUTATION_PAUSE_SECONDS,
+            cancel_inflight=True,
+        )
+        self.tree.collapseAll()
+        self._invalidate_visible_tree_pdf_cache()
+        if self.match_input.text().strip():
+            self._rerun_active_search_for_scope()
+        else:
+            self._request_scope_prefetch()
+        self.statusBar().showMessage("Collapsed all directory branches", 3000)
 
     def _expanded_directory_paths(self) -> list[str]:
         """Handle expanded directory paths."""
@@ -3341,6 +3544,7 @@ class PdfExploreWindow(QMainWindow):
         """Set root directory."""
         self._cancel_pending_search_scan()
         self._cancel_scope_prefetch()
+        self._cancel_cached_badge_probe()
         target_root = self._on_recent_root_navigation(directory)
         if self.current_file is not None:
             self._persist_document_view_session(
@@ -3360,6 +3564,7 @@ class PdfExploreWindow(QMainWindow):
         self._update_up_button_state()
         self._persist_effective_root()
         self.statusBar().showMessage(f"Root changed to {self.root}", 3000)
+        self._request_cached_badge_probe()
         if self.match_input.text().strip():
             self._run_match_search()
         else:
@@ -3377,6 +3582,7 @@ class PdfExploreWindow(QMainWindow):
     def _refresh_directory_view(self, _checked: bool = False) -> None:
         """Refresh directory view."""
         self.statusBar().showMessage("Refreshing directory view...")
+        self._cancel_cached_badge_probe()
         self._invalidate_visible_tree_pdf_cache()
         self._persisted_view_sessions_by_dir.clear()
         self._persisted_text_highlights_by_dir.clear()
@@ -3445,6 +3651,7 @@ class PdfExploreWindow(QMainWindow):
 
         self._update_window_title()
         self._update_up_button_state()
+        self._request_cached_badge_probe()
         if self.match_input.text().strip():
             self._run_match_search()
         else:
@@ -3927,6 +4134,7 @@ class PdfExploreWindow(QMainWindow):
             cancel_inflight=True,
         )
         self._invalidate_visible_tree_pdf_cache()
+        self._request_cached_badge_probe()
         if not index.isValid():
             return
         path = Path(self.model.filePath(index))
@@ -6434,8 +6642,10 @@ class PdfExploreWindow(QMainWindow):
         self._closing = True
         self._stop_global_activity_heartbeat()
         self._scope_prefetch_timer.stop()
+        self._cache_badge_probe_timer.stop()
         self._pdf_text_cache_gc_timer.stop()
         self._cancel_scope_prefetch()
+        self._cancel_cached_badge_probe()
         current_index = self.view_tabs.currentIndex()
         if current_index >= 0:
             self._capture_tab_state(current_index, blocking=True)
