@@ -141,6 +141,72 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertTrue(index.isValid(), f"Tree index did not load for {path}")
         return index
 
+    def test_directory_context_menu_make_root_uses_selected_folder(self) -> None:
+        root = Path(self._tempdir.name)
+        target = root / "nested-root"
+        target.mkdir()
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        index = self._wait_for_tree_index(target)
+        self.window.tree.scrollTo(index)
+        QApplication.processEvents()
+        pos = self.window.tree.visualRect(index).center()
+
+        class _FakeAction:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeMenu:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.actions: list[_FakeAction] = []
+
+            def addAction(self, text: str):
+                action = _FakeAction(text)
+                self.actions.append(action)
+                return action
+
+            def addSeparator(self) -> None:
+                return None
+
+            def exec(self, *_args, **_kwargs):
+                return next(
+                    action for action in self.actions if action.text == "Make Root"
+                )
+
+        with patch("pdfexplore.app.QMenu", _FakeMenu), patch.object(
+            self.window, "_set_root_directory"
+        ) as set_root_mock:
+            self.window._show_tree_context_menu(pos)
+
+        set_root_mock.assert_called_once_with(target)
+
+    def test_folder_search_hit_counts_are_independent_of_selected_scope(self) -> None:
+        root = Path(self._tempdir.name)
+        selected_folder = root / "selected"
+        other_folder = root / "other" / "nested"
+        selected_folder.mkdir()
+        other_folder.mkdir(parents=True)
+        selected_file = selected_folder / "selected.pdf"
+        other_file = other_folder / "other.pdf"
+        _create_pdf_with_text(selected_file, "selected")
+        _create_pdf_with_text(other_file, "other")
+
+        self.window.model.set_search_match_counts(
+            {selected_file: 4, other_file: 5}
+        )
+        self.window.model.set_effective_scope_directory(selected_folder)
+
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(selected_folder), 4
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(other_folder), 5
+        )
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(other_folder.parent), 5
+        )
+
     def test_expand_opens_only_pdf_bearing_branches_and_their_ancestors(self) -> None:
         root = Path(self._tempdir.name)
         pdf_parent = root / "reports"

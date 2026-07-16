@@ -1925,6 +1925,24 @@ class MdExploreWindow(QMainWindow):
         self._apply_compact_toolbar_button_width(refresh_btn, horizontal_padding_px=12)
         refresh_btn.clicked.connect(self._refresh_directory_view)
 
+        self.expand_btn = QPushButton("Expand")
+        self._apply_compact_toolbar_button_width(
+            self.expand_btn, horizontal_padding_px=12
+        )
+        self.expand_btn.setToolTip(
+            "Expand every directory under the current root that contains Markdown files"
+        )
+        self.expand_btn.clicked.connect(self._expand_markdown_directories)
+
+        self.collapse_btn = QPushButton("Collapse")
+        self._apply_compact_toolbar_button_width(
+            self.collapse_btn, horizontal_padding_px=12
+        )
+        self.collapse_btn.setToolTip(
+            "Collapse all directories under the current root"
+        )
+        self.collapse_btn.clicked.connect(self._collapse_all_directories)
+
         self.pdf_btn = QPushButton("PDF")
         self._apply_compact_toolbar_button_width(self.pdf_btn, horizontal_padding_px=12)
         self.pdf_btn.setToolTip(
@@ -2064,6 +2082,8 @@ class MdExploreWindow(QMainWindow):
         top_bar.addWidget(self.back_btn)
         top_bar.addWidget(self.up_btn)
         top_bar.addWidget(refresh_btn)
+        top_bar.addWidget(self.expand_btn)
+        top_bar.addWidget(self.collapse_btn)
         top_bar.addWidget(self.pdf_btn)
         top_bar.addWidget(self.add_view_btn)
         top_bar.addWidget(edit_btn)
@@ -6910,6 +6930,90 @@ class MdExploreWindow(QMainWindow):
             return
         self._set_root_directory(parent)
 
+    def _markdown_directory_paths_for_expansion(self) -> list[Path]:
+        """Return Markdown-bearing directories and ancestors needed to reveal them."""
+        try:
+            root = self.root.resolve()
+        except Exception:
+            root = self.root
+        if not self._safe_is_dir(root):
+            return []
+
+        paths: set[Path] = set()
+        for current_text, directory_names, file_names in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            current = Path(current_text)
+            directory_names[:] = sorted(
+                (
+                    name
+                    for name in directory_names
+                    if not (current / name).is_symlink()
+                ),
+                key=str.casefold,
+            )
+            if not any(name.lower().endswith(".md") for name in file_names):
+                continue
+
+            candidate = current
+            while candidate != root:
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    break
+                paths.add(candidate)
+                candidate = candidate.parent
+
+        return sorted(
+            paths,
+            key=lambda path: (len(path.relative_to(root).parts), str(path).casefold()),
+        )
+
+    def _expand_markdown_directories(self, _checked: bool = False) -> None:
+        """Expand all Markdown-bearing directory branches beneath the root."""
+        paths = self._markdown_directory_paths_for_expansion()
+        expanded_count = 0
+        self._suspend_directory_open_on_expand = True
+        try:
+            for path in paths:
+                parent_index = (
+                    self.tree.rootIndex()
+                    if path.parent == self.root
+                    else self.model.index(str(path.parent))
+                )
+                if parent_index.isValid() and self.model.canFetchMore(parent_index):
+                    self.model.fetchMore(parent_index)
+                    QApplication.processEvents(
+                        QEventLoop.ProcessEventsFlag.AllEvents,
+                        10,
+                    )
+                index = self.model.index(str(path))
+                if not index.isValid():
+                    QApplication.processEvents(
+                        QEventLoop.ProcessEventsFlag.AllEvents,
+                        10,
+                    )
+                    index = self.model.index(str(path))
+                if index.isValid() and not self.tree.isExpanded(index):
+                    self.tree.expand(index)
+                    expanded_count += 1
+        finally:
+            self._suspend_directory_open_on_expand = False
+
+        self._invalidate_visible_tree_markdown_cache()
+        self._rerun_active_search_for_scope()
+        self.statusBar().showMessage(
+            f"Expanded {expanded_count} Markdown directory branch(es)",
+            3000,
+        )
+
+    def _collapse_all_directories(self, _checked: bool = False) -> None:
+        """Collapse every directory branch beneath the current root."""
+        self.tree.collapseAll()
+        self._invalidate_visible_tree_markdown_cache()
+        self._rerun_active_search_for_scope()
+        self.statusBar().showMessage("Collapsed all directory branches", 3000)
+
     def _expanded_directory_paths(self) -> list[str]:
         """Capture currently expanded directory paths under the visible root."""
         root_index = self.tree.rootIndex()
@@ -7932,6 +8036,11 @@ class MdExploreWindow(QMainWindow):
         color_actions: dict[QAction, str] = {}
         clear_action: QAction | None = None
         clear_in_directory_action: QAction | None = None
+        make_root_action: QAction | None = None
+
+        if self._safe_is_dir(path):
+            make_root_action = menu.addAction("Make Root")
+            menu.addSeparator()
 
         if self._safe_is_file(path) and path.suffix.lower() == ".md":
             for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
@@ -7948,6 +8057,9 @@ class MdExploreWindow(QMainWindow):
         clear_all_action = menu.addAction("Clear All")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
+            return
+        if make_root_action is not None and chosen == make_root_action:
+            self._set_root_directory(path)
             return
         if clear_in_directory_action is not None and chosen == clear_in_directory_action:
             self._confirm_and_clear_directory_highlighting(clear_scope)

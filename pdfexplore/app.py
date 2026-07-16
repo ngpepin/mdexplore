@@ -4014,6 +4014,11 @@ class PdfExploreWindow(QMainWindow):
         menu = QMenu(self)
         color_actions: dict[QAction, str] = {}
         clear_action: QAction | None = None
+        make_root_action: QAction | None = None
+
+        if path.is_dir():
+            make_root_action = menu.addAction("Make Root")
+            menu.addSeparator()
 
         if path.is_file() and path.suffix.lower() == ".pdf":
             for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
@@ -4031,6 +4036,9 @@ class PdfExploreWindow(QMainWindow):
         copy_path_action = menu.addAction("Copy Path")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
+            return
+        if make_root_action is not None and chosen == make_root_action:
+            self._set_root_directory(path)
             return
         if chosen == clear_in_directory_action:
             self._confirm_and_clear_directory_highlighting(clear_scope)

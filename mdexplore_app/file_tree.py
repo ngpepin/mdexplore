@@ -62,6 +62,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._dir_color_map: dict[str, dict[str, str]] = {}
         self._loaded_dirs: set[str] = set()
         self._search_match_counts: dict[str, int] = {}
+        self._directory_search_hit_counts: dict[str, int] = {}
         self._search_filename_match_paths: set[str] = set()
         self._multi_view_paths: set[str] = set()
         self._highlighted_preview_paths: set[str] = set()
@@ -204,9 +205,7 @@ class ColorizedExtensionModel(QFileSystemModel):
                 scope_key = self._effective_scope_root_key
                 dir_path = Path(info.filePath())
                 if scope_key and self._path_key_from_raw_path(info.filePath()) == scope_key:
-                    hit_count = self.effective_scope_search_hit_count_for_directory(
-                        dir_path
-                    )
+                    hit_count = self.search_hit_count_for_directory(dir_path)
                     color_name = (
                         self.EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR
                         if hit_count > 0
@@ -374,6 +373,19 @@ class ColorizedExtensionModel(QFileSystemModel):
                 continue
             next_counts[self._path_key(path)] = count
         self._search_match_counts = next_counts
+        directory_counts: dict[str, int] = {}
+        for raw_path_key, count in next_counts.items():
+            directory = Path(raw_path_key).parent
+            while True:
+                directory_key = self._path_key(directory)
+                directory_counts[directory_key] = (
+                    directory_counts.get(directory_key, 0) + count
+                )
+                parent = directory.parent
+                if parent == directory:
+                    break
+                directory = parent
+        self._directory_search_hit_counts = directory_counts
         if filename_match_path_keys is None:
             self._search_filename_match_paths = set(next_counts.keys())
         else:
@@ -385,9 +397,14 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._decorated_icon_cache.clear()
 
     def clear_search_match_paths(self) -> None:
-        if not self._search_match_counts and not self._search_filename_match_paths:
+        if (
+            not self._search_match_counts
+            and not self._directory_search_hit_counts
+            and not self._search_filename_match_paths
+        ):
             return
         self._search_match_counts.clear()
+        self._directory_search_hit_counts.clear()
         self._search_filename_match_paths.clear()
         self._decorated_icon_cache.clear()
 
@@ -470,31 +487,19 @@ class ColorizedExtensionModel(QFileSystemModel):
     def is_reduce_paint_cost_enabled(self) -> bool:
         return bool(self._reduce_paint_cost)
 
+    def search_hit_count_for_directory(self, directory: Path) -> int:
+        """Return the aggregated descendant search-hit count for any directory."""
+        return max(
+            0,
+            int(self._directory_search_hit_counts.get(self._path_key(directory), 0)),
+        )
+
     def effective_scope_search_hit_count_for_directory(self, directory: Path) -> int:
-        """Return aggregated search-hit count for the effective scope directory row."""
+        """Return the aggregated count only when directory is the active scope."""
         scope_key = self._effective_scope_root_key
-        if not scope_key:
+        if not scope_key or self._path_key(directory) != scope_key:
             return 0
-        if self._path_key(directory) != scope_key:
-            return 0
-        if not self._search_match_counts:
-            return 0
-        scope_prefix = scope_key + os.sep
-        total_hits = 0
-        for raw_path_key, raw_count in self._search_match_counts.items():
-            if not isinstance(raw_path_key, str):
-                continue
-            if not (
-                raw_path_key == scope_key or raw_path_key.startswith(scope_prefix)
-            ):
-                continue
-            try:
-                count = int(raw_count)
-            except Exception:
-                continue
-            if count > 0:
-                total_hits += count
-        return max(0, int(total_hits))
+        return self.search_hit_count_for_directory(directory)
 
     def set_out_of_scope_background_enabled(self, enabled: bool) -> bool:
         """Toggle faint out-of-scope file backgrounds for non-effective-root rows."""
@@ -961,11 +966,9 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         info = model.fileInfo(index)
         if info.isDir():
             directory_path = Path(info.filePath())
-            directory_hit_count = model.effective_scope_search_hit_count_for_directory(
-                directory_path
-            )
+            directory_hit_count = model.search_hit_count_for_directory(directory_path)
             if directory_hit_count > 0:
-                self._paint_effective_scope_directory_with_search_count(
+                self._paint_directory_with_search_count(
                     painter,
                     option,
                     index,
@@ -1107,7 +1110,7 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         )
         painter.drawPixmap(draw_x, draw_y, decoration_pixmap)
 
-    def _paint_effective_scope_directory_with_search_count(
+    def _paint_directory_with_search_count(
         self,
         painter: QPainter,
         option,
@@ -1115,7 +1118,7 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         model: ColorizedExtensionModel,
         directory_hit_count: int,
     ) -> None:
-        """Paint effective-root directory row with appended search-count pill."""
+        """Paint any directory row with its appended descendant search-count pill."""
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         widget = opt.widget
