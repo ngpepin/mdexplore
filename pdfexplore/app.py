@@ -392,6 +392,7 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_candidate_order: dict[str, int] = {}
         self._search_scan_match_counts: dict[str, int] = {}
         self._search_scan_filename_match_paths: set[str] = set()
+        self._search_scan_published_match_count = 0
         self._search_scan_error_count = 0
         self._prefetch_pool = QThreadPool(self)
         self._prefetch_pool.setMaxThreadCount(max(1, self.PREFETCH_THREAD_POOL_MAX_THREADS))
@@ -2774,6 +2775,7 @@ class PdfExploreWindow(QMainWindow):
         self._search_scan_candidate_order.clear()
         self._search_scan_match_counts.clear()
         self._search_scan_filename_match_paths.clear()
+        self._search_scan_published_match_count = 0
         self._search_scan_error_count = 0
 
     def _cancel_pending_search_scan(self) -> None:
@@ -3781,6 +3783,9 @@ class PdfExploreWindow(QMainWindow):
             self._current_match_counts,
             filename_match_path_keys=self._search_scan_filename_match_paths,
         )
+        self._search_scan_published_match_count = len(
+            self._search_scan_match_counts
+        )
         self.tree.viewport().update()
 
     def _on_search_finished(
@@ -3816,6 +3821,7 @@ class PdfExploreWindow(QMainWindow):
             current_preview_key
             and current_preview_key in self._search_scan_match_counts
         )
+        prior_match_count = len(self._search_scan_match_counts)
         if isinstance(match_counts, dict):
             for raw_path_key, raw_count in match_counts.items():
                 if not isinstance(raw_path_key, str):
@@ -3839,14 +3845,22 @@ class PdfExploreWindow(QMainWindow):
         search_complete = (
             self._search_scan_completed_workers >= self._search_scan_expected_workers
         )
+        aggregate_match_count = len(self._search_scan_match_counts)
+        yielded_new_hits = aggregate_match_count > prior_match_count
+        unpublished_hits = (
+            aggregate_match_count > self._search_scan_published_match_count
+        )
         if search_complete:
+            # Always publish one final snapshot, including a zero-hit result.
             self._search_progress_publish_timer.stop()
             self._publish_search_scan_progress()
-        elif self._search_scan_completed_workers == 1:
-            # Surface the first useful result promptly, then debounce later
-            # batches so large searches do not repaint the tree continuously.
+        elif yielded_new_hits and self._search_scan_published_match_count == 0:
+            # The first actual hit should make its file and ancestor-directory
+            # pills visible immediately, even when earlier batches had no hits.
+            self._search_progress_publish_timer.stop()
             self._publish_search_scan_progress()
-        elif not self._search_progress_publish_timer.isActive():
+        elif unpublished_hits and not self._search_progress_publish_timer.isActive():
+            # Coalesce later hit batches into bounded periodic tree updates.
             self._search_progress_publish_timer.start()
 
         if (

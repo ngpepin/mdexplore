@@ -328,7 +328,7 @@ separate, app-local tuning surface for pdfexplore.
 | `cached_badge_sync_interval_ms` | `200` | Cadence for cache badge synchronization. |
 | `match_timer_interval_ms` | `320` | Match worker dispatch cadence. |
 | `search_worker_chunk_size` | `8` | Number of candidate PDFs evaluated by each search worker job. |
-| `search_progress_publish_interval_ms` | `100` | Minimum interval for coalescing partial search results into model/UI updates. |
+| `search_progress_publish_interval_ms` | `100` | Minimum interval for coalescing later partial search results into folder/file pill updates; the first actual hit and the final result publish immediately. |
 | `scope_prefetch_timer_interval_ms` | `550` | Prefetch timer cadence for current scope. |
 | `viewer_ready_timer_interval_ms` | `160` | Viewer-ready polling cadence. |
 | `view_state_poll_timer_interval_ms` | `900` | View-state synchronization polling cadence. |

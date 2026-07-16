@@ -363,6 +363,8 @@ class ColorizedExtensionModel(QFileSystemModel):
         *,
         filename_match_path_keys: set[str] | None = None,
     ) -> None:
+        previous_counts = self._search_match_counts
+        previous_directory_counts = self._directory_search_hit_counts
         next_counts: dict[str, int] = {}
         for path, raw_count in match_counts.items():
             try:
@@ -395,6 +397,49 @@ class ColorizedExtensionModel(QFileSystemModel):
                 if isinstance(path_key, str) and path_key in next_counts
             }
         self._decorated_icon_cache.clear()
+        self._emit_search_state_changes(
+            previous_counts,
+            previous_directory_counts,
+        )
+
+    def _emit_search_state_changes(
+        self,
+        previous_counts: dict[str, int],
+        previous_directory_counts: dict[str, int],
+    ) -> None:
+        """Invalidate loaded rows whose file or directory search state changed."""
+        changed_file_keys = {
+            path_key
+            for path_key in set(previous_counts) | set(self._search_match_counts)
+            if previous_counts.get(path_key, 0)
+            != self._search_match_counts.get(path_key, 0)
+        }
+        changed_directory_keys = {
+            path_key
+            for path_key in set(previous_directory_counts)
+            | set(self._directory_search_hit_counts)
+            if previous_directory_counts.get(path_key, 0)
+            != self._directory_search_hit_counts.get(path_key, 0)
+        }
+
+        file_roles = [
+            Qt.ItemDataRole.DecorationRole,
+            Qt.ItemDataRole.ForegroundRole,
+            Qt.ItemDataRole.FontRole,
+        ]
+        directory_roles = [
+            Qt.ItemDataRole.DisplayRole,
+            Qt.ItemDataRole.ForegroundRole,
+            Qt.ItemDataRole.FontRole,
+        ]
+        for path_key in changed_file_keys:
+            index = self.index(path_key)
+            if index.isValid():
+                self.dataChanged.emit(index, index, file_roles)
+        for path_key in changed_directory_keys:
+            index = self.index(path_key)
+            if index.isValid():
+                self.dataChanged.emit(index, index, directory_roles)
 
     def clear_search_match_paths(self) -> None:
         if (
@@ -403,10 +448,16 @@ class ColorizedExtensionModel(QFileSystemModel):
             and not self._search_filename_match_paths
         ):
             return
-        self._search_match_counts.clear()
-        self._directory_search_hit_counts.clear()
+        previous_counts = self._search_match_counts
+        previous_directory_counts = self._directory_search_hit_counts
+        self._search_match_counts = {}
+        self._directory_search_hit_counts = {}
         self._search_filename_match_paths.clear()
         self._decorated_icon_cache.clear()
+        self._emit_search_state_changes(
+            previous_counts,
+            previous_directory_counts,
+        )
 
     def set_multi_view_paths(self, paths: set[Path]) -> None:
         next_paths = {self._path_key(path) for path in paths}
@@ -1150,10 +1201,32 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         pill_padding_x = max(6, int(pill_height * 0.42))
         pill_width = pill_text_width + (2 * pill_padding_x)
         pill_top = text_rect.y() + max(0, (text_rect.height() - pill_height) // 2)
-        pill_left = text_rect.right() - pill_width
-        if pill_left < text_rect.left():
-            pill_left = text_rect.left()
-        pill_rect = QRect(pill_left, pill_top, min(pill_width, text_rect.width()), pill_height)
+        fitted_pill_width = min(pill_width, text_rect.width())
+        maximum_pill_left = max(
+            text_rect.left(),
+            text_rect.right() - fitted_pill_width + 1,
+        )
+        natural_label_width = max(0, opt.fontMetrics.horizontalAdvance(opt.text))
+        preferred_pill_left = (
+            text_rect.left()
+            + min(
+                natural_label_width,
+                max(
+                    0,
+                    text_rect.width()
+                    - fitted_pill_width
+                    - self._DIR_SEARCH_PILL_GAP,
+                ),
+            )
+            + self._DIR_SEARCH_PILL_GAP
+        )
+        pill_left = min(maximum_pill_left, preferred_pill_left)
+        pill_rect = QRect(
+            pill_left,
+            pill_top,
+            fitted_pill_width,
+            pill_height,
+        )
 
         label_right = max(text_rect.left(), pill_rect.left() - self._DIR_SEARCH_PILL_GAP)
         label_rect = QRect(

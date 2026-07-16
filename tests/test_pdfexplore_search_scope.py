@@ -178,6 +178,100 @@ class PdfExploreSearchScopeTests(unittest.TestCase):
         self.assertEqual(self.window.model._search_match_counts.get(first_key), 3)
         self.assertNotIn(second_key, self.window.model._search_match_counts)
 
+    def test_first_actual_hit_publishes_immediately_after_empty_batch(self) -> None:
+        hit_pdf = self.root / "hit.pdf"
+        _create_pdf_with_text(hit_pdf, "needle")
+        hit_key = self.window._path_key(hit_pdf)
+        request_id = self.window._search_request_id
+
+        self.window._search_scan_total_candidates = 3
+        self.window._search_scan_scope = self.root
+        self.window._search_scan_candidate_order = {hit_key: 1}
+        self.window._search_scan_expected_workers = 3
+        self.window._search_scan_completed_workers = 0
+        self.window._search_scan_match_counts = {}
+        self.window._search_scan_filename_match_paths = set()
+        self.window._search_scan_published_match_count = 0
+
+        first_worker = type("_DummySearchWorker", (), {"request_id": request_id})()
+        second_worker = type("_DummySearchWorker", (), {"request_id": request_id})()
+        self.window._active_search_workers.update({first_worker, second_worker})
+
+        with patch.object(
+            self.window, "_publish_search_scan_progress", wraps=self.window._publish_search_scan_progress
+        ) as publish:
+            self.window._on_search_finished(request_id, [], {}, [], "")
+            publish.assert_not_called()
+
+            self.window._on_search_finished(
+                request_id,
+                [hit_key],
+                {hit_key: 2},
+                [],
+                "",
+            )
+            publish.assert_called_once()
+
+        self.assertEqual(self.window.model._search_match_counts.get(hit_key), 2)
+        self.assertEqual(self.window._search_scan_published_match_count, 1)
+        self.assertFalse(self.window._search_progress_publish_timer.isActive())
+
+    def test_later_hits_are_coalesced_then_final_snapshot_is_immediate(self) -> None:
+        first_pdf = self.root / "first.pdf"
+        second_pdf = self.root / "second.pdf"
+        third_pdf = self.root / "third.pdf"
+        for path in (first_pdf, second_pdf, third_pdf):
+            _create_pdf_with_text(path, "needle")
+        first_key = self.window._path_key(first_pdf)
+        second_key = self.window._path_key(second_pdf)
+        third_key = self.window._path_key(third_pdf)
+        request_id = self.window._search_request_id
+
+        self.window._search_scan_total_candidates = 3
+        self.window._search_scan_scope = self.root
+        self.window._search_scan_candidate_order = {
+            first_key: 0,
+            second_key: 1,
+            third_key: 2,
+        }
+        self.window._search_scan_expected_workers = 3
+        self.window._search_scan_completed_workers = 0
+        self.window._search_scan_match_counts = {}
+        self.window._search_scan_filename_match_paths = set()
+        self.window._search_scan_published_match_count = 0
+
+        workers = [
+            type("_DummySearchWorker", (), {"request_id": request_id})()
+            for _ in range(3)
+        ]
+        self.window._active_search_workers.update(workers)
+
+        self.window._on_search_finished(
+            request_id, [first_key], {first_key: 1}, [], ""
+        )
+        self.assertEqual(self.window._search_scan_published_match_count, 1)
+
+        self.window._on_search_finished(
+            request_id, [second_key], {second_key: 1}, [], ""
+        )
+        self.assertTrue(self.window._search_progress_publish_timer.isActive())
+        self.assertNotIn(second_key, self.window.model._search_match_counts)
+
+        self.window._search_progress_publish_timer.stop()
+        self.window._publish_search_scan_progress()
+        self.assertIn(second_key, self.window.model._search_match_counts)
+        self.assertEqual(self.window._search_scan_published_match_count, 2)
+
+        with patch.object(
+            self.window, "_publish_search_scan_progress", wraps=self.window._publish_search_scan_progress
+        ) as publish:
+            self.window._on_search_finished(
+                request_id, [third_key], {third_key: 1}, [], ""
+            )
+            publish.assert_called_once()
+
+        self.assertIn(third_key, self.window.model._search_match_counts)
+
     def test_window_title_updates_effective_scope_model_state(self) -> None:
         child = self.root / "child"
         child.mkdir()

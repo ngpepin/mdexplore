@@ -232,7 +232,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.window.tree.itemDelegate().paint(painter, option, folder_index)
         painter.end()
 
-        yellow_pixels = 0
+        orange_pixel_x_positions: list[int] = []
         for y in range(image.height()):
             for x in range(image.width()):
                 color = image.pixelColor(x, y)
@@ -242,8 +242,43 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
                     and abs(color.blue() - 107) <= 12
                     and color.alpha() > 200
                 ):
-                    yellow_pixels += 1
-        self.assertGreater(yellow_pixels, 0)
+                    orange_pixel_x_positions.append(x)
+        self.assertTrue(orange_pixel_x_positions)
+        self.assertLess(
+            max(orange_pixel_x_positions),
+            200,
+            "Folder pill should sit beside the folder label, not at the far edge of the tree.",
+        )
+
+    def test_folder_search_count_changes_invalidate_loaded_directory_rows(self) -> None:
+        root = Path(self._tempdir.name)
+        folder = root / "reports"
+        nested_folder = folder / "quarterly"
+        nested_folder.mkdir(parents=True)
+        pdf_path = nested_folder / "results.pdf"
+        _create_pdf_with_text(pdf_path, "results")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        self._wait_for_tree_index(folder)
+        self._wait_for_tree_index(nested_folder)
+
+        changed_paths: list[Path] = []
+
+        def _record_changed_path(top_left, _bottom_right, _roles) -> None:
+            changed_paths.append(Path(self.window.model.filePath(top_left)))
+
+        self.window.model.dataChanged.connect(_record_changed_path)
+        self.window.model.set_search_match_counts({pdf_path: 3})
+
+        self.assertIn(folder, changed_paths)
+        self.assertIn(nested_folder, changed_paths)
+
+        changed_paths.clear()
+        self.window.model.clear_search_match_paths()
+
+        self.assertIn(folder, changed_paths)
+        self.assertIn(nested_folder, changed_paths)
 
     def test_expand_opens_only_pdf_bearing_branches_and_their_ancestors(self) -> None:
         root = Path(self._tempdir.name)
