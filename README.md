@@ -149,8 +149,8 @@ gradually decomposed.
 - Window title shows the current effective root path.
 - Effective-root directory row is always bold:
   - aqua-blue (`#7fdfe8`) when no active search matches are under that scope,
-  - yellow when active search has matches under that scope.
-- Every directory containing matched descendant files shows an appended orange matching-file-count pill (`1..99`, then `++`), independent of selection. Pills update progressively during a scan and aggregate under the visible tree location of symlinked files/directories.
+  - dark orange (`#d79232`) when active search has matches under that scope.
+- Every directory containing matched descendant files uses dark-orange label text and shows an appended lighter-orange matching-file-count pill (`1..99`, then `++`), independent of selection. Pills update progressively during a scan and aggregate under the visible tree location of symlinked files/directories.
 - Preview cache keyed by file timestamp and size for fast re-open.
 - Inline preview BASE64 images are materialized in parallel per document (deduped by payload hash) to reduce first-load latency on image-heavy files.
 - Copy-time BASE64 image conversion warms image targets in parallel before rewrite for faster large-file copy/export workflows.
@@ -355,6 +355,8 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS` | `0` | Search worker thread override. `0` means auto (see formula below). |
+| `MDEXPLORE_SEARCH_WORKER_CHUNK_SIZE` | `8` | Markdown files per search worker batch; small batches preserve prompt progressive results and cancellation. |
+| `MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS` | `0.001` | Cancellation-aware pause between searched files that releases the GIL for the GUI. |
 | `MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS` | `0` | BASE64 materialization worker override. `0` means auto (see formula below). |
 | `MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES` | `4294967296` | Desired per-instance preview HTTP cache cap before clamping. |
 | `MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX` | `2147483647` | Qt-safe upper cap applied to HTTP cache size. |
@@ -380,7 +382,8 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 
 - `MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS`
   - if `> 0`: used as-is.
-  - if `0`: computed as `max(4, min(24, (cpu_count or 2) * 3))`.
+  - if `0`: uses one worker. Markdown matching is regex/GIL-heavy, so additional
+    Python threads can make searches slower while starving the GUI.
 - `MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS`
   - if `> 0`: used as-is.
   - if `0`: computed as `max(2, min(24, (cpu_count or 2) * 2))`.
@@ -860,11 +863,13 @@ Example:
 tree (root + expanded directories).
 - While search is active, expand/collapse and directory/root scope changes  
 automatically rerun the search against the newly visible set.
+- Collapsed directories and all files beneath them are excluded from search and
+  show no directory hit-count pill; collapsing a branch removes stale results immediately.
 - File and recursive directory hit pills appear progressively as worker batches finish; symlink matches count beneath their visible alias path rather than beneath an unrelated resolved target path.
 - Matching files are shown bold+italic in the tree.
 - If filename terms match, filename text is rendered in yellow.
-- The effective-root directory label is bold aqua when idle, and becomes yellow  
-with an appended hit-count pill when active search has hits under that scope.
+- The effective-root directory label is bold aqua when idle, and becomes dark
+orange with an appended hit-count pill when active search has hits under that scope.
 - Press `Enter` in the search field to run search immediately (skip debounce).
 - Clicking the `X` in the search field clears search text and removes match  
 styling.

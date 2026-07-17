@@ -54,7 +54,8 @@ class ColorizedExtensionModel(QFileSystemModel):
     _PATH_KEY_CACHE_MAX = 20000
     SEARCH_FILENAME_MATCH_COLOR = "#f7e27a"
     EFFECTIVE_SCOPE_DIRECTORY_COLOR = "#7fdfe8"
-    EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR = SEARCH_FILENAME_MATCH_COLOR
+    DIRECTORY_SEARCH_MATCH_COLOR = "#d79232"
+    EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR = DIRECTORY_SEARCH_MATCH_COLOR
     OUT_OF_SCOPE_FILENAME_BG = "#9ca3af"
     OUT_OF_SCOPE_FILENAME_BG_ALPHA = 46
 
@@ -205,13 +206,17 @@ class ColorizedExtensionModel(QFileSystemModel):
             if info.isDir():
                 scope_key = self._effective_scope_root_key
                 dir_path = Path(info.filePath())
-                if scope_key and self._path_key_from_raw_path(info.filePath()) == scope_key:
-                    hit_count = self.search_hit_count_for_directory(dir_path)
-                    color_name = (
-                        self.EFFECTIVE_SCOPE_DIRECTORY_SEARCH_COLOR
-                        if hit_count > 0
-                        else self.EFFECTIVE_SCOPE_DIRECTORY_COLOR
-                    )
+                hit_count = self.search_hit_count_for_directory(dir_path)
+                is_effective_scope = bool(
+                    scope_key
+                    and self._path_key_from_raw_path(info.filePath()) == scope_key
+                )
+                color_name = None
+                if hit_count > 0:
+                    color_name = self.DIRECTORY_SEARCH_MATCH_COLOR
+                elif is_effective_scope:
+                    color_name = self.EFFECTIVE_SCOPE_DIRECTORY_COLOR
+                if color_name:
                     color = QColor(color_name)
                     if color.isValid():
                         return QBrush(color)
@@ -360,10 +365,11 @@ class ColorizedExtensionModel(QFileSystemModel):
 
     def set_search_match_counts(
         self,
-        match_counts: dict[Path, int],
+        match_counts: dict[Path | str, int],
         *,
         filename_match_path_keys: set[str] | None = None,
         directory_match_paths: Iterable[Path] | None = None,
+        directory_match_paths_by_key: dict[str, Iterable[Path | str]] | None = None,
     ) -> None:
         previous_counts = self._search_match_counts
         previous_directory_counts = self._directory_search_hit_counts
@@ -375,7 +381,8 @@ class ColorizedExtensionModel(QFileSystemModel):
                 continue
             if count <= 0:
                 continue
-            next_counts[self._path_key(path)] = count
+            path_key = str(path) if isinstance(path, str) else self._path_key(path)
+            next_counts[path_key] = count
         self._search_match_counts = next_counts
 
         # File-row state uses canonical identity so symlink aliases share the
@@ -388,7 +395,18 @@ class ColorizedExtensionModel(QFileSystemModel):
         directory_sources: list[Path] = []
         covered_canonical_keys: set[str] = set()
         seen_display_keys: set[str] = set()
-        if directory_match_paths is not None:
+        if directory_match_paths_by_key is not None:
+            for canonical_key, raw_paths in directory_match_paths_by_key.items():
+                if canonical_key not in next_counts:
+                    continue
+                for raw_path in raw_paths:
+                    display_key = self._path_identity_without_io(Path(raw_path))
+                    if display_key in seen_display_keys:
+                        continue
+                    seen_display_keys.add(display_key)
+                    covered_canonical_keys.add(canonical_key)
+                    directory_sources.append(Path(display_key))
+        elif directory_match_paths is not None:
             for raw_path in directory_match_paths:
                 path = Path(raw_path)
                 canonical_key = self._path_key(path)

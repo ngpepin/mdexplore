@@ -12,6 +12,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from .constants import MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS
 from .fast_base64 import b64encode_ascii
 from .pdf import extract_plantuml_error_details, stamp_pdf_page_numbers
 from . import search as search_query
@@ -492,6 +493,7 @@ class SearchScanWorker(QRunnable):
         self.hit_counter = hit_counter
         self.filename_patterns = list(filename_patterns)
         self.worker_token = object()
+        self.matched_display_paths_by_key: dict[str, set[str]] = {}
         self._cancel_event = Event()
         self.signals = SearchScanWorkerSignals()
         # Python owns the runnable until its exact completion callback removes it.
@@ -509,6 +511,11 @@ class SearchScanWorker(QRunnable):
             match_counts: dict[str, int] = {}
             filename_match_paths: list[str] = []
 
+            def _yield_to_ui() -> None:
+                delay = float(MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS)
+                if delay > 0:
+                    self._cancel_event.wait(delay)
+
             for path in self.paths:
                 if self._cancel_event.is_set():
                     break
@@ -516,11 +523,23 @@ class SearchScanWorker(QRunnable):
                     path_key, searchable_content = _load_searchable_markdown_content(path)
                     filename_search_text = path.stem
                     if not self.predicate(filename_search_text, searchable_content):
+                        _yield_to_ui()
                         continue
                 except Exception:
+                    _yield_to_ui()
                     continue
 
                 matched_paths.append(path_key)
+                try:
+                    display_path = os.path.normcase(
+                        os.path.abspath(os.fspath(path))
+                    )
+                except Exception:
+                    display_path = str(path)
+                self.matched_display_paths_by_key.setdefault(
+                    path_key,
+                    set(),
+                ).add(display_path)
                 if any(
                     pattern.search(filename_search_text)
                     for pattern in self.filename_patterns
@@ -531,6 +550,7 @@ class SearchScanWorker(QRunnable):
                 except Exception:
                     count = 1
                 match_counts[path_key] = count if count > 0 else 1
+                _yield_to_ui()
 
             self.signals.finished.emit(
                 self.worker_token,

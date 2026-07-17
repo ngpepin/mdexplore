@@ -208,9 +208,9 @@ root changes for the current application run.
 - Window title reflects effective root scope (selected directory if selected, otherwise current root).
 - Effective-root directory row in the tree should stay bold and use:
   - aqua-blue text (`#7fdfe8`) when no active-search hits are under the  
-  effective scope,
-  - yellow text plus an appended hit-count pill when active search has hits  
-  under the effective scope (`1..99`, then `++`).
+    effective scope,
+  - dark-orange text (`#d79232`) plus an appended lighter-orange hit-count pill
+    when active search has hits under the effective scope (`1..99`, then `++`).
 - Effective root is persisted on close to `~/.mdexplore.cfg`.
 - Linux desktop identity should remain `mdexplore` so launcher icon matching  
 works (`QApplication.setDesktopFileName("mdexplore")` + desktop  
@@ -711,7 +711,7 @@ R.SEARCH.10 :: [query contains NEAR(t1..tn)] => O(require distinct qualifying oc
 R.SEARCH.11 :: [single-word term appears inside NEAR(...)] => O(evaluate proximity using word-bounded matches)
 R.SEARCH.12 :: [query contains NEAR(...)] => O(count file hit pills by qualifying NEAR windows, not by individual term spans)
 R.SEARCH.13 :: [tree row has filename-term hit] => O(render filename text yellow)
-R.SEARCH.14 :: [active search has hits under effective scope directory] => O(render effective-scope directory label yellow with aggregated hit-count pill)
+R.SEARCH.14 :: [active search has hits under a directory] => O(render directory label dark orange with a lighter-orange aggregated hit-count pill; keep effective-scope label bold)
 ```
 
 #### 8.2 Persistent highlights and markers

@@ -7,7 +7,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QEvent, QRect, Qt
-from PySide6.QtGui import QClipboard, QIcon, QImage, QKeyEvent, QPainter
+from PySide6.QtGui import (
+    QBrush,
+    QClipboard,
+    QColor,
+    QIcon,
+    QImage,
+    QKeyEvent,
+    QPainter,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -214,6 +222,19 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertEqual(
             self.window.model.search_hit_count_for_directory(other_folder.parent), 1
         )
+
+        selected_index = self._wait_for_tree_index(selected_folder)
+        other_index = self._wait_for_tree_index(other_folder.parent)
+        expected_color = QColor(self.window.model.DIRECTORY_SEARCH_MATCH_COLOR)
+        pill_color = QColor(self.window.tree.itemDelegate()._DIR_SEARCH_PILL_BG)
+        self.assertLess(expected_color.lightness(), pill_color.lightness())
+        for index in (selected_index, other_index):
+            foreground = self.window.model.data(
+                index,
+                Qt.ItemDataRole.ForegroundRole,
+            )
+            self.assertIsInstance(foreground, QBrush)
+            self.assertEqual(foreground.color(), expected_color)
 
         folder_index = self.window.model.index(str(selected_folder))
         self.assertTrue(folder_index.isValid())

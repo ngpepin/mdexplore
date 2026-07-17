@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QIcon
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 import mdexplore
@@ -70,6 +71,30 @@ class WindowLayoutTests(unittest.TestCase):
         self.assertFalse(self.window._safe_is_dir(denied))
         self.assertFalse(self.window._safe_is_file(denied))
         self.assertIs(self.window._safe_resolve(denied), denied)
+
+    def test_search_defaults_limit_gil_contention_and_use_small_batches(self) -> None:
+        self.assertEqual(self.window.DEFAULT_SEARCH_SCAN_MAX_THREADS, 1)
+        self.assertEqual(self.window.SEARCH_WORKER_CHUNK_SIZE, 8)
+
+    def test_visible_search_candidate_scan_does_not_resolve_paths_on_ui_thread(
+        self,
+    ) -> None:
+        root = Path(self._tempdir.name)
+        target = root / "candidate.md"
+        target.write_text("alpha", encoding="utf-8")
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        self._wait_for_tree_index(target)
+        self.window._invalidate_visible_tree_markdown_cache()
+
+        with patch.object(
+            self.window,
+            "_path_key",
+            side_effect=AssertionError("UI candidate scan resolved a path"),
+        ):
+            candidates = self.window._list_visible_markdown_files_in_tree()
+
+        self.assertIn(target, candidates)
 
     def _wait_for_tree_index(self, path: Path, timeout_seconds: float = 2.0):
         deadline = time.monotonic() + timeout_seconds
@@ -154,6 +179,19 @@ class WindowLayoutTests(unittest.TestCase):
             self.window.model.search_hit_count_for_directory(other_folder.parent), 1
         )
 
+        selected_index = self._wait_for_tree_index(selected_folder)
+        other_index = self._wait_for_tree_index(other_folder.parent)
+        expected_color = QColor(self.window.model.DIRECTORY_SEARCH_MATCH_COLOR)
+        pill_color = QColor(self.window.tree.itemDelegate()._DIR_SEARCH_PILL_BG)
+        self.assertLess(expected_color.lightness(), pill_color.lightness())
+        for index in (selected_index, other_index):
+            foreground = self.window.model.data(
+                index,
+                Qt.ItemDataRole.ForegroundRole,
+            )
+            self.assertIsInstance(foreground, QBrush)
+            self.assertEqual(foreground.color(), expected_color)
+
     def test_folder_search_counts_and_repaints_follow_visible_symlink_directory(
         self,
     ) -> None:
@@ -214,20 +252,28 @@ class WindowLayoutTests(unittest.TestCase):
         self.window._search_scan_request_id = 7
         self.window._search_scan_total_candidates = 2
         self.window._search_scan_scope = root
-        self.window._search_scan_candidate_order = {canonical_key: 0}
-        self.window._search_scan_display_paths_by_key = {
-            canonical_key: {
-                self.window._path_identity_without_io(visible_link),
-            }
+        display_path = self.window._path_identity_without_io(visible_link)
+        self.window._search_scan_candidate_order = {}
+        self.window._search_scan_display_candidate_order = {
+            display_path: 0,
         }
+        self.window._search_scan_display_paths_by_key = {}
         self.window._search_scan_expected_workers = 2
         self.window._search_scan_completed_workers = 0
         self.window._search_scan_match_counts = {}
         self.window._search_scan_filename_match_paths = set()
         self.window._search_scan_published_match_count = 0
 
+        predicate = search_query.compile_match_predicate("alpha")
+        hit_counter = search_query.compile_match_hit_counter("alpha")
+        worker = SearchScanWorker(7, [], predicate, hit_counter, [])
+        worker.matched_display_paths_by_key = {
+            canonical_key: {display_path},
+        }
+        self.window._active_search_scan_workers.add(worker)
+
         self.window._on_search_scan_finished(
-            object(),
+            worker.worker_token,
             7,
             [canonical_key],
             {canonical_key: 2},
@@ -381,6 +427,64 @@ class WindowLayoutTests(unittest.TestCase):
 
         self.assertFalse(self.window.tree.isExpanded(reports_index))
         self.assertFalse(self.window.tree.isExpanded(quarterly_index))
+
+    def test_collapsed_directory_is_removed_from_search_and_loses_its_pill(
+        self,
+    ) -> None:
+        root = Path(self._tempdir.name)
+        folder = root / "reports"
+        folder.mkdir()
+        hidden_match = folder / "result.md"
+        hidden_match.write_text("needle\n", encoding="utf-8")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        folder_index = self._wait_for_tree_index(folder)
+        self.window.tree.expand(folder_index)
+        QApplication.processEvents()
+        self._wait_for_tree_index(hidden_match)
+
+        self.window.match_input.setText("needle")
+        self.window._run_match_search_now()
+        deadline = time.monotonic() + 5.0
+        while not self.window.current_match_files and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.005)
+
+        self.assertIn(hidden_match.resolve(), self.window.current_match_files)
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(folder),
+            1,
+        )
+        pre_collapse_request_id = self.window._search_scan_request_id
+
+        self.window.tree.collapse(folder_index)
+
+        self.assertFalse(self.window.tree.isExpanded(folder_index))
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(folder),
+            0,
+        )
+        self.assertNotIn(hidden_match, self.window._list_visible_markdown_files_in_tree())
+        self.assertNotIn(hidden_match.resolve(), self.window.current_match_files)
+
+        # A worker result from the expanded-tree request must not restore the
+        # collapsed directory's file match or pill.
+        hidden_key = self.window._path_key(hidden_match)
+        self.window._on_search_scan_finished(
+            object(),
+            pre_collapse_request_id,
+            [hidden_key],
+            {hidden_key: 1},
+            [],
+            "",
+        )
+        QApplication.processEvents()
+        self.assertEqual(
+            self.window.model.search_hit_count_for_directory(folder),
+            0,
+        )
+        self.assertNotIn(hidden_match.resolve(), self.window.current_match_files)
 
     def test_status_bar_shows_mmdr_version_before_gpu(self) -> None:
         self.window.close()

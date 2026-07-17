@@ -90,6 +90,8 @@ _DEFAULTS: dict[str, Any] = {
         ["Red", "#ef7d7d"],
     ],
     "MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS": 0,
+    "MDEXPLORE_SEARCH_WORKER_CHUNK_SIZE": 8,
+    "MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS": 0.001,
     "MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS": 0,
     "MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES": 4294967296,
     "MDEXPLORE_PREVIEW_HTTP_CACHE_MAX_BYTES_QT_MAX": 2147483647,
@@ -232,7 +234,18 @@ _mdexplore_search_threads = int(_setting("MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THRE
 if _mdexplore_search_threads > 0:
     MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS = _mdexplore_search_threads
 else:
-    MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS = max(4, min(24, (os.cpu_count() or 2) * 3))
+    # Markdown matching/counting is Python/regex heavy. A large pool contends
+    # for the GIL and can starve the GUI even on high-core-count machines. One
+    # worker is also faster for typical regex-heavy Markdown searches.
+    MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS = 1
+MDEXPLORE_SEARCH_WORKER_CHUNK_SIZE = max(
+    1,
+    int(_setting("MDEXPLORE_SEARCH_WORKER_CHUNK_SIZE")),
+)
+MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS = max(
+    0.0,
+    float(_setting("MDEXPLORE_SEARCH_WORKER_YIELD_SECONDS")),
+)
 _mdexplore_base64_threads = int(_setting("MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS"))
 if _mdexplore_base64_threads > 0:
     MDEXPLORE_DEFAULT_BASE64_IMAGE_WORKER_THREADS = _mdexplore_base64_threads

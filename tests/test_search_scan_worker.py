@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,10 @@ class SearchScanWorkerFilenameSurfaceTests(unittest.TestCase):
         worker.signals.finished.connect(_on_finished)
         worker.run()
         emitted["expected_worker_token"] = worker.worker_token
+        emitted["matched_display_paths_by_key"] = {
+            path_key: set(display_paths)
+            for path_key, display_paths in worker.matched_display_paths_by_key.items()
+        }
         return emitted
 
     def test_cancelled_worker_emits_empty_result_with_its_token(self) -> None:
@@ -109,6 +114,28 @@ class SearchScanWorkerFilenameSurfaceTests(unittest.TestCase):
             self.assertIs(result["worker_token"], result["expected_worker_token"])
             self.assertEqual(result["matched_paths"], [])
             self.assertEqual(result["match_counts"], {})
+
+    def test_worker_records_matching_symlink_at_its_visible_lexical_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mdexplore-search-worker-link-") as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target.md"
+            target.write_text("alpha\n", encoding="utf-8")
+            visible_link = root / "visible-link.md"
+            try:
+                visible_link.symlink_to(target)
+            except OSError:
+                self.skipTest("symlink creation is not supported")
+
+            result = self._run_worker_once("alpha", visible_link)
+
+            canonical_key = str(target.resolve())
+            expected_display_path = os.path.normcase(
+                os.path.abspath(os.fspath(visible_link))
+            )
+            self.assertEqual(
+                result["matched_display_paths_by_key"],
+                {canonical_key: {expected_display_path}},
+            )
 
 
 if __name__ == "__main__":
