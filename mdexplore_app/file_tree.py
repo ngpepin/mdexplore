@@ -1065,6 +1065,10 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
     _DIR_SEARCH_PILL_BG = "#f3c56b"
     _DIR_SEARCH_PILL_FG = "#111111"
     _DIR_SEARCH_PILL_GAP = 8
+    # horizontalAdvance() can be a few pixels tighter than the space Qt needs
+    # to paint a label without eliding it.  Keep that allowance between a
+    # directory name and its search-count pill.
+    _DIR_SEARCH_LABEL_SLACK = 6
 
     def paint(self, painter: QPainter, option, index) -> None:
         model = index.model()
@@ -1223,6 +1227,54 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         )
         painter.drawPixmap(draw_x, draw_y, decoration_pixmap)
 
+    @classmethod
+    def _directory_search_layout_rects(
+        cls,
+        text_rect: QRect,
+        natural_label_width: int,
+        pill_width: int,
+        pill_top: int,
+        pill_height: int,
+    ) -> tuple[QRect, QRect]:
+        """Return label and pill rects while preserving short labels in full."""
+        fitted_pill_width = min(max(0, pill_width), text_rect.width())
+        maximum_pill_left = max(
+            text_rect.left(),
+            text_rect.right() - fitted_pill_width + 1,
+        )
+        available_label_width = max(
+            0,
+            text_rect.width() - fitted_pill_width - cls._DIR_SEARCH_PILL_GAP,
+        )
+        preferred_label_width = min(
+            max(0, natural_label_width) + cls._DIR_SEARCH_LABEL_SLACK,
+            available_label_width,
+        )
+        preferred_pill_left = (
+            text_rect.left()
+            + preferred_label_width
+            + cls._DIR_SEARCH_PILL_GAP
+        )
+        pill_left = min(maximum_pill_left, preferred_pill_left)
+        pill_rect = QRect(
+            pill_left,
+            pill_top,
+            fitted_pill_width,
+            pill_height,
+        )
+
+        label_right = max(
+            text_rect.left(),
+            pill_rect.left() - cls._DIR_SEARCH_PILL_GAP,
+        )
+        label_rect = QRect(
+            text_rect.left(),
+            text_rect.y(),
+            max(0, label_right - text_rect.left()),
+            text_rect.height(),
+        )
+        return label_rect, pill_rect
+
     def _paint_directory_with_search_count(
         self,
         painter: QPainter,
@@ -1263,39 +1315,13 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         pill_padding_x = max(6, int(pill_height * 0.42))
         pill_width = pill_text_width + (2 * pill_padding_x)
         pill_top = text_rect.y() + max(0, (text_rect.height() - pill_height) // 2)
-        fitted_pill_width = min(pill_width, text_rect.width())
-        maximum_pill_left = max(
-            text_rect.left(),
-            text_rect.right() - fitted_pill_width + 1,
-        )
         natural_label_width = max(0, opt.fontMetrics.horizontalAdvance(opt.text))
-        preferred_pill_left = (
-            text_rect.left()
-            + min(
-                natural_label_width,
-                max(
-                    0,
-                    text_rect.width()
-                    - fitted_pill_width
-                    - self._DIR_SEARCH_PILL_GAP,
-                ),
-            )
-            + self._DIR_SEARCH_PILL_GAP
-        )
-        pill_left = min(maximum_pill_left, preferred_pill_left)
-        pill_rect = QRect(
-            pill_left,
+        label_rect, pill_rect = self._directory_search_layout_rects(
+            text_rect,
+            natural_label_width,
+            pill_width,
             pill_top,
-            fitted_pill_width,
             pill_height,
-        )
-
-        label_right = max(text_rect.left(), pill_rect.left() - self._DIR_SEARCH_PILL_GAP)
-        label_rect = QRect(
-            text_rect.left(),
-            text_rect.y(),
-            max(0, label_right - text_rect.left()),
-            text_rect.height(),
         )
 
         foreground_data = model.data(index, Qt.ItemDataRole.ForegroundRole)
@@ -1311,9 +1337,12 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
         painter.save()
         painter.setFont(opt.font)
         painter.setPen(label_color)
-        label_text = opt.fontMetrics.elidedText(
-            opt.text, opt.textElideMode, max(0, label_rect.width())
-        )
+        if label_rect.width() >= natural_label_width:
+            label_text = opt.text
+        else:
+            label_text = opt.fontMetrics.elidedText(
+                opt.text, opt.textElideMode, max(0, label_rect.width())
+            )
         alignment = int(opt.displayAlignment | Qt.AlignmentFlag.AlignVCenter)
         painter.drawText(label_rect, alignment, label_text)
         painter.restore()

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QBrush, QColor, QIcon
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
@@ -191,6 +191,28 @@ class WindowLayoutTests(unittest.TestCase):
             )
             self.assertIsInstance(foreground, QBrush)
             self.assertEqual(foreground.color(), expected_color)
+
+    def test_directory_pill_layout_does_not_elide_a_short_name(self) -> None:
+        delegate = self.window.tree.itemDelegate()
+        natural_width = self.window.tree.fontMetrics().horizontalAdvance("Books")
+        text_rect = QRect(20, 4, 240, 24)
+
+        label_rect, pill_rect = delegate._directory_search_layout_rects(
+            text_rect,
+            natural_width,
+            30,
+            7,
+            18,
+        )
+
+        self.assertGreaterEqual(
+            label_rect.width(),
+            natural_width + delegate._DIR_SEARCH_LABEL_SLACK,
+        )
+        self.assertEqual(
+            pill_rect.left() - label_rect.right() - 1,
+            delegate._DIR_SEARCH_PILL_GAP,
+        )
 
     def test_folder_search_counts_and_repaints_follow_visible_symlink_directory(
         self,
