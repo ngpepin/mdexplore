@@ -4240,7 +4240,19 @@ class PdfExploreWindow(QMainWindow):
         """Handle viewer url for pdf."""
         viewer_url = QUrl.fromLocalFile(str(VIEWER_HTML))
         pdf_url = QUrl.fromLocalFile(str(path))
-        viewer_url.setQuery(f"file={pdf_url.toString(QUrl.ComponentFormattingOption.FullyEncoded)}")
+        # The PDF URL is itself the value of pdf.js's ``file`` query item.
+        # Encode that complete nested URL as a query value; otherwise path
+        # characters such as ``&`` become query separators and pdf.js tries
+        # to open a truncated, non-existent filename.  Encoding the already
+        # encoded file URL also preserves literal ``+`` and ``%`` characters
+        # through URLSearchParams' single decoding pass.
+        encoded_pdf_url = pdf_url.toString(
+            QUrl.ComponentFormattingOption.FullyEncoded
+        )
+        encoded_query_value = bytes(
+            QUrl.toPercentEncoding(encoded_pdf_url)
+        ).decode("ascii")
+        viewer_url.setQuery(f"file={encoded_query_value}")
         viewer_url.setFragment("zoom=page-fit")
         return viewer_url
 

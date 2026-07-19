@@ -4,9 +4,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, QEvent, QRect, Qt
+from PySide6.QtCore import QPoint, QEvent, QRect, Qt, QUrl
 from PySide6.QtGui import (
     QBrush,
     QClipboard,
@@ -511,6 +512,26 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
         viewer_url = self.window._viewer_url_for_pdf(pdf_path)
         self.assertEqual(viewer_url.fragment(), "zoom=page-fit")
+
+    def test_viewer_url_preserves_ampersands_and_other_query_characters(self) -> None:
+        pdf_path = (
+            Path(self._tempdir.name)
+            / "Research & Development + 100% = complete.pdf"
+        )
+        _create_pdf_with_text(pdf_path, "reserved query characters")
+
+        viewer_url = self.window._viewer_url_for_pdf(pdf_path)
+        encoded_viewer_url = viewer_url.toString(
+            QUrl.ComponentFormattingOption.FullyEncoded
+        )
+        query = urlsplit(encoded_viewer_url).query
+        parsed_file_values = parse_qs(query, keep_blank_values=True).get("file")
+
+        self.assertEqual(len(parsed_file_values or []), 1)
+        nested_pdf_url = QUrl((parsed_file_values or [""])[0])
+        self.assertEqual(nested_pdf_url.toLocalFile(), str(pdf_path))
+        self.assertIn("%26", query)
+        self.assertNotIn("& Development", query)
 
     def test_reuses_cached_preview_widget_for_previously_opened_pdf(self) -> None:
         first_pdf = Path(self._tempdir.name) / "first.pdf"
