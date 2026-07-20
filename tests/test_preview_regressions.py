@@ -601,6 +601,154 @@ class SameDocumentSearchSyntaxRegressionTests(PreviewRegressionHarness):
                 self.assertEqual(self.current_file_hit_count(), expected_hit_count)
 
 
+class DiagramPanRegressionTests(PreviewRegressionHarness):
+    def test_mermaid_and_plantuml_allow_repeated_drags_during_grace_window(
+        self,
+    ) -> None:
+        setup_result = self.run_js(
+            r"""
+(() => {
+  for (const oldNode of Array.from(document.querySelectorAll(".mdexplore-pan-test"))) {
+    oldNode.remove();
+  }
+  const main = document.querySelector("main") || document.body;
+
+  const mermaid = document.createElement("div");
+  mermaid.className = "mermaid mdexplore-pan-test";
+  mermaid.setAttribute("data-mdexplore-mermaid-index", "pan-test");
+  mermaid.setAttribute("data-mdexplore-mermaid-hash", "pan-test");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 2400 600");
+  svg.setAttribute("width", "2400");
+  svg.setAttribute("height", "600");
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("width", "2400");
+  rect.setAttribute("height", "600");
+  rect.setAttribute("fill", "#dbeafe");
+  svg.appendChild(rect);
+  mermaid.appendChild(svg);
+  main.appendChild(mermaid);
+  window.__mdexploreApplyMermaidZoomControls(mermaid, "auto");
+
+  const plantFence = document.createElement("div");
+  plantFence.id = "mdexplore-pan-test-plantuml";
+  plantFence.className = "mdexplore-fence mdexplore-pan-test";
+  plantFence.setAttribute("data-mdexplore-plantuml-hash", "pan-test");
+  const plantImage = document.createElement("img");
+  plantImage.className = "plantuml";
+  plantImage.setAttribute("width", "2400");
+  plantImage.setAttribute("height", "600");
+  plantImage.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2400' height='600'%3E%3Crect width='2400' height='600' fill='%23dcfce7'/%3E%3C/svg%3E";
+  plantFence.appendChild(plantImage);
+  main.appendChild(plantFence);
+  window.__mdexploreApplyPlantUmlZoomControls("auto");
+
+  const viewports = Array.from(
+    document.querySelectorAll(".mdexplore-pan-test .mdexplore-mermaid-viewport")
+  );
+  const drag = (viewport, startX, endX) => {
+    viewport.dispatchEvent(new MouseEvent("mousedown", {
+      bubbles: true, cancelable: true, button: 0, buttons: 1,
+      clientX: startX, clientY: 100,
+    }));
+    window.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true, cancelable: true, button: 0, buttons: 1,
+      clientX: endX, clientY: 100,
+    }));
+    window.dispatchEvent(new MouseEvent("mouseup", {
+      bubbles: true, cancelable: true, button: 0, buttons: 0,
+      clientX: endX, clientY: 100,
+    }));
+    // Synthetic dispatch does not synthesize the browser's post-mouseup click,
+    // so emit it explicitly to exercise the click-suppression path.
+    viewport.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, cancelable: true, button: 0,
+      clientX: endX, clientY: 100,
+    }));
+  };
+  const results = viewports.map((viewport) => {
+    viewport.style.width = "420px";
+    viewport.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, cancelable: true, button: 0,
+      clientX: 260, clientY: 100,
+    }));
+    drag(viewport, 260, 100);
+    const firstScrollLeft = viewport.scrollLeft;
+    const armedAfterFirst = viewport.classList.contains("mdexplore-interaction-armed");
+    drag(viewport, 260, 100);
+    return {
+      firstScrollLeft,
+      secondScrollLeft: viewport.scrollLeft,
+      armedAfterFirst,
+      armedAfterSecond: viewport.classList.contains("mdexplore-interaction-armed"),
+    };
+  });
+  return JSON.stringify({
+    graceMs: window.__mdexplorePanRearmGraceMs,
+    viewportCount: viewports.length,
+    results,
+  });
+})()
+"""
+        )
+        self.assertIsInstance(setup_result, str)
+        setup_payload = json.loads(setup_result)
+        self.assertEqual(setup_payload.get("graceMs"), 2000)
+        self.assertEqual(setup_payload.get("viewportCount"), 2)
+        for result in setup_payload.get("results", []):
+            self.assertTrue(result.get("armedAfterFirst"))
+            self.assertTrue(result.get("armedAfterSecond"))
+            self.assertGreater(
+                float(result.get("secondScrollLeft", 0)),
+                float(result.get("firstScrollLeft", 0)),
+            )
+
+        self.wait_ms(350)
+        armed_during_grace = self.run_js(
+            """
+JSON.stringify(Array.from(
+  document.querySelectorAll(".mdexplore-pan-test .mdexplore-mermaid-viewport")
+).map((viewport) => viewport.classList.contains("mdexplore-interaction-armed")))
+"""
+        )
+        self.assertEqual(json.loads(str(armed_during_grace)), [True, True])
+
+        self.wait_ms(1800)
+        armed_after_grace = self.run_js(
+            """
+JSON.stringify(Array.from(
+  document.querySelectorAll(".mdexplore-pan-test .mdexplore-mermaid-viewport")
+).map((viewport) => viewport.classList.contains("mdexplore-interaction-armed")))
+"""
+        )
+        self.assertEqual(json.loads(str(armed_after_grace)), [False, False])
+
+        pdf_round_trip = self.run_js(
+            """
+(() => {
+  const mermaid = document.querySelector(".mermaid.mdexplore-pan-test");
+  window.__mdexploreApplyMermaidZoomControls(mermaid, "pdf");
+  window.__mdexploreApplyPlantUmlZoomControls("pdf");
+  const interactiveDuringPdf = document.querySelectorAll(
+    ".mdexplore-pan-test .mdexplore-mermaid-viewport"
+  ).length;
+  window.__mdexploreApplyMermaidZoomControls(mermaid, "auto");
+  window.__mdexploreApplyPlantUmlZoomControls("auto");
+  return JSON.stringify({
+    interactiveDuringPdf,
+    interactiveAfterRestore: document.querySelectorAll(
+      ".mdexplore-pan-test .mdexplore-mermaid-viewport"
+    ).length,
+  });
+})()
+"""
+        )
+        self.assertEqual(
+            json.loads(str(pdf_round_trip)),
+            {"interactiveDuringPdf": 0, "interactiveAfterRestore": 2},
+        )
+
+
 class PreviewMarkerRegressionTests(PreviewRegressionHarness):
     def test_persistent_highlight_offsets_ignore_embedded_formatting_newlines(self) -> None:
         self.load_markdown_text(

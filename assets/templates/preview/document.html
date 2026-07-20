@@ -567,6 +567,9 @@
     window.__mdexploreMermaidPaletteMode = "auto";
     window.__mdexploreMermaidRenderPromise = null;
     window.__mdexploreMermaidRenderMode = "";
+    // After a completed hand drag, keep the viewport armed briefly so several
+    // adjacent drags can be made without an activation click between them.
+    window.__mdexplorePanRearmGraceMs = 2000;
     window.__mdexploreMermaidSvgCacheByMode = (() => {
       try {
         const seedText = __MERMAID_CACHE_TOKEN_JSON__;
@@ -1862,6 +1865,9 @@
       let resizeDebounceTimer = null;
       let isPanning = false;
       let interactionArmed = false;
+      let interactionDisarmTimer = null;
+      let panMoved = false;
+      let suppressClickAfterPan = false;
       let panStartClientX = 0;
       let panStartClientY = 0;
       let panStartScrollLeft = 0;
@@ -1920,13 +1926,27 @@
         viewport.scrollTop += dy;
         saveState();
       };
+      const clearInteractionDisarmTimer = () => {
+        if (interactionDisarmTimer !== null) {
+          window.clearTimeout(interactionDisarmTimer);
+          interactionDisarmTimer = null;
+        }
+      };
       const setInteractionArmed = (nextArmed) => {
         interactionArmed = !!nextArmed;
         viewport.classList.toggle("mdexplore-interaction-armed", interactionArmed);
         if (!interactionArmed) {
+          clearInteractionDisarmTimer();
           isPanning = false;
           viewport.classList.remove("mdexplore-pan-active");
         }
+      };
+      const scheduleInteractionDisarm = () => {
+        clearInteractionDisarmTimer();
+        interactionDisarmTimer = window.setTimeout(() => {
+          interactionDisarmTimer = null;
+          setInteractionArmed(false);
+        }, window.__mdexplorePanRearmGraceMs);
       };
       saveState = () => {
         window.__mdexploreSetDiagramViewState(stateKey, {
@@ -2055,7 +2075,9 @@
         if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {
           return;
         }
+        clearInteractionDisarmTimer();
         isPanning = true;
+        panMoved = false;
         panStartClientX = event.clientX;
         panStartClientY = event.clientY;
         panStartScrollLeft = viewport.scrollLeft;
@@ -2067,6 +2089,12 @@
         if (!(event instanceof MouseEvent) || event.button !== 0) {
           return;
         }
+        if (suppressClickAfterPan) {
+          suppressClickAfterPan = false;
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         setInteractionArmed(!interactionArmed);
       };
       const onPanMove = (event) => {
@@ -2075,6 +2103,9 @@
         }
         const dx = event.clientX - panStartClientX;
         const dy = event.clientY - panStartClientY;
+        if (dx !== 0 || dy !== 0) {
+          panMoved = true;
+        }
         viewport.scrollLeft = panStartScrollLeft - dx;
         viewport.scrollTop = panStartScrollTop - dy;
         saveState();
@@ -2084,8 +2115,19 @@
         if (!isPanning) {
           return;
         }
+        const completedDrag = panMoved;
         isPanning = false;
+        panMoved = false;
         viewport.classList.remove("mdexplore-pan-active");
+        if (completedDrag) {
+          // A click normally follows mouseup and would immediately toggle the
+          // viewport off. Consume only that synthetic post-drag click.
+          suppressClickAfterPan = true;
+          window.setTimeout(() => {
+            suppressClickAfterPan = false;
+          }, 0);
+          scheduleInteractionDisarm();
+        }
       };
       const onViewportMouseLeave = () => {
         setInteractionArmed(false);
@@ -2128,6 +2170,7 @@
       };
       applyInitialFitZoom();
       shell.addEventListener("DOMNodeRemovedFromDocument", () => {
+        clearInteractionDisarmTimer();
         if (resizeDebounceTimer) {
           window.clearTimeout(resizeDebounceTimer);
           resizeDebounceTimer = null;
@@ -2324,6 +2367,9 @@
         let postLayoutFitTimers = [];
         let isPanning = false;
         let interactionArmed = false;
+        let interactionDisarmTimer = null;
+        let panMoved = false;
+        let suppressClickAfterPan = false;
         let panStartClientX = 0;
         let panStartClientY = 0;
         let panStartScrollLeft = 0;
@@ -2388,13 +2434,27 @@
           viewport.scrollTop += dy;
           saveState();
         };
+        const clearInteractionDisarmTimer = () => {
+          if (interactionDisarmTimer !== null) {
+            window.clearTimeout(interactionDisarmTimer);
+            interactionDisarmTimer = null;
+          }
+        };
         const setInteractionArmed = (nextArmed) => {
           interactionArmed = !!nextArmed;
           viewport.classList.toggle("mdexplore-interaction-armed", interactionArmed);
           if (!interactionArmed) {
+            clearInteractionDisarmTimer();
             isPanning = false;
             viewport.classList.remove("mdexplore-pan-active");
           }
+        };
+        const scheduleInteractionDisarm = () => {
+          clearInteractionDisarmTimer();
+          interactionDisarmTimer = window.setTimeout(() => {
+            interactionDisarmTimer = null;
+            setInteractionArmed(false);
+          }, window.__mdexplorePanRearmGraceMs);
         };
         saveState = () => {
           window.__mdexploreSetDiagramViewState(stateKey, {
@@ -2631,7 +2691,9 @@
           if ((event.target instanceof Element) && event.target.closest(".mdexplore-mermaid-toolbar")) {
             return;
           }
+          clearInteractionDisarmTimer();
           isPanning = true;
+          panMoved = false;
           panStartClientX = event.clientX;
           panStartClientY = event.clientY;
           panStartScrollLeft = viewport.scrollLeft;
@@ -2643,6 +2705,12 @@
           if (!(event instanceof MouseEvent) || event.button !== 0) {
             return;
           }
+          if (suppressClickAfterPan) {
+            suppressClickAfterPan = false;
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           setInteractionArmed(!interactionArmed);
         };
         const onPanMove = (event) => {
@@ -2651,6 +2719,9 @@
           }
           const dx = event.clientX - panStartClientX;
           const dy = event.clientY - panStartClientY;
+          if (dx !== 0 || dy !== 0) {
+            panMoved = true;
+          }
           viewport.scrollLeft = panStartScrollLeft - dx;
           viewport.scrollTop = panStartScrollTop - dy;
           saveState();
@@ -2660,8 +2731,19 @@
           if (!isPanning) {
             return;
           }
+          const completedDrag = panMoved;
           isPanning = false;
+          panMoved = false;
           viewport.classList.remove("mdexplore-pan-active");
+          if (completedDrag) {
+            // Preserve hand mode for a short burst of successive drags while
+            // suppressing the click generated by this mouseup.
+            suppressClickAfterPan = true;
+            window.setTimeout(() => {
+              suppressClickAfterPan = false;
+            }, 0);
+            scheduleInteractionDisarm();
+          }
         };
         const onViewportMouseLeave = () => {
           setInteractionArmed(false);
@@ -2721,6 +2803,7 @@
         };
         applyInitialFitZoom();
         shell.addEventListener("DOMNodeRemovedFromDocument", () => {
+          clearInteractionDisarmTimer();
           if (resizeDebounceTimer) {
             window.clearTimeout(resizeDebounceTimer);
             resizeDebounceTimer = null;
