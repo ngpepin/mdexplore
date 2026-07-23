@@ -28,6 +28,8 @@ build/
 *.core
 core.*
 .mdexplore-colors.json
+.pdfexplore-views.json.lock
+tmp*cacert.pem
 
 # Editors and OS junk
 .idea/
