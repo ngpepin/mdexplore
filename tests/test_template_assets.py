@@ -72,6 +72,23 @@ class TemplateAssetTests(unittest.TestCase):
         self.assertNotIn("__ESCAPED_TITLE__", rendered)
         self.assertNotIn("__BODY_HTML__", rendered)
 
+    def test_markdown_renderer_neutralizes_raw_script_tags_in_prose(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            "Our parser accepts strings such as "
+            "<script>alert('xss')</script> as illustrative text."
+        )
+
+        rendered = renderer.render_document(source, "Script example")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+
+        self.assertNotIn("<script", main_html.casefold())
+        self.assertNotIn("</script", main_html.casefold())
+        self.assertIn("&lt;script", main_html.casefold())
+        self.assertIn("&lt;/script", main_html.casefold())
+        self.assertIn("alert(", main_html.casefold())
+        self.assertEqual(rendered.casefold().count("<script>"), 2)
+
     def test_markdown_renderer_does_not_parse_currency_as_math(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         tokens = renderer._md.parse(

@@ -222,6 +222,10 @@ _CMARK_CODE_BLOCK_RE = re.compile(
     r"(?P<pre_open><pre\b[^>]*>)\s*<code\b(?P<code_attrs>[^>]*)>(?P<code>.*?)</code>\s*</pre>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_PREVIEW_EXECUTABLE_SCRIPT_TAG_RE = re.compile(
+    r"</?script\b[^>]*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES = {
     "image/svg+xml": ".svg",
     "image/jpeg": ".jpg",
@@ -589,6 +593,28 @@ class MarkdownRenderer:
             return body
         except Exception:
             return None
+
+    @staticmethod
+    def _neutralize_executable_script_tags(html_body: str) -> str:
+        """Render raw ``<script>`` tags as text instead of executable markup.
+
+        Raw HTML remains supported for ordinary Markdown formatting, but script
+        tags embedded in prose must never become part of the preview document's
+        executable script set. Besides being unsafe, a source snippet such as
+        ``<script>alert('xss')</script>`` opens a modal JavaScript dialog while
+        the page is loading and makes large previews appear to hang.
+        """
+
+        source = str(html_body or "")
+        if "script" not in source.casefold():
+            return source
+        try:
+            return _PREVIEW_EXECUTABLE_SCRIPT_TAG_RE.sub(
+                lambda match: html.escape(match.group(0), quote=False),
+                source,
+            )
+        except Exception:
+            return source
 
     @staticmethod
     def _markdown_contains_math(markdown_text: str) -> bool:
@@ -1387,6 +1413,7 @@ class MarkdownRenderer:
             body = self._render_body_with_cmark(prepared_markdown, env)
         if body is None:
             body = self._md.render(prepared_markdown, env)
+        body = self._neutralize_executable_script_tags(body)
         if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
             self._last_mermaid_pdf_svg_by_hash = dict(
                 env.get("mermaid_pdf_svg_by_hash") or {}
