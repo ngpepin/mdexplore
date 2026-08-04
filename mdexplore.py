@@ -12157,10 +12157,14 @@ class MdExploreWindow(QMainWindow):
         except Exception:
             raw_pdf = b""
 
+        # Qt has finished capturing the page at this point. Restore the live
+        # preview immediately instead of leaving JavaScript PDF renders visible
+        # while the background worker stamps and writes the PDF.
+        self._restore_preview_mermaid_palette(source_key)
+        self._restore_preview_zoom_after_pdf_export()
+
         if not raw_pdf:
             self._set_pdf_export_busy(False)
-            self._restore_preview_mermaid_palette(source_key)
-            self._restore_preview_zoom_after_pdf_export()
             message = "Qt WebEngine returned an empty PDF payload"
             QMessageBox.critical(self, "PDF export failed", message)
             self.statusBar().showMessage(f"PDF export failed: {message}", 5000)
@@ -12191,8 +12195,6 @@ class MdExploreWindow(QMainWindow):
         """Finalize async PDF export and report result."""
         self._active_pdf_workers.discard(worker)
         self._set_pdf_export_busy(False)
-        self._restore_preview_mermaid_palette(source_key)
-        self._restore_preview_zoom_after_pdf_export()
         self._pdf_export_source_key = None
 
         if error_text:

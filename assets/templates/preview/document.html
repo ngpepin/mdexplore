@@ -1616,14 +1616,79 @@
       return "";
     };
 
-    // Wrap Mermaid SVG output in an interactive shell that adds fit/zoom/pan
-    // controls without mutating the underlying cached SVG markup.
+    window.__mdexploreIsMermaidErrorSvgMarkup = (svgMarkup) => {
+      if (typeof svgMarkup !== "string" || svgMarkup.indexOf("<svg") < 0) {
+        return false;
+      }
+      try {
+        const container = document.createElement("div");
+        container.innerHTML = svgMarkup;
+        const svg = container.querySelector("svg");
+        if (!(svg instanceof SVGElement)) {
+          return false;
+        }
+        if (svg.querySelector(".error-icon, .error-text")) {
+          return true;
+        }
+        const text = String(svg.textContent || "").toLowerCase();
+        return text.includes("syntax error in text") && text.includes("mermaid version");
+      } catch (_error) {
+        return false;
+      }
+    };
+
+    window.__mdexploreRenderMermaidBlockWithJs = async (block, mode = "auto") => {
+      if (!(block instanceof HTMLElement)) {
+        return false;
+      }
+      const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      const sourceText = String((block.dataset && block.dataset.mdexploreMermaidSource) || "").trim();
+      if (!sourceText) {
+        throw new Error("Mermaid source unavailable");
+      }
+      const loaded = await window.__mdexploreLoadMermaidScript();
+      if (!loaded || !window.mermaid) {
+        throw new Error("Mermaid script failed to load");
+      }
+      mermaid.initialize(window.__mdexploreMermaidInitConfig(normalizedMode));
+      const renderId = `mdexplore_mermaid_user_js_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const renderResult = await mermaid.render(renderId, sourceText);
+      const svgMarkup =
+        renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
+          ? renderResult.svg
+          : String(renderResult || "");
+      if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
+        throw new Error("Mermaid returned empty SVG");
+      }
+      if (window.__mdexploreIsMermaidErrorSvgMarkup(svgMarkup)) {
+        throw new Error("Mermaid returned its syntax-error SVG");
+      }
+      block.innerHTML = svgMarkup;
+      block.dataset.mdexploreMermaidRenderer = "js";
+      block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+      block.classList.add("mermaid-ready");
+      window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+      return true;
+    };
+
+    // Wrap Mermaid SVG output in an interactive shell that adds renderer,
+    // fit, zoom, and pan controls without mutating cached SVG markup.
     window.__mdexploreApplyMermaidZoomControls = (block, mode = "auto") => {
       if (!(block instanceof HTMLElement)) {
         return;
       }
       const normalizedMode = String(mode || "").toLowerCase() === "pdf" ? "pdf" : "auto";
+      const configuredBackend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();
       const currentSvg = block.querySelector("svg");
+      if (
+        configuredBackend === "rust" &&
+        currentSvg instanceof SVGElement &&
+        String((block.dataset && block.dataset.mdexploreMermaidRenderer) || "").toLowerCase() !== "js" &&
+        !(typeof block.__mdexploreRustSvgMarkup === "string" && block.__mdexploreRustSvgMarkup.indexOf("<svg") >= 0)
+      ) {
+        block.__mdexploreRustSvgMarkup = currentSvg.outerHTML;
+        block.dataset.mdexploreMermaidRenderer = "rust";
+      }
       let currentShell = null;
       for (const child of Array.from(block.children || [])) {
         if (child instanceof HTMLElement && child.classList.contains("mdexplore-mermaid-shell")) {
@@ -1798,6 +1863,27 @@
       shell.dataset.mdexploreStateKey = stateKey;
       const toolbar = document.createElement("div");
       toolbar.className = "mdexplore-mermaid-toolbar";
+      const rendererToggleBtn = document.createElement("button");
+      rendererToggleBtn.type = "button";
+      rendererToggleBtn.className = "mdexplore-mermaid-zoom-btn mdexplore-mermaid-renderer-toggle";
+      const syncRendererToggle = () => {
+        const activeRenderer = String((block.dataset && block.dataset.mdexploreMermaidRenderer) || "rust").toLowerCase() === "js"
+          ? "js"
+          : "rust";
+        const rustSvgAvailable =
+          typeof block.__mdexploreRustSvgMarkup === "string" &&
+          block.__mdexploreRustSvgMarkup.indexOf("<svg") >= 0;
+        rendererToggleBtn.textContent = activeRenderer === "js" ? "J" : "R";
+        rendererToggleBtn.title = activeRenderer === "js"
+          ? (rustSvgAvailable ? "JavaScript renderer active; switch to Rust" : "JavaScript renderer active; Rust output unavailable")
+          : "Rust renderer active; switch to JavaScript";
+        rendererToggleBtn.setAttribute(
+          "aria-label",
+          activeRenderer === "js" ? "Switch Mermaid renderer to Rust" : "Switch Mermaid renderer to JavaScript",
+        );
+        rendererToggleBtn.disabled = activeRenderer === "js" && !rustSvgAvailable;
+      };
+      syncRendererToggle();
       const zoomOutBtn = document.createElement("button");
       zoomOutBtn.type = "button";
       zoomOutBtn.className = "mdexplore-mermaid-zoom-btn";
@@ -1836,6 +1922,9 @@
       const zoomValue = document.createElement("span");
       zoomValue.className = "mdexplore-mermaid-zoom-value";
       zoomValue.textContent = "100%";
+      if (configuredBackend === "rust") {
+        toolbar.appendChild(rendererToggleBtn);
+      }
       toolbar.appendChild(zoomOutBtn);
       toolbar.appendChild(zoomInBtn);
       toolbar.appendChild(zoomResetBtn);
@@ -1993,6 +2082,39 @@
         }, 55);
       };
 
+      rendererToggleBtn.addEventListener("click", async () => {
+        if (rendererToggleBtn.disabled) {
+          return;
+        }
+        const activeRenderer = String((block.dataset && block.dataset.mdexploreMermaidRenderer) || "rust").toLowerCase() === "js"
+          ? "js"
+          : "rust";
+        rendererToggleBtn.disabled = true;
+        if (activeRenderer === "js") {
+          const rustSvgMarkup =
+            typeof block.__mdexploreRustSvgMarkup === "string" ? block.__mdexploreRustSvgMarkup : "";
+          if (rustSvgMarkup.indexOf("<svg") < 0) {
+            syncRendererToggle();
+            return;
+          }
+          block.innerHTML = rustSvgMarkup;
+          block.dataset.mdexploreMermaidRenderer = "rust";
+          block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+          block.classList.add("mermaid-ready");
+          window.__mdexploreApplyMermaidPostStyles(block, "auto");
+          return;
+        }
+        try {
+          if (!(typeof block.__mdexploreRustSvgMarkup === "string" && block.__mdexploreRustSvgMarkup.indexOf("<svg") >= 0)) {
+            block.__mdexploreRustSvgMarkup = currentSvg.outerHTML;
+          }
+          await window.__mdexploreRenderMermaidBlockWithJs(block, "auto");
+        } catch (error) {
+          console.error("mdexplore Mermaid renderer toggle failed:", error);
+          rendererToggleBtn.disabled = false;
+          rendererToggleBtn.title = `JavaScript render failed: ${error && error.message ? error.message : String(error)}`;
+        }
+      });
       zoomOutBtn.addEventListener("click", () => {
         setInteractionArmed(true);
         applyZoom(zoom / 1.2, true);
@@ -4088,6 +4210,7 @@
             const cachedSvg = modeCache[hashKey];
             if (cachedSvg.indexOf("<svg") >= 0) {
               block.innerHTML = cachedSvg;
+              block.dataset.mdexploreMermaidRenderer = "rust";
               block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
               block.classList.add("mermaid-ready");
               continue;
@@ -4099,6 +4222,7 @@
             const cachedSvg = modeCache[hashKey];
             if (cachedSvg.indexOf("<svg") >= 0) {
               block.innerHTML = cachedSvg;
+              block.dataset.mdexploreMermaidRenderer = "rust";
               block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
               block.classList.add("mermaid-ready");
               window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
@@ -4108,6 +4232,9 @@
           const hasSvg = !!block.querySelector("svg");
           block.classList.remove("mermaid-pending");
           if (hasSvg) {
+            if (!block.dataset.mdexploreMermaidRenderer) {
+              block.dataset.mdexploreMermaidRenderer = "rust";
+            }
             block.classList.remove("mermaid-error");
             block.classList.add("mermaid-ready");
             if (normalizedMode !== "pdf") {
@@ -4177,7 +4304,11 @@
                 if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
                   throw new Error("Mermaid returned empty SVG");
                 }
+                if (window.__mdexploreIsMermaidErrorSvgMarkup(svgMarkup)) {
+                  throw new Error("Mermaid returned its syntax-error SVG");
+                }
                 block.innerHTML = svgMarkup;
+                block.dataset.mdexploreMermaidRenderer = "js";
                 block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
                 block.classList.add("mermaid-ready");
                 window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
@@ -4310,6 +4441,9 @@
                     : String(renderResult || "");
                 if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
                   throw new Error("Mermaid returned empty SVG");
+                }
+                if (window.__mdexploreIsMermaidErrorSvgMarkup(svgMarkup)) {
+                  throw new Error("Mermaid returned its syntax-error SVG");
                 }
                 block.innerHTML = svgMarkup;
                 block.removeAttribute("data-mdexplore-mermaid-render");

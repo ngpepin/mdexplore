@@ -80,6 +80,63 @@
     }
     parent.removeChild(block);
   }
+  const restoreRustMermaidBlocks = () => {
+    if (String(window.__mdexploreMermaidBackend || "js").toLowerCase() !== "rust") {
+      return 0;
+    }
+    const cacheByMode = window.__mdexploreMermaidSvgCacheByMode;
+    const autoCache =
+      cacheByMode &&
+      typeof cacheByMode === "object" &&
+      cacheByMode.auto &&
+      typeof cacheByMode.auto === "object"
+        ? cacheByMode.auto
+        : null;
+    let restored = 0;
+    for (const block of Array.from(document.querySelectorAll(".mermaid"))) {
+      if (!(block instanceof HTMLElement)) {
+        continue;
+      }
+      const hashKey = String(
+        block.getAttribute("data-mdexplore-mermaid-hash") || ""
+      ).trim().toLowerCase();
+      const storedMarkup =
+        typeof block.__mdexploreRustSvgMarkup === "string"
+          ? block.__mdexploreRustSvgMarkup
+          : "";
+      const cachedMarkup =
+        hashKey && autoCache && typeof autoCache[hashKey] === "string"
+          ? autoCache[hashKey]
+          : "";
+      const rustMarkup =
+        storedMarkup.indexOf("<svg") >= 0 ? storedMarkup : cachedMarkup;
+      if (rustMarkup.indexOf("<svg") < 0) {
+        continue;
+      }
+      block.innerHTML = rustMarkup;
+      block.__mdexploreRustSvgMarkup = rustMarkup;
+      block.dataset.mdexploreMermaidRenderer = "rust";
+      block.removeAttribute("data-mdexplore-mermaid-render");
+      block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+      block.classList.add("mermaid-ready");
+      restored += 1;
+    }
+    return restored;
+  };
+  const mermaidBlockCount = Array.from(document.querySelectorAll(".mermaid")).filter(
+    (block) => block instanceof HTMLElement
+  ).length;
+  const restoredRustCount = restoreRustMermaidBlocks();
+  const restoredAllRustBlocks =
+    String(window.__mdexploreMermaidBackend || "js").toLowerCase() === "rust" &&
+    restoredRustCount === mermaidBlockCount;
+  if (restoredAllRustBlocks) {
+    // The preserved mmdr SVGs are already the desired live-preview result.
+    // Mark the auto pass complete so a forced renderer pass cannot replace
+    // them with Mermaid's syntax-error SVG after the PDF callback returns.
+    window.__mdexploreMermaidReady = true;
+    window.__mdexploreMermaidPaletteMode = "auto";
+  }
   const reapplyAll = () => {
     for (const shell of Array.from(document.querySelectorAll(".mdexplore-mermaid-shell"))) {
       const fn = shell && shell.__mdexploreReapplySavedState;
@@ -94,12 +151,15 @@
     }
   };
   if (window.__mdexploreRunClientRenderers) {
-    const maybePromise = window.__mdexploreRunClientRenderers({ mermaidMode: "auto", forceMermaid: true });
+    const maybePromise = window.__mdexploreRunClientRenderers({
+      mermaidMode: "auto",
+      forceMermaid: !restoredAllRustBlocks,
+    });
     Promise.resolve(maybePromise).then(() => reapplyAll()).catch(() => reapplyAll());
     return true;
   }
   if (window.__mdexploreRunMermaidWithMode) {
-    const maybePromise = window.__mdexploreRunMermaidWithMode("auto", false);
+    const maybePromise = window.__mdexploreRunMermaidWithMode("auto", !restoredAllRustBlocks);
     Promise.resolve(maybePromise).then(() => reapplyAll()).catch(() => reapplyAll());
     return true;
   }

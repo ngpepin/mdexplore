@@ -62,6 +62,21 @@ class TemplateAssetTests(unittest.TestCase):
         self.assertIn("isRelativeMarkdownHref", source)
         self.assertIn("mdexplore://open-relative/", source)
 
+    def test_rust_mermaid_toolbar_starts_with_renderer_toggle(self) -> None:
+        source = get_template_asset("preview/document.html")
+        self.assertIn("window.__mdexploreRenderMermaidBlockWithJs", source)
+        self.assertIn("window.__mdexploreIsMermaidErrorSvgMarkup", source)
+        self.assertIn('svg.querySelector(".error-icon, .error-text")', source)
+        self.assertIn('throw new Error("Mermaid returned its syntax-error SVG")', source)
+        self.assertIn('rendererToggleBtn.textContent = activeRenderer === "js" ? "J" : "R"', source)
+        self.assertIn('block.__mdexploreRustSvgMarkup = currentSvg.outerHTML', source)
+        self.assertLess(
+            source.index("toolbar.appendChild(rendererToggleBtn)"),
+            source.index("toolbar.appendChild(zoomOutBtn)"),
+        )
+        self.assertIn('block.dataset.mdexploreMermaidRenderer = "js"', source)
+        self.assertIn('block.dataset.mdexploreMermaidRenderer = "rust"', source)
+
     def test_markdown_renderer_uses_external_preview_template(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         rendered = renderer.render_document("# Heading", 'Doc "Title"')

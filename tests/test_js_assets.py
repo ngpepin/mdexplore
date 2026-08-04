@@ -150,10 +150,81 @@ class JsAssetTests(unittest.TestCase):
             },
         )
         self.assertIn("startPdfMermaidCleanRender(true);", rendered)
+        self.assertIn(
+            'const requestedBackend = String(window.__mdexplorePdfMermaidBackend || "js").toLowerCase();',
+            rendered,
+        )
+        self.assertIn(
+            'const backend = requestedBackend === "rust" ? "rust" : "js";',
+            rendered,
+        )
+        self.assertNotIn(
+            'const backend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();',
+            rendered,
+        )
+        self.assertIn('block.dataset.mdexploreMermaidRenderer = "js";', rendered)
+        self.assertIn(
+            'const previewBackend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();',
+            rendered,
+        )
+        self.assertIn("block.__mdexploreRustSvgMarkup = rustMarkup;", rendered)
+        self.assertIn("autoCache[hashKey] = rustMarkup;", rendered)
+        self.assertIn("const rustFallbackMarkupFor = (block) => {", rendered)
+        self.assertIn("const restoreRustFallbackForPdf = (block) => {", rendered)
+        self.assertIn("const isMermaidErrorSvgMarkup = (svgMarkup) => {", rendered)
+        self.assertIn("for (const candidate of [pdfMarkup, storedMarkup, autoMarkup])", rendered)
+        self.assertIn("if (restoreRustFallbackForPdf(block)) {", rendered)
+        self.assertIn('block.dataset.mdexploreMermaidRenderer = "rust";', rendered)
+        self.assertIn('svg.querySelector(".error-icon, .error-text")', rendered)
+        self.assertIn('throw new Error("Mermaid returned its syntax-error SVG")', rendered)
+        render_catch = rendered.index("          } catch (renderError) {")
+        fallback_in_catch = rendered.index(
+            "if (restoreRustFallbackForPdf(block)) {", render_catch
+        )
+        failure_in_catch = rendered.index("renderFailures += 1;", fallback_in_catch)
+        self.assertLess(fallback_in_catch, failure_in_catch)
+        self.assertLess(
+            rendered.index("block.__mdexploreRustSvgMarkup = rustMarkup;"),
+            rendered.index("block.dataset.mdexploreMermaidRenderer = \"js\";"),
+        )
         self.assertIn("if (false) {", rendered)
         self.assertIn(
             f'const landscapeTokenText = "{PDF_LANDSCAPE_PAGE_TOKEN}";', rendered
         )
+
+    def test_pdf_restore_reinstates_rust_mermaid_before_client_rerender(self) -> None:
+        source = get_js_asset("pdf/restore_preview_palette.js")
+        self.assertIn("const restoreRustMermaidBlocks = () => {", source)
+        self.assertIn(
+            'String(window.__mdexploreMermaidBackend || "js").toLowerCase() !== "rust"',
+            source,
+        )
+        self.assertIn("block.innerHTML = rustMarkup;", source)
+        self.assertIn('block.dataset.mdexploreMermaidRenderer = "rust";', source)
+        self.assertIn("const restoredRustCount = restoreRustMermaidBlocks();", source)
+        self.assertIn("const restoredAllRustBlocks =", source)
+        self.assertIn('window.__mdexploreMermaidPaletteMode = "auto";', source)
+        self.assertIn("forceMermaid: !restoredAllRustBlocks", source)
+        self.assertLess(
+            source.index("const restoredRustCount = restoreRustMermaidBlocks();"),
+            source.index("window.__mdexploreRunClientRenderers"),
+        )
+
+    def test_pdf_capture_restores_preview_before_background_write(self) -> None:
+        source = (JS_ASSET_DIR.parent.parent / "mdexplore.py").read_text(encoding="utf-8")
+        render_ready = source.split("    def _on_pdf_render_ready(", 1)[1].split(
+            "    def _on_pdf_export_finished(", 1
+        )[0]
+        export_finished = source.split("    def _on_pdf_export_finished(", 1)[1].split(
+            "    def _edit_current_file(", 1
+        )[0]
+        self.assertIn("self._restore_preview_mermaid_palette(source_key)", render_ready)
+        self.assertIn("self._restore_preview_zoom_after_pdf_export()", render_ready)
+        self.assertLess(
+            render_ready.index("self._restore_preview_mermaid_palette(source_key)"),
+            render_ready.index("worker = PdfExportWorker"),
+        )
+        self.assertNotIn("self._restore_preview_mermaid_palette(source_key)", export_finished)
 
     def test_missing_placeholder_replacements_raise(self) -> None:
         with self.assertRaises(ValueError):

@@ -854,7 +854,124 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     const mermaidBlocks = Array.from(document.querySelectorAll(".mermaid")).filter(
       (block) => block instanceof HTMLElement
     );
-    const backend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();
+    const previewBackend = String(window.__mdexploreMermaidBackend || "js").toLowerCase();
+    if (
+      !window.__mdexploreMermaidSvgCacheByMode ||
+      typeof window.__mdexploreMermaidSvgCacheByMode !== "object"
+    ) {
+      window.__mdexploreMermaidSvgCacheByMode = {};
+    }
+    if (
+      !window.__mdexploreMermaidSvgCacheByMode.auto ||
+      typeof window.__mdexploreMermaidSvgCacheByMode.auto !== "object"
+    ) {
+      window.__mdexploreMermaidSvgCacheByMode.auto = {};
+    }
+    const autoCache = window.__mdexploreMermaidSvgCacheByMode.auto;
+    const pdfCache =
+      window.__mdexploreMermaidSvgCacheByMode.pdf &&
+      typeof window.__mdexploreMermaidSvgCacheByMode.pdf === "object"
+        ? window.__mdexploreMermaidSvgCacheByMode.pdf
+        : null;
+    if (previewBackend === "rust") {
+      for (const block of mermaidBlocks) {
+        if (!(block instanceof HTMLElement)) {
+          continue;
+        }
+        const existingSvg = block.querySelector("svg");
+        const existingRenderer = String(
+          (block.dataset && block.dataset.mdexploreMermaidRenderer) || "rust"
+        ).toLowerCase();
+        let rustMarkup =
+          typeof block.__mdexploreRustSvgMarkup === "string"
+            ? block.__mdexploreRustSvgMarkup
+            : "";
+        if (
+          rustMarkup.indexOf("<svg") < 0 &&
+          existingRenderer !== "js" &&
+          existingSvg instanceof SVGElement &&
+          typeof existingSvg.outerHTML === "string" &&
+          existingSvg.outerHTML.indexOf("<svg") >= 0
+        ) {
+          rustMarkup = existingSvg.outerHTML;
+        }
+        if (rustMarkup.indexOf("<svg") < 0) {
+          continue;
+        }
+        block.__mdexploreRustSvgMarkup = rustMarkup;
+        const hashKey = String(
+          block.getAttribute("data-mdexplore-mermaid-hash") || ""
+        ).trim().toLowerCase();
+        if (hashKey) {
+          autoCache[hashKey] = rustMarkup;
+        }
+      }
+    }
+    const rustFallbackMarkupFor = (block) => {
+      if (previewBackend !== "rust" || !(block instanceof HTMLElement)) {
+        return "";
+      }
+      const hashKey = String(
+        block.getAttribute("data-mdexplore-mermaid-hash") || ""
+      ).trim().toLowerCase();
+      const pdfMarkup =
+        hashKey && pdfCache && typeof pdfCache[hashKey] === "string"
+          ? pdfCache[hashKey]
+          : "";
+      const storedMarkup =
+        typeof block.__mdexploreRustSvgMarkup === "string"
+          ? block.__mdexploreRustSvgMarkup
+          : "";
+      const autoMarkup =
+        hashKey && typeof autoCache[hashKey] === "string"
+          ? autoCache[hashKey]
+          : "";
+      for (const candidate of [pdfMarkup, storedMarkup, autoMarkup]) {
+        if (candidate.indexOf("<svg") >= 0) {
+          return candidate;
+        }
+      }
+      return "";
+    };
+    const restoreRustFallbackForPdf = (block) => {
+      const rustMarkup = rustFallbackMarkupFor(block);
+      if (rustMarkup.indexOf("<svg") < 0) {
+        return false;
+      }
+      block.innerHTML = rustMarkup;
+      block.dataset.mdexploreMermaidRenderer = "rust";
+      block.removeAttribute("data-mdexplore-mermaid-render");
+      block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+      block.classList.add("mermaid-ready");
+      const rustSvg = block.querySelector("svg");
+      forceMermaidSvgMonochromeForPdf(rustSvg);
+      return true;
+    };
+    const isMermaidErrorSvgMarkup = (svgMarkup) => {
+      if (typeof svgMarkup !== "string" || svgMarkup.indexOf("<svg") < 0) {
+        return false;
+      }
+      try {
+        const container = document.createElement("div");
+        container.innerHTML = svgMarkup;
+        const svg = container.querySelector("svg");
+        if (!(svg instanceof SVGElement)) {
+          return false;
+        }
+        if (svg.querySelector(".error-icon, .error-text")) {
+          return true;
+        }
+        const text = String(svg.textContent || "").toLowerCase();
+        return text.includes("syntax error in text") && text.includes("mermaid version");
+      } catch (_error) {
+        return false;
+      }
+    };
+    // PDF export defaults independently to vendored Mermaid JavaScript, even
+    // when the interactive preview uses Rust. An explicit PDF-only override
+    // may still request the cached Rust PDF SVG path.
+    const requestedBackend = String(window.__mdexplorePdfMermaidBackend || "js").toLowerCase();
+    const backend = requestedBackend === "rust" ? "rust" : "js";
     if (backend === "rust") {
       if (window.__mdexplorePdfMermaidInFlight) {
         return;
@@ -998,6 +1115,9 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             }
           }
           if (!sourceText) {
+            if (restoreRustFallbackForPdf(block)) {
+              continue;
+            }
             renderFailures += 1;
             block.classList.remove("mermaid-pending", "mermaid-ready");
             block.classList.add("mermaid-error");
@@ -1017,12 +1137,19 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
               throw new Error("Mermaid returned empty SVG for PDF render");
             }
+            if (isMermaidErrorSvgMarkup(svgMarkup)) {
+              throw new Error("Mermaid returned its syntax-error SVG");
+            }
             block.innerHTML = svgMarkup;
+            block.dataset.mdexploreMermaidRenderer = "js";
             const renderedSvg = block.querySelector("svg");
             forceMermaidSvgMonochromeForPdf(renderedSvg);
             block.classList.remove("mermaid-pending", "mermaid-error");
             block.classList.add("mermaid-ready");
           } catch (renderError) {
+            if (restoreRustFallbackForPdf(block)) {
+              continue;
+            }
             renderFailures += 1;
             block.classList.remove("mermaid-pending", "mermaid-ready");
             block.classList.add("mermaid-error");
@@ -1038,8 +1165,21 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           window.__mdexplorePdfMermaidError = `${renderFailures} Mermaid block(s) failed during PDF clean render`;
         }
       } catch (error) {
-        window.__mdexplorePdfMermaidError = error && error.message ? error.message : String(error);
-        window.__mdexploreMermaidReady = false;
+        let fallbackFailures = 0;
+        for (const block of mermaidBlocks) {
+          if (!restoreRustFallbackForPdf(block)) {
+            fallbackFailures += 1;
+          }
+        }
+        if (fallbackFailures === 0) {
+          window.__mdexplorePdfMermaidError = "";
+          window.__mdexploreMermaidReady = true;
+          window.__mdexploreMermaidPaletteMode = "pdf";
+        } else {
+          const message = error && error.message ? error.message : String(error);
+          window.__mdexplorePdfMermaidError = `${message}; ${fallbackFailures} block(s) missing Rust fallback`;
+          window.__mdexploreMermaidReady = false;
+        }
       } finally {
         window.__mdexplorePdfMermaidReady = true;
         window.__mdexplorePdfMermaidInFlight = false;
@@ -1062,8 +1202,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     window.__mdexploreApplyPlantUmlZoomControls("pdf");
   }
   normalizeDiagramStateForPdf();
-  // Apply print-safe grayscale for both Mermaid backends. Rust still uses the
-  // dedicated PDF SVG source; this pass only normalizes print contrast.
+  // Apply print-safe grayscale to the selected PDF Mermaid output. JavaScript
+  // is the default; an explicit PDF-only override may select cached Rust SVG.
   forceAllMermaidMonochromeForPdf();
   // Ensure interactive zoom/pan toolbars never appear in PDF snapshots.
   for (const toolbar of Array.from(document.querySelectorAll(".mdexplore-mermaid-toolbar"))) {
