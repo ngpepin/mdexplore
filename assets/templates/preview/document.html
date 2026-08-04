@@ -1489,6 +1489,7 @@
       const shared = {
         startOnLoad: false,
         securityLevel: "loose",
+        suppressErrorRendering: true,
         fontFamily: "Noto Sans, DejaVu Sans, sans-serif",
         flowchart: { htmlLabels: true, useMaxWidth: true },
         sequence: { useMaxWidth: true },
@@ -1616,6 +1617,29 @@
       return "";
     };
 
+    window.__mdexploreRemoveMermaidRenderArtifacts = (renderId = "") => {
+      const normalizedId = String(renderId || "").trim();
+      const exactIds = normalizedId
+        ? new Set([`d${normalizedId}`, `i${normalizedId}`])
+        : null;
+      let removed = 0;
+      for (const node of Array.from(document.querySelectorAll("[id]"))) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const id = String(node.id || "");
+        const matches = exactIds
+          ? exactIds.has(id)
+          : id.startsWith("dmdexplore_") || id.startsWith("imdexplore_");
+        if (!matches) {
+          continue;
+        }
+        node.remove();
+        removed += 1;
+      }
+      return removed;
+    };
+
     window.__mdexploreIsMermaidErrorSvgMarkup = (svgMarkup) => {
       if (typeof svgMarkup !== "string" || svgMarkup.indexOf("<svg") < 0) {
         return false;
@@ -1652,23 +1676,27 @@
       }
       mermaid.initialize(window.__mdexploreMermaidInitConfig(normalizedMode));
       const renderId = `mdexplore_mermaid_user_js_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      const renderResult = await mermaid.render(renderId, sourceText);
-      const svgMarkup =
-        renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
-          ? renderResult.svg
-          : String(renderResult || "");
-      if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
-        throw new Error("Mermaid returned empty SVG");
+      try {
+        const renderResult = await mermaid.render(renderId, sourceText);
+        const svgMarkup =
+          renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
+            ? renderResult.svg
+            : String(renderResult || "");
+        if (!svgMarkup || svgMarkup.indexOf("<svg") < 0) {
+          throw new Error("Mermaid returned empty SVG");
+        }
+        if (window.__mdexploreIsMermaidErrorSvgMarkup(svgMarkup)) {
+          throw new Error("Mermaid returned its syntax-error SVG");
+        }
+        block.innerHTML = svgMarkup;
+        block.dataset.mdexploreMermaidRenderer = "js";
+        block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
+        block.classList.add("mermaid-ready");
+        window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
+        return true;
+      } finally {
+        window.__mdexploreRemoveMermaidRenderArtifacts(renderId);
       }
-      if (window.__mdexploreIsMermaidErrorSvgMarkup(svgMarkup)) {
-        throw new Error("Mermaid returned its syntax-error SVG");
-      }
-      block.innerHTML = svgMarkup;
-      block.dataset.mdexploreMermaidRenderer = "js";
-      block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
-      block.classList.add("mermaid-ready");
-      window.__mdexploreApplyMermaidPostStyles(block, normalizedMode);
-      return true;
     };
 
     // Wrap Mermaid SVG output in an interactive shell that adds renderer,
@@ -4294,8 +4322,8 @@
                 block.textContent = "Mermaid source unavailable";
                 continue;
               }
+              const renderId = `mdexplore_mermaid_rust_fallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
               try {
-                const renderId = `mdexplore_mermaid_rust_fallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
                 const renderResult = await mermaid.render(renderId, sourceText);
                 const svgMarkup =
                   renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
@@ -4319,6 +4347,8 @@
                   renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
                 const prefix = rustError ? `Rust renderer: ${rustError}; ` : "";
                 block.textContent = `Mermaid render failed: ${prefix}JS fallback: ${jsMessage}`;
+              } finally {
+                window.__mdexploreRemoveMermaidRenderArtifacts(renderId);
               }
             }
           } catch (fallbackLoadError) {
@@ -4432,8 +4462,8 @@
               }
               const sourceText = (block.dataset && block.dataset.mdexploreMermaidSource) || "";
               const hashKey = (block.getAttribute("data-mdexplore-mermaid-hash") || "").trim().toLowerCase();
+              const renderId = `mdexplore_mermaid_${Date.now()}_${Math.random().toString(36).slice(2)}`;
               try {
-                const renderId = `mdexplore_mermaid_${Date.now()}_${Math.random().toString(36).slice(2)}`;
                 const renderResult = await mermaid.render(renderId, sourceText);
                 const svgMarkup =
                   renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
@@ -4466,6 +4496,8 @@
                 const message =
                   renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
                 block.textContent = `Mermaid render failed: ${message}`;
+              } finally {
+                window.__mdexploreRemoveMermaidRenderArtifacts(renderId);
               }
             }
           }

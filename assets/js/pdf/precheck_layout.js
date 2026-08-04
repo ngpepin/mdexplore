@@ -1079,6 +1079,36 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
     window.__mdexplorePdfMermaidError = "";
 
     const normalizeMermaidSource = (value) => String(value || "").replace(/\\r\\n/g, "\\n").trim();
+    const cleanupMermaidRenderArtifacts = (renderId = "") => {
+      if (typeof window.__mdexploreRemoveMermaidRenderArtifacts === "function") {
+        try {
+          return window.__mdexploreRemoveMermaidRenderArtifacts(renderId);
+        } catch (_error) {
+          // Fall through to the local cleanup below.
+        }
+      }
+      const normalizedId = String(renderId || "").trim();
+      const exactIds = normalizedId
+        ? new Set([`d${normalizedId}`, `i${normalizedId}`])
+        : null;
+      let removed = 0;
+      for (const node of Array.from(document.querySelectorAll("[id]"))) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        const id = String(node.id || "");
+        const matches = exactIds
+          ? exactIds.has(id)
+          : id.startsWith("dmdexplore_") || id.startsWith("imdexplore_");
+        if (!matches) {
+          continue;
+        }
+        node.remove();
+        removed += 1;
+      }
+      return removed;
+    };
+    cleanupMermaidRenderArtifacts();
 
     (async () => {
       try {
@@ -1093,6 +1123,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           (window.__mdexploreMermaidInitConfig && window.__mdexploreMermaidInitConfig("pdf")) || {
             startOnLoad: false,
             securityLevel: "loose",
+            suppressErrorRendering: true,
             theme: "default",
             darkMode: false,
           };
@@ -1127,8 +1158,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           block.classList.remove("mermaid-ready", "mermaid-error");
           block.classList.add("mermaid-pending");
           block.textContent = "Mermaid rendering...";
+          const renderId = `mdexplore_pdf_mermaid_${Date.now()}_${index}`;
           try {
-            const renderId = `mdexplore_pdf_mermaid_${Date.now()}_${index}`;
             const renderResult = await mermaid.render(renderId, sourceText);
             const svgMarkup =
               renderResult && typeof renderResult === "object" && typeof renderResult.svg === "string"
@@ -1156,6 +1187,8 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
             const message =
               renderError && renderError.message ? renderError.message : String(renderError || "Unknown Mermaid error");
             block.textContent = `Mermaid render failed: ${message}`;
+          } finally {
+            cleanupMermaidRenderArtifacts(renderId);
           }
         }
 
@@ -1181,6 +1214,7 @@ body.mdexplore-pdf-export-mode .mdexplore-fence {
           window.__mdexploreMermaidReady = false;
         }
       } finally {
+        cleanupMermaidRenderArtifacts();
         window.__mdexplorePdfMermaidReady = true;
         window.__mdexplorePdfMermaidInFlight = false;
       }

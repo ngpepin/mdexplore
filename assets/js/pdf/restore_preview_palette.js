@@ -8,6 +8,22 @@
       token.remove();
     }
   }
+  if (typeof window.__mdexploreRemoveMermaidRenderArtifacts === "function") {
+    try {
+      window.__mdexploreRemoveMermaidRenderArtifacts();
+    } catch (_error) {
+      // Fall through to direct stale-wrapper cleanup.
+    }
+  }
+  for (const node of Array.from(document.querySelectorAll("[id]"))) {
+    if (!(node instanceof Element)) {
+      continue;
+    }
+    const id = String(node.id || "");
+    if (id.startsWith("dmdexplore_") || id.startsWith("imdexplore_")) {
+      node.remove();
+    }
+  }
   const pdfMermaidOverride = document.getElementById("__mdexplore_pdf_mermaid_light_override");
   if (pdfMermaidOverride && pdfMermaidOverride.parentNode) {
     pdfMermaidOverride.parentNode.removeChild(pdfMermaidOverride);
@@ -119,6 +135,20 @@
       block.removeAttribute("data-mdexplore-mermaid-render");
       block.classList.remove("mermaid-pending", "mermaid-error", "mermaid-rust-fallback");
       block.classList.add("mermaid-ready");
+      if (typeof window.__mdexploreApplyMermaidPostStyles === "function") {
+        window.__mdexploreApplyMermaidPostStyles(block, "auto");
+      }
+      for (const rendererToggle of Array.from(
+        block.querySelectorAll(".mdexplore-mermaid-renderer-toggle")
+      )) {
+        if (!(rendererToggle instanceof HTMLButtonElement)) {
+          continue;
+        }
+        rendererToggle.textContent = "R";
+        rendererToggle.title = "Rust renderer active; switch to JavaScript";
+        rendererToggle.setAttribute("aria-label", "Switch Mermaid renderer to JavaScript");
+        rendererToggle.disabled = false;
+      }
       restored += 1;
     }
     return restored;
