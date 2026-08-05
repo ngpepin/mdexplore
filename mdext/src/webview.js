@@ -57,10 +57,11 @@ function getWebviewHtml(webview, context) {
         <span id="document-path">Open a Markdown document to preview it.</span>
       </div>
       <div class="header-actions">
-        <button id="search-toggle-button" class="icon-button" title="Search this preview" aria-label="Search this preview" aria-expanded="false" aria-controls="preview-searchbar">
+        <button id="search-toggle-button" class="search-toggle-button" title="Search this preview (Ctrl/Cmd+F)" aria-label="Search this preview" aria-expanded="false" aria-controls="preview-searchbar">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M10.5 3a7.5 7.5 0 1 1 0 15 7.5 7.5 0 0 1 0-15Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Zm6.56 10.64 3.15 3.15-1.42 1.42-3.15-3.15 1.42-1.42Z" />
           </svg>
+          <span>Search</span>
         </button>
         <button id="open-source-button" title="Open Markdown source">Source</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
@@ -84,6 +85,10 @@ function getWebviewHtml(webview, context) {
       <p>Open a Markdown file, then select the mdExt Activity Bar icon or reopen the file with mdExt.</p>
     </section>
   </main>
+  <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-highlight-button" role="menuitem">Highlight</button>
+    <button id="context-highlight-important-button" role="menuitem">Important highlight</button>
+  </div>
   <div id="render-status" role="status" aria-live="polite"></div>
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>

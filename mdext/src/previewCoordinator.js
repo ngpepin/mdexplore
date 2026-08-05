@@ -34,6 +34,7 @@ class PreviewCoordinator {
     this.anchorLineByUri = new Map();
     this.renderGeneration = new WeakMap();
     this.debounceTimers = new Map();
+    this.sourceScrollSuppressions = new WeakMap();
   }
 
   get configuration() {
@@ -152,6 +153,16 @@ class PreviewCoordinator {
       return;
     }
     const line = this.topVisibleLine(editor);
+    const suppression = this.sourceScrollSuppressions.get(editor);
+    if (suppression) {
+      const withinWindow = Date.now() < suppression.until;
+      const nearProgrammaticTarget = Math.abs(line - suppression.line) <= 2;
+      if (withinWindow && nearProgrammaticTarget) {
+        this.rememberAnchorLine(editor.document.uri, line);
+        return;
+      }
+      this.sourceScrollSuppressions.delete(editor);
+    }
     this.rememberAnchorLine(editor.document.uri, line);
     this.syncPreviewScroll(editor.document.uri, line);
   }
@@ -243,7 +254,7 @@ class PreviewCoordinator {
       vscode.window.showInformationMessage('Open a Markdown document before starting mdExt preview.');
       return;
     }
-    await this.openWithMdExt(uri);
+    await this.openWithMdExt(uri, vscode.ViewColumn.Beside);
   }
 
   async openAsEditor() {
@@ -531,6 +542,10 @@ class PreviewCoordinator {
       return;
     }
     const position = new vscode.Position(safeLine, 0);
+    this.sourceScrollSuppressions.set(editor, {
+      line: safeLine,
+      until: Date.now() + 400,
+    });
     editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.AtTop);
   }
 }

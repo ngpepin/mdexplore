@@ -68646,10 +68646,11 @@ var require_webview = __commonJS({
         <span id="document-path">Open a Markdown document to preview it.</span>
       </div>
       <div class="header-actions">
-        <button id="search-toggle-button" class="icon-button" title="Search this preview" aria-label="Search this preview" aria-expanded="false" aria-controls="preview-searchbar">
+        <button id="search-toggle-button" class="search-toggle-button" title="Search this preview (Ctrl/Cmd+F)" aria-label="Search this preview" aria-expanded="false" aria-controls="preview-searchbar">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M10.5 3a7.5 7.5 0 1 1 0 15 7.5 7.5 0 0 1 0-15Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Zm6.56 10.64 3.15 3.15-1.42 1.42-3.15-3.15 1.42-1.42Z" />
           </svg>
+          <span>Search</span>
         </button>
         <button id="open-source-button" title="Open Markdown source">Source</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
@@ -68673,6 +68674,10 @@ var require_webview = __commonJS({
       <p>Open a Markdown file, then select the mdExt Activity Bar icon or reopen the file with mdExt.</p>
     </section>
   </main>
+  <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-highlight-button" role="menuitem">Highlight</button>
+    <button id="context-highlight-important-button" role="menuitem">Important highlight</button>
+  </div>
   <div id="render-status" role="status" aria-live="polite"></div>
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>
@@ -68720,6 +68725,7 @@ var require_previewCoordinator = __commonJS({
         this.anchorLineByUri = /* @__PURE__ */ new Map();
         this.renderGeneration = /* @__PURE__ */ new WeakMap();
         this.debounceTimers = /* @__PURE__ */ new Map();
+        this.sourceScrollSuppressions = /* @__PURE__ */ new WeakMap();
       }
       get configuration() {
         return vscode2.workspace.getConfiguration("mdExt");
@@ -68829,6 +68835,16 @@ var require_previewCoordinator = __commonJS({
           return;
         }
         const line = this.topVisibleLine(editor);
+        const suppression = this.sourceScrollSuppressions.get(editor);
+        if (suppression) {
+          const withinWindow = Date.now() < suppression.until;
+          const nearProgrammaticTarget = Math.abs(line - suppression.line) <= 2;
+          if (withinWindow && nearProgrammaticTarget) {
+            this.rememberAnchorLine(editor.document.uri, line);
+            return;
+          }
+          this.sourceScrollSuppressions.delete(editor);
+        }
         this.rememberAnchorLine(editor.document.uri, line);
         this.syncPreviewScroll(editor.document.uri, line);
       }
@@ -68915,7 +68931,7 @@ var require_previewCoordinator = __commonJS({
           vscode2.window.showInformationMessage("Open a Markdown document before starting mdExt preview.");
           return;
         }
-        await this.openWithMdExt(uri);
+        await this.openWithMdExt(uri, vscode2.ViewColumn.Beside);
       }
       async openAsEditor() {
         const uri = this.currentMarkdownUri();
@@ -69175,6 +69191,10 @@ var require_previewCoordinator = __commonJS({
           return;
         }
         const position = new vscode2.Position(safeLine, 0);
+        this.sourceScrollSuppressions.set(editor, {
+          line: safeLine,
+          until: Date.now() + 400
+        });
         editor.revealRange(new vscode2.Range(position, position), vscode2.TextEditorRevealType.AtTop);
       }
     };

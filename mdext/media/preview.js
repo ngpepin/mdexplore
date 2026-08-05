@@ -14,6 +14,9 @@ const searchResultNode = document.getElementById('preview-search-result');
 const searchCloseButton = document.getElementById('preview-search-close-button');
 const highlightButton = document.getElementById('highlight-button');
 const highlightImportantButton = document.getElementById('highlight-important-button');
+const contextMenu = document.getElementById('preview-context-menu');
+const contextHighlightButton = document.getElementById('context-highlight-button');
+const contextHighlightImportantButton = document.getElementById('context-highlight-important-button');
 
 const PREVIEW_HIGHLIGHT_KIND_NORMAL = 'normal';
 const PREVIEW_HIGHLIGHT_KIND_IMPORTANT = 'important';
@@ -32,6 +35,7 @@ let lastReportedLine = -1;
 let searchInputTimer = null;
 let selectionRefreshTimer = null;
 let searchBarVisible = false;
+let previewFontSize = Number(vscode.getState()?.previewFontSize) || null;
 let currentPersistentHighlights = [];
 let currentSearchState = {
   query: '',
@@ -87,6 +91,29 @@ function normalizeSearchState(raw) {
     nearWordGap: Math.max(1, Number(raw?.nearWordGap) || 50),
     scrollToFirst: !!raw?.scrollToFirst,
   };
+}
+
+function currentPreviewFontSize() {
+  if (Number.isFinite(previewFontSize)) {
+    return previewFontSize;
+  }
+  const computed = Number.parseFloat(getComputedStyle(document.body).fontSize);
+  previewFontSize = Number.isFinite(computed) ? computed : 13;
+  return previewFontSize;
+}
+
+function setPreviewFontSize(nextSize, announce = true) {
+  const size = Math.max(8, Math.min(40, Number(nextSize) || currentPreviewFontSize()));
+  previewFontSize = Math.round(size * 10) / 10;
+  document.documentElement.style.setProperty('--mdext-preview-font-size', `${previewFontSize}px`);
+  vscode.setState({ ...(vscode.getState() || {}), previewFontSize });
+  if (announce) {
+    setStatus(`Preview font: ${previewFontSize}px`);
+  }
+}
+
+function adjustPreviewFontSize(delta) {
+  setPreviewFontSize(currentPreviewFontSize() + delta);
 }
 
 function setStatus(message, persistent = false) {
@@ -258,6 +285,24 @@ function applyPersistentHighlights(entries, allowCoordinatorSync = true) {
     vscode.postMessage({ type: 'persistentHighlightsResolved', entries: resolvedEntries });
   }
   return result;
+}
+
+function hideContextMenu() {
+  if (contextMenu) {
+    contextMenu.hidden = true;
+  }
+}
+
+function showContextMenu(x, y) {
+  if (!contextMenu) {
+    return;
+  }
+  contextMenu.hidden = false;
+  const rect = contextMenu.getBoundingClientRect();
+  const left = Math.max(6, Math.min(Number(x) || 0, window.innerWidth - rect.width - 6));
+  const top = Math.max(6, Math.min(Number(y) || 0, window.innerHeight - rect.height - 6));
+  contextMenu.style.left = `${left}px`;
+  contextMenu.style.top = `${top}px`;
 }
 
 function handleHighlightRequest(kind) {
@@ -455,7 +500,12 @@ function installDiagramControls(shell) {
   shell.__mdExtDiagramState = state;
   const applyZoom = (nextZoom) => {
     state.zoom = Math.max(0.1, Math.min(8, Number(nextZoom) || 1));
-    canvas.style.transform = `scale(${state.zoom})`;
+    const svg = shell.querySelector('.diagram-canvas svg');
+    if (svg) {
+      const size = diagramNaturalSize(shell);
+      svg.style.width = `${Math.max(1, size.width * state.zoom)}px`;
+      svg.style.height = `${Math.max(1, size.height * state.zoom)}px`;
+    }
     zoomLabel.textContent = `${Math.round(state.zoom * 100)}%`;
   };
   const fit = () => {
@@ -662,6 +712,38 @@ window.addEventListener('message', (event) => {
 
 window.addEventListener('scroll', () => scheduleVisibleLineReport(false), { passive: true });
 document.addEventListener('selectionchange', () => scheduleSelectionRefresh());
+document.addEventListener('keydown', (event) => {
+  if (event.altKey && !event.ctrlKey && !event.metaKey) {
+    const key = String(event.key || '');
+    if (key === '+' || key === '=') {
+      event.preventDefault();
+      adjustPreviewFontSize(1);
+      return;
+    }
+    if (key === '-' || key === '_') {
+      event.preventDefault();
+      adjustPreviewFontSize(-1);
+      return;
+    }
+  }
+  if ((event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'f') {
+    event.preventDefault();
+    setSearchVisibility(true, { focus: true });
+    return;
+  }
+  if (event.key === 'Escape') {
+    hideContextMenu();
+  }
+});
+document.addEventListener('mousedown', (event) => {
+  if (contextMenu && !contextMenu.hidden && !contextMenu.contains(event.target)) {
+    hideContextMenu();
+  }
+});
+if (Number.isFinite(previewFontSize)) {
+  setPreviewFontSize(previewFontSize, false);
+}
+
 window.addEventListener('keyup', () => scheduleSelectionRefresh(), { passive: true });
 window.addEventListener('mouseup', () => scheduleSelectionRefresh(), { passive: true });
 
@@ -673,6 +755,16 @@ content.addEventListener('click', (event) => {
   }
   event.preventDefault();
   vscode.postMessage({ type: 'openLink', href: anchor.getAttribute('data-mdext-href') || '' });
+});
+
+content.addEventListener('contextmenu', (event) => {
+  refreshSelectionState();
+  if (!latestSelectionInfo.hasSelection) {
+    hideContextMenu();
+    return;
+  }
+  event.preventDefault();
+  showContextMenu(event.clientX, event.clientY);
 });
 
 content.addEventListener('dblclick', (event) => {
@@ -726,6 +818,18 @@ highlightButton?.addEventListener('click', () => {
 });
 
 highlightImportantButton?.addEventListener('click', () => {
+  handleHighlightRequest(PREVIEW_HIGHLIGHT_KIND_IMPORTANT);
+});
+
+for (const button of [contextHighlightButton, contextHighlightImportantButton]) {
+  button?.addEventListener('mousedown', (event) => event.preventDefault());
+}
+contextHighlightButton?.addEventListener('click', () => {
+  hideContextMenu();
+  handleHighlightRequest(PREVIEW_HIGHLIGHT_KIND_NORMAL);
+});
+contextHighlightImportantButton?.addEventListener('click', () => {
+  hideContextMenu();
   handleHighlightRequest(PREVIEW_HIGHLIGHT_KIND_IMPORTANT);
 });
 

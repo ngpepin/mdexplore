@@ -9,6 +9,7 @@
   --mdext-important: #8b5cf6;
   --mdext-warning: #f59e0b;
   --mdext-caution: #ef4444;
+  --mdext-preview-font-size: var(--vscode-font-size);
 }
 
 * { box-sizing: border-box; }
@@ -19,7 +20,7 @@ body {
   color: var(--vscode-editor-foreground);
   background: var(--vscode-editor-background);
   font-family: var(--vscode-font-family);
-  font-size: var(--vscode-font-size);
+  font-size: var(--mdext-preview-font-size);
   line-height: 1.62;
 }
 
@@ -71,9 +72,22 @@ button:disabled { opacity: 0.5; cursor: default; }
   height: 1rem;
   fill: currentColor;
 }
-.icon-button.active {
+.icon-button.active,
+.search-toggle-button.active {
   color: var(--vscode-button-foreground, #fff);
   background: var(--vscode-button-background, rgba(64, 128, 255, 0.85));
+}
+.search-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.55rem;
+}
+.search-toggle-button svg {
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
 }
 .preview-searchbar {
   display: flex;
@@ -145,12 +159,41 @@ button:disabled { opacity: 0.5; cursor: default; }
 .renderer-toggle { font-weight: 800; }
 .diagram-zoom-label { min-width: 3.2rem; margin-left: auto; color: var(--mdext-muted); text-align: right; font-variant-numeric: tabular-nums; }
 .diagram-notice { padding: 0.25rem 0.6rem; overflow: hidden; color: var(--vscode-editorWarning-foreground, #f59e0b); font-size: 0.8em; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid var(--mdext-border); }
-.diagram-viewport { min-height: 180px; max-height: min(72vh, 760px); overflow: auto; padding: 0.8rem; cursor: grab; }
+.diagram-viewport { max-height: min(72vh, 760px); overflow: auto; padding: 0.8rem; cursor: grab; }
 .diagram-viewport.dragging { cursor: grabbing; user-select: none; }
-.diagram-canvas { width: max-content; min-width: 100%; transform-origin: top left; transition: transform 80ms ease-out; }
-.diagram-canvas svg { display: block; max-width: none; margin: 0 auto; }
+.diagram-canvas { width: max-content; min-width: 100%; }
+.diagram-canvas svg { display: block; max-width: none; margin: 0 auto; transition: width 80ms ease-out, height 80ms ease-out; }
 .diagram-loading, .diagram-error { min-width: 260px; padding: 2.5rem 1rem; color: var(--mdext-muted); text-align: center; }
 .diagram-error { color: var(--vscode-errorForeground, #ef4444); }
+
+.preview-context-menu {
+  position: fixed;
+  z-index: 2147483647;
+  min-width: 170px;
+  padding: 0.25rem;
+  border: 1px solid var(--mdext-border);
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editor-background));
+  color: var(--vscode-menu-foreground, var(--vscode-editor-foreground));
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+}
+.preview-context-menu[hidden] { display: none; }
+.preview-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 0.35rem 0.55rem;
+  border: 0;
+  border-radius: 3px;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+}
+.preview-context-menu button:hover,
+.preview-context-menu button:focus {
+  outline: none;
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-menu-selectionForeground, inherit);
+}
 
 .empty-state { max-width: 540px; margin: 18vh auto; text-align: center; color: var(--mdext-muted); }
 #render-status { position: fixed; right: 0.8rem; bottom: 0.8rem; z-index: 50; max-width: min(520px, calc(100vw - 1.6rem)); padding: 0.35rem 0.65rem; opacity: 0; pointer-events: none; color: var(--vscode-statusBar-foreground); background: var(--vscode-statusBar-background); border-radius: 4px; box-shadow: 0 3px 16px rgba(0,0,0,.25); transition: opacity 120ms ease; }
