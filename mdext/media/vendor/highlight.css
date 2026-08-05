@@ -1,0 +1,16 @@
+.hljs { color: var(--vscode-editor-foreground); background: transparent; }
+.hljs-comment, .hljs-quote { color: var(--vscode-descriptionForeground); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-subst { color: var(--vscode-debugTokenExpression-name, #c586c0); }
+.hljs-number, .hljs-literal, .hljs-variable, .hljs-template-variable, .hljs-tag .hljs-attr { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+.hljs-string, .hljs-doctag { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+.hljs-title, .hljs-section, .hljs-selector-id { color: var(--vscode-symbolIcon-functionForeground, #dcdcaa); font-weight: 700; }
+.hljs-type, .hljs-class .hljs-title { color: var(--vscode-symbolIcon-classForeground, #4ec9b0); }
+.hljs-tag, .hljs-name, .hljs-attribute { color: var(--vscode-symbolIcon-keyForeground, #569cd6); }
+.hljs-regexp, .hljs-link { color: var(--vscode-textLink-foreground, #3794ff); }
+.hljs-symbol, .hljs-bullet { color: var(--vscode-symbolIcon-enumeratorForeground, #d7ba7d); }
+.hljs-built_in, .hljs-builtin-name { color: var(--vscode-symbolIcon-methodForeground, #4ec9b0); }
+.hljs-meta { color: var(--vscode-symbolIcon-operatorForeground, #9cdcfe); }
+.hljs-deletion { background: color-mix(in srgb, var(--vscode-diffEditor-removedTextBackground, #ff000033) 65%, transparent); }
+.hljs-addition { background: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBackground, #00ff0033) 65%, transparent); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }

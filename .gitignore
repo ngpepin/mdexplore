@@ -21,6 +21,9 @@ coverage.xml
 build/
 *.egg-info/
 .eggs/
+mdext/node_modules/
+mdext/.npm/
+mdext/*.vsix
 
 # Local runtime files
 *.log
@@ -69,3 +72,5 @@ vendor/fastbase64/benchmarkscript.sh
 .cache
 bugs
 .local
+mdext/vendor
+mdext/bin/linux-x64

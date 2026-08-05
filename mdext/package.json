@@ -1,0 +1,131 @@
+{
+  "name": "mdext",
+  "displayName": "mdExt",
+  "description": "A high-fidelity Markdown preview editor for Visual Studio Code, based on mdexplore.",
+  "version": "0.1.0",
+  "publisher": "mdexplore",
+  "license": "MIT",
+  "icon": "media/mdexplor-icon.png",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "markdown",
+    "preview",
+    "mermaid",
+    "plantuml",
+    "mathjax"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mdExt.previewCurrent",
+        "title": "mdExt: Preview Current Markdown",
+        "icon": {
+          "light": "media/mdexplor-icon.png",
+          "dark": "media/mdexplor-icon.png"
+        }
+      },
+      {
+        "command": "mdExt.openAsEditor",
+        "title": "mdExt: Reopen Current Markdown With mdExt"
+      },
+      {
+        "command": "mdExt.refreshPreview",
+        "title": "mdExt: Refresh Preview",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mdExt.openSource",
+        "title": "mdExt: Open Markdown Source",
+        "icon": "$(edit)"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "mdExt.markdownEditor",
+        "displayName": "mdExt Markdown Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          },
+          {
+            "filenamePattern": "*.markdown"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "mdExt.previewCurrent",
+          "when": "resourceExtname == .md || resourceExtname == .markdown",
+          "group": "navigation@20"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "mdExt.previewCurrent",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorLangId == markdown"
+      }
+    ],
+    "configuration": {
+      "title": "mdExt",
+      "properties": {
+        "mdExt.liveUpdateDelay": {
+          "type": "number",
+          "default": 180,
+          "minimum": 50,
+          "maximum": 2000,
+          "description": "Milliseconds to debounce live preview updates while editing Markdown."
+        },
+        "mdExt.mermaidBackend": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "javascript"
+          ],
+          "default": "rust",
+          "description": "Preferred Mermaid renderer. Rust uses the bundled Linux x64 mmdr binary and falls back to JavaScript."
+        },
+        "mdExt.plantUml.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render PlantUML fences locally through Java and the bundled PlantUML jar."
+        },
+        "mdExt.openRelativeMarkdownLinksIn": {
+          "type": "string",
+          "enum": [
+            "source",
+            "mdExt"
+          ],
+          "default": "mdExt",
+          "description": "Choose how relative Markdown links are opened."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.js --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/extension.js && node --check src/previewCoordinator.js && node --check src/searchQuery.js && node --check src/highlightStore.js && node --check src/renderer.js && node --check src/diagramRenderers.js && node --check src/webview.js && node --check media/preview.js && node --check media/searchCompat.js && node --check media/highlightCompat.js && npm run build && node --check dist/extension.js",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.6.0",
+    "esbuild": "0.25.8",
+    "highlight.js": "11.11.1",
+    "markdown-it": "14.1.0",
+    "markdown-it-task-lists": "2.1.1",
+    "sanitize-html": "2.16.0"
+  }
+}
