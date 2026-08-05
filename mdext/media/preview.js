@@ -680,7 +680,6 @@ async function applyRender(message) {
     } else {
       window.scrollTo({ top: previousTop, behavior: 'auto' });
     }
-    scheduleVisibleLineReport(true);
     setStatus('Preview updated');
   }
 }

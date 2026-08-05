@@ -68726,6 +68726,7 @@ var require_previewCoordinator = __commonJS({
         this.renderGeneration = /* @__PURE__ */ new WeakMap();
         this.debounceTimers = /* @__PURE__ */ new Map();
         this.sourceScrollSuppressions = /* @__PURE__ */ new WeakMap();
+        this.scrollLeaderByUri = /* @__PURE__ */ new Map();
       }
       get configuration() {
         return vscode2.workspace.getConfiguration("mdExt");
@@ -68837,14 +68838,18 @@ var require_previewCoordinator = __commonJS({
         const line = this.topVisibleLine(editor);
         const suppression = this.sourceScrollSuppressions.get(editor);
         if (suppression) {
-          const withinWindow = Date.now() < suppression.until;
           const nearProgrammaticTarget = Math.abs(line - suppression.line) <= 2;
-          if (withinWindow && nearProgrammaticTarget) {
+          if (Date.now() < suppression.until && nearProgrammaticTarget) {
+            suppression.until = Date.now() + 1200;
             this.rememberAnchorLine(editor.document.uri, line);
             return;
           }
           this.sourceScrollSuppressions.delete(editor);
         }
+        if (this.scrollLeader(editor.document.uri)?.kind === "preview") {
+          return;
+        }
+        this.claimScrollLeadership(editor.document.uri, "source");
         this.rememberAnchorLine(editor.document.uri, line);
         this.syncPreviewScroll(editor.document.uri, line);
       }
@@ -69052,6 +69057,31 @@ var require_previewCoordinator = __commonJS({
         }
         this.anchorLineByUri.set(uri.toString(), Math.max(0, Math.floor(line)));
       }
+      scrollLeader(uri) {
+        const key = uri?.toString();
+        if (!key) {
+          return null;
+        }
+        const leader = this.scrollLeaderByUri.get(key);
+        if (!leader) {
+          return null;
+        }
+        if (Date.now() >= leader.until) {
+          this.scrollLeaderByUri.delete(key);
+          return null;
+        }
+        return leader;
+      }
+      claimScrollLeadership(uri, kind, durationMs = 350) {
+        const key = uri?.toString();
+        if (!key) {
+          return;
+        }
+        this.scrollLeaderByUri.set(key, {
+          kind,
+          until: Date.now() + durationMs
+        });
+      }
       anchorLineForUri(uri) {
         const editor = this.preferredSourceEditor(uri);
         if (editor) {
@@ -69180,6 +69210,10 @@ var require_previewCoordinator = __commonJS({
         if (!surface?.uri || !Number.isFinite(line)) {
           return;
         }
+        if (this.scrollLeader(surface.uri)?.kind === "source") {
+          return;
+        }
+        this.claimScrollLeadership(surface.uri, "preview");
         this.rememberAnchorLine(surface.uri, line);
         this.syncPreviewScroll(surface.uri, line, surface);
         const editor = this.preferredSourceEditor(surface.uri);
@@ -69193,7 +69227,7 @@ var require_previewCoordinator = __commonJS({
         const position = new vscode2.Position(safeLine, 0);
         this.sourceScrollSuppressions.set(editor, {
           line: safeLine,
-          until: Date.now() + 400
+          until: Date.now() + 1200
         });
         editor.revealRange(new vscode2.Range(position, position), vscode2.TextEditorRevealType.AtTop);
       }
