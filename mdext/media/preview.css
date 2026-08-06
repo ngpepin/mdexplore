@@ -226,6 +226,16 @@ body.mdext-pdf-export-mode {
 .mdext-pdf-export-mode .diagram-shell {
   overflow: visible;
   background: #fff !important;
+  width: var(--mdext-print-section-width, auto);
+  max-width: var(--mdext-print-section-width, 100%);
+}
+.mdext-pdf-export-mode .diagram-shell:not(.mdext-pdf-allow-break) {
+  break-inside: avoid-page;
+  page-break-inside: avoid;
+}
+.mdext-pdf-export-mode .diagram-shell.mdext-pdf-break-before {
+  break-before: page;
+  page-break-before: always;
 }
 .mdext-pdf-export-mode .diagram-viewport {
   max-height: none;
@@ -239,6 +249,13 @@ body.mdext-pdf-export-mode {
 .mdext-pdf-export-mode .markdown-body img,
 .mdext-pdf-export-mode mjx-container {
   max-width: 100% !important;
+}
+.mdext-pdf-export-mode .diagram-canvas svg {
+  width: var(--mdext-print-diagram-width, auto) !important;
+  max-width: var(--mdext-print-diagram-max-width, 100%) !important;
+  height: var(--mdext-print-diagram-height, auto) !important;
+  max-height: var(--mdext-print-diagram-max-height, none) !important;
+  margin: 0 auto !important;
 }
 
 @media print {
@@ -277,6 +294,28 @@ body.mdext-pdf-export-mode {
     max-width: none;
     margin: 0;
     padding: 0;
+  }
+
+  .diagram-shell:not(.mdext-pdf-allow-break) {
+    break-inside: avoid-page;
+    page-break-inside: avoid;
+  }
+
+  .diagram-shell.mdext-pdf-break-before {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  .diagram-shell {
+    width: var(--mdext-print-section-width, auto) !important;
+    max-width: var(--mdext-print-section-width, 100%) !important;
+  }
+
+  .diagram-canvas svg {
+    width: var(--mdext-print-diagram-width, auto) !important;
+    max-width: var(--mdext-print-diagram-max-width, 100%) !important;
+    height: var(--mdext-print-diagram-height, auto) !important;
+    max-height: var(--mdext-print-diagram-max-height, none) !important;
   }
 
   .markdown-body a {

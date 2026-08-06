@@ -20,6 +20,10 @@ const {
   resolveRelativeFile,
 } = require('./utils');
 
+const PDF_SAVE_TIMEOUT_BASE_MS = 15000;
+const PDF_SAVE_TIMEOUT_PER_CHUNK_MS = 300;
+const PDF_SAVE_TIMEOUT_MAX_MS = 180000;
+
 function entriesSignature(entries) {
   return JSON.stringify(normalizeHighlightEntries(entries));
 }
@@ -34,6 +38,8 @@ class PreviewCoordinator {
     this.anchorLineByUri = new Map();
     this.renderGeneration = new WeakMap();
     this.debounceTimers = new Map();
+    this.pendingPdfSaves = new Map();
+    this.pdfSaveTimers = new Map();
     this.sourceScrollSuppressions = new WeakMap();
     this.scrollLeaderByUri = new Map();
   }
@@ -115,6 +121,12 @@ class PreviewCoordinator {
         });
       } else if (type === 'persistentHighlightsResolved') {
         await this.onPersistentHighlightsResolved(surface, message.entries);
+      } else if (type === 'savePdfStart') {
+        this.beginPdfSave(surface, String(message.saveId || ''), Number(message.totalChunks));
+      } else if (type === 'savePdfChunk') {
+        this.appendPdfSaveChunk(surface, String(message.saveId || ''), Number(message.index), String(message.data || ''));
+      } else if (type === 'savePdfEnd') {
+        await this.finishPdfSave(surface, String(message.saveId || ''));
       } else if (type === 'savePdf') {
         await this.savePdf(surface, String(message.data || ''));
       } else if (type === 'openSource') {
@@ -334,15 +346,176 @@ class PreviewCoordinator {
     if (!surface?.uri || !base64Data) {
       return;
     }
+    const outputPath = this.pdfOutputPath(surface.uri);
+    if (!outputPath) {
+      return;
+    }
+    await this.writePdfOutput(surface, outputPath, base64Data);
+  }
+
+  pdfOutputPath(uri) {
+    const sourcePath = uri?.fsPath || uri?.path;
+    if (!sourcePath) {
+      return '';
+    }
+    return /\.(?:md|markdown)$/i.test(sourcePath)
+      ? sourcePath.replace(/\.(?:md|markdown)$/i, '.pdf')
+      : `${sourcePath}.pdf`;
+  }
+
+  pdfSaveKey(surface, saveId) {
+    return `${surface?.uri?.toString?.() || ''}\u0000${String(saveId || '')}`;
+  }
+
+  pdfSaveHasAllChunks(pending) {
+    if (!pending || !Number.isInteger(pending.expectedChunks) || pending.expectedChunks <= 0) {
+      return false;
+    }
+    for (let index = 0; index < pending.expectedChunks; index += 1) {
+      if (!Buffer.isBuffer(pending.chunks[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  clearPdfSaveTimer(key) {
+    const timer = this.pdfSaveTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.pdfSaveTimers.delete(key);
+    }
+  }
+
+  schedulePdfSaveTimeout(surface, key, expectedChunks) {
+    this.clearPdfSaveTimer(key);
+    const timeoutMs = Math.min(
+      PDF_SAVE_TIMEOUT_MAX_MS,
+      PDF_SAVE_TIMEOUT_BASE_MS + (Math.max(1, expectedChunks) * PDF_SAVE_TIMEOUT_PER_CHUNK_MS),
+    );
+    const timer = setTimeout(() => {
+      const pending = this.pendingPdfSaves.get(key);
+      if (!pending || this.pdfSaveHasAllChunks(pending)) {
+        return;
+      }
+      this.pendingPdfSaves.delete(key);
+      this.pdfSaveTimers.delete(key);
+      surface.webview.postMessage({
+        type: 'status',
+        message: 'PDF export failed: timed out while receiving PDF data',
+        persistent: true,
+      });
+    }, timeoutMs);
+    this.pdfSaveTimers.set(key, timer);
+  }
+
+  base64ChunkToBytes(base64Chunk) {
+    const payload = String(base64Chunk || '');
+    if (!payload) {
+      return null;
+    }
+    try {
+      const bytes = Buffer.from(payload, 'base64');
+      return bytes.length ? bytes : null;
+    } catch {
+      return null;
+    }
+  }
+
+  beginPdfSave(surface, saveId, totalChunks) {
+    if (!surface?.uri || !saveId) {
+      return;
+    }
+    const key = this.pdfSaveKey(surface, saveId);
+    this.pendingPdfSaves.delete(key);
+    this.clearPdfSaveTimer(key);
+    const expectedChunks = Math.max(1, Math.floor(Number(totalChunks) || 0));
+    this.pendingPdfSaves.set(key, {
+      outputPath: this.pdfOutputPath(surface.uri),
+      chunks: new Array(expectedChunks),
+      expectedChunks,
+      ended: false,
+    });
+    this.schedulePdfSaveTimeout(surface, key, expectedChunks);
+  }
+
+  appendPdfSaveChunk(surface, saveId, index, chunkData) {
+    const key = this.pdfSaveKey(surface, saveId);
+    const pending = this.pendingPdfSaves.get(key);
+    if (!pending) {
+      return;
+    }
+    const safeIndex = Math.floor(Number(index));
+    if (safeIndex < 0 || safeIndex >= pending.expectedChunks) {
+      return;
+    }
+    const bytes = this.base64ChunkToBytes(chunkData);
+    if (!bytes) {
+      return;
+    }
+    pending.chunks[safeIndex] = bytes;
+    if (pending.ended && this.pdfSaveHasAllChunks(pending)) {
+      void this.finalizePendingPdfSave(surface, key, pending);
+    }
+  }
+
+  async finishPdfSave(surface, saveId) {
+    const key = this.pdfSaveKey(surface, saveId);
+    const pending = this.pendingPdfSaves.get(key);
+    if (!surface?.uri || !pending?.outputPath) {
+      return;
+    }
+    pending.ended = true;
+    if (!this.pdfSaveHasAllChunks(pending)) {
+      return;
+    }
+    await this.finalizePendingPdfSave(surface, key, pending);
+  }
+
+  async finalizePendingPdfSave(surface, key, pending) {
+    if (!surface?.uri || !pending?.outputPath) {
+      this.pendingPdfSaves.delete(key);
+      this.clearPdfSaveTimer(key);
+      return;
+    }
+    if (!this.pdfSaveHasAllChunks(pending)) {
+      surface.webview.postMessage({
+        type: 'status',
+        message: 'PDF export failed: incomplete PDF payload',
+        persistent: true,
+      });
+      return;
+    }
+    this.pendingPdfSaves.delete(key);
+    this.clearPdfSaveTimer(key);
+    await this.writePdfOutputBytes(surface, pending.outputPath, Buffer.concat(pending.chunks));
+  }
+
+  async writePdfOutput(surface, outputPath, base64Data) {
+    if (!outputPath || !base64Data) {
+      return;
+    }
+    const bytes = this.base64ChunkToBytes(base64Data);
+    if (!bytes) {
+      surface.webview.postMessage({
+        type: 'status',
+        message: 'PDF export failed: empty PDF payload',
+        persistent: true,
+      });
+      return;
+    }
+    await this.writePdfOutputBytes(surface, outputPath, bytes);
+  }
+
+  async writePdfOutputBytes(surface, outputPath, bytes) {
+    if (!outputPath || !bytes) {
+      return;
+    }
     const sourcePath = surface.uri.fsPath || surface.uri.path;
     if (!sourcePath) {
       return;
     }
-    const outputPath = /\.(?:md|markdown)$/i.test(sourcePath)
-      ? sourcePath.replace(/\.(?:md|markdown)$/i, '.pdf')
-      : `${sourcePath}.pdf`;
     try {
-      const bytes = Buffer.from(base64Data, 'base64');
       await vscode.workspace.fs.writeFile(vscode.Uri.file(outputPath), bytes);
       surface.webview.postMessage({
         type: 'status',
@@ -422,6 +595,11 @@ class PreviewCoordinator {
       clearTimeout(timer);
     }
     this.debounceTimers.clear();
+    for (const timer of this.pdfSaveTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.pdfSaveTimers.clear();
+    this.pendingPdfSaves.clear();
   }
 
   matchingSurfaces(uri) {

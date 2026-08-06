@@ -21,8 +21,9 @@ function getWebviewHtml(webview, context) {
   const html2PdfScript = resourceUri(webview, context, 'media', 'vendor', 'html2pdf.bundle.min.js');
   const csp = [
     "default-src 'none'",
-    `img-src ${webview.cspSource} https: data:`,
-    `font-src ${webview.cspSource} data:`,
+    `img-src ${webview.cspSource} https: data: blob:`,
+    `font-src ${webview.cspSource} data: blob:`,
+    `connect-src ${webview.cspSource} https: data: blob:`,
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${scriptNonce}' ${webview.cspSource}`,
   ].join('; ');

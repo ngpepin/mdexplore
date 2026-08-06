@@ -68645,10 +68645,12 @@ var require_webview = __commonJS({
       const highlightStyle = resourceUri(webview, context, "media", "vendor", "highlight.css");
       const mermaidScript = resourceUri(webview, context, "media", "vendor", "mermaid.min.js");
       const mathJaxScript = resourceUri(webview, context, "media", "vendor", "tex-svg.js");
+      const html2PdfScript = resourceUri(webview, context, "media", "vendor", "html2pdf.bundle.min.js");
       const csp = [
         "default-src 'none'",
-        `img-src ${webview.cspSource} https: data:`,
-        `font-src ${webview.cspSource} data:`,
+        `img-src ${webview.cspSource} https: data: blob:`,
+        `font-src ${webview.cspSource} data: blob:`,
+        `connect-src ${webview.cspSource} https: data: blob:`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
         `script-src 'nonce-${scriptNonce}' ${webview.cspSource}`
       ].join("; ");
@@ -68676,6 +68678,7 @@ var require_webview = __commonJS({
   </script>
   <script nonce="${scriptNonce}" src="${mermaidScript}"></script>
   <script nonce="${scriptNonce}" src="${mathJaxScript}"></script>
+  <script nonce="${scriptNonce}" src="${html2PdfScript}"></script>
   <title>mdExt</title>
 </head>
 <body>
@@ -68752,6 +68755,9 @@ var require_previewCoordinator = __commonJS({
       isMarkdownPath: isMarkdownHref,
       resolveRelativeFile
     } = require_utils();
+    var PDF_SAVE_TIMEOUT_BASE_MS = 15e3;
+    var PDF_SAVE_TIMEOUT_PER_CHUNK_MS = 300;
+    var PDF_SAVE_TIMEOUT_MAX_MS = 18e4;
     function entriesSignature(entries) {
       return JSON.stringify(normalizeHighlightEntries(entries));
     }
@@ -68765,6 +68771,8 @@ var require_previewCoordinator = __commonJS({
         this.anchorLineByUri = /* @__PURE__ */ new Map();
         this.renderGeneration = /* @__PURE__ */ new WeakMap();
         this.debounceTimers = /* @__PURE__ */ new Map();
+        this.pendingPdfSaves = /* @__PURE__ */ new Map();
+        this.pdfSaveTimers = /* @__PURE__ */ new Map();
         this.sourceScrollSuppressions = /* @__PURE__ */ new WeakMap();
         this.scrollLeaderByUri = /* @__PURE__ */ new Map();
       }
@@ -68840,6 +68848,14 @@ var require_previewCoordinator = __commonJS({
             });
           } else if (type === "persistentHighlightsResolved") {
             await this.onPersistentHighlightsResolved(surface, message.entries);
+          } else if (type === "savePdfStart") {
+            this.beginPdfSave(surface, String(message.saveId || ""), Number(message.totalChunks));
+          } else if (type === "savePdfChunk") {
+            this.appendPdfSaveChunk(surface, String(message.saveId || ""), Number(message.index), String(message.data || ""));
+          } else if (type === "savePdfEnd") {
+            await this.finishPdfSave(surface, String(message.saveId || ""));
+          } else if (type === "savePdf") {
+            await this.savePdf(surface, String(message.data || ""));
           } else if (type === "openSource") {
             await this.openSource(surface.uri);
           } else if (type === "openLink") {
@@ -69032,6 +69048,179 @@ var require_previewCoordinator = __commonJS({
         const column = viewColumn ?? vscode2.window.activeTextEditor?.viewColumn ?? vscode2.ViewColumn.Active;
         await vscode2.commands.executeCommand("vscode.openWith", uri, "mdExt.markdownEditor", column);
       }
+      async savePdf(surface, base64Data) {
+        if (!surface?.uri || !base64Data) {
+          return;
+        }
+        const outputPath = this.pdfOutputPath(surface.uri);
+        if (!outputPath) {
+          return;
+        }
+        await this.writePdfOutput(surface, outputPath, base64Data);
+      }
+      pdfOutputPath(uri) {
+        const sourcePath = uri?.fsPath || uri?.path;
+        if (!sourcePath) {
+          return "";
+        }
+        return /\.(?:md|markdown)$/i.test(sourcePath) ? sourcePath.replace(/\.(?:md|markdown)$/i, ".pdf") : `${sourcePath}.pdf`;
+      }
+      pdfSaveKey(surface, saveId) {
+        return `${surface?.uri?.toString?.() || ""}\0${String(saveId || "")}`;
+      }
+      pdfSaveHasAllChunks(pending) {
+        if (!pending || !Number.isInteger(pending.expectedChunks) || pending.expectedChunks <= 0) {
+          return false;
+        }
+        for (let index = 0; index < pending.expectedChunks; index += 1) {
+          if (!Buffer.isBuffer(pending.chunks[index])) {
+            return false;
+          }
+        }
+        return true;
+      }
+      clearPdfSaveTimer(key) {
+        const timer = this.pdfSaveTimers.get(key);
+        if (timer) {
+          clearTimeout(timer);
+          this.pdfSaveTimers.delete(key);
+        }
+      }
+      schedulePdfSaveTimeout(surface, key, expectedChunks) {
+        this.clearPdfSaveTimer(key);
+        const timeoutMs = Math.min(
+          PDF_SAVE_TIMEOUT_MAX_MS,
+          PDF_SAVE_TIMEOUT_BASE_MS + Math.max(1, expectedChunks) * PDF_SAVE_TIMEOUT_PER_CHUNK_MS
+        );
+        const timer = setTimeout(() => {
+          const pending = this.pendingPdfSaves.get(key);
+          if (!pending || this.pdfSaveHasAllChunks(pending)) {
+            return;
+          }
+          this.pendingPdfSaves.delete(key);
+          this.pdfSaveTimers.delete(key);
+          surface.webview.postMessage({
+            type: "status",
+            message: "PDF export failed: timed out while receiving PDF data",
+            persistent: true
+          });
+        }, timeoutMs);
+        this.pdfSaveTimers.set(key, timer);
+      }
+      base64ChunkToBytes(base64Chunk) {
+        const payload = String(base64Chunk || "");
+        if (!payload) {
+          return null;
+        }
+        try {
+          const bytes = Buffer.from(payload, "base64");
+          return bytes.length ? bytes : null;
+        } catch {
+          return null;
+        }
+      }
+      beginPdfSave(surface, saveId, totalChunks) {
+        if (!surface?.uri || !saveId) {
+          return;
+        }
+        const key = this.pdfSaveKey(surface, saveId);
+        this.pendingPdfSaves.delete(key);
+        this.clearPdfSaveTimer(key);
+        const expectedChunks = Math.max(1, Math.floor(Number(totalChunks) || 0));
+        this.pendingPdfSaves.set(key, {
+          outputPath: this.pdfOutputPath(surface.uri),
+          chunks: new Array(expectedChunks),
+          expectedChunks,
+          ended: false
+        });
+        this.schedulePdfSaveTimeout(surface, key, expectedChunks);
+      }
+      appendPdfSaveChunk(surface, saveId, index, chunkData) {
+        const key = this.pdfSaveKey(surface, saveId);
+        const pending = this.pendingPdfSaves.get(key);
+        if (!pending) {
+          return;
+        }
+        const safeIndex = Math.floor(Number(index));
+        if (safeIndex < 0 || safeIndex >= pending.expectedChunks) {
+          return;
+        }
+        const bytes = this.base64ChunkToBytes(chunkData);
+        if (!bytes) {
+          return;
+        }
+        pending.chunks[safeIndex] = bytes;
+        if (pending.ended && this.pdfSaveHasAllChunks(pending)) {
+          void this.finalizePendingPdfSave(surface, key, pending);
+        }
+      }
+      async finishPdfSave(surface, saveId) {
+        const key = this.pdfSaveKey(surface, saveId);
+        const pending = this.pendingPdfSaves.get(key);
+        if (!surface?.uri || !pending?.outputPath) {
+          return;
+        }
+        pending.ended = true;
+        if (!this.pdfSaveHasAllChunks(pending)) {
+          return;
+        }
+        await this.finalizePendingPdfSave(surface, key, pending);
+      }
+      async finalizePendingPdfSave(surface, key, pending) {
+        if (!surface?.uri || !pending?.outputPath) {
+          this.pendingPdfSaves.delete(key);
+          this.clearPdfSaveTimer(key);
+          return;
+        }
+        if (!this.pdfSaveHasAllChunks(pending)) {
+          surface.webview.postMessage({
+            type: "status",
+            message: "PDF export failed: incomplete PDF payload",
+            persistent: true
+          });
+          return;
+        }
+        this.pendingPdfSaves.delete(key);
+        this.clearPdfSaveTimer(key);
+        await this.writePdfOutputBytes(surface, pending.outputPath, Buffer.concat(pending.chunks));
+      }
+      async writePdfOutput(surface, outputPath, base64Data) {
+        if (!outputPath || !base64Data) {
+          return;
+        }
+        const bytes = this.base64ChunkToBytes(base64Data);
+        if (!bytes) {
+          surface.webview.postMessage({
+            type: "status",
+            message: "PDF export failed: empty PDF payload",
+            persistent: true
+          });
+          return;
+        }
+        await this.writePdfOutputBytes(surface, outputPath, bytes);
+      }
+      async writePdfOutputBytes(surface, outputPath, bytes) {
+        if (!outputPath || !bytes) {
+          return;
+        }
+        const sourcePath = surface.uri.fsPath || surface.uri.path;
+        if (!sourcePath) {
+          return;
+        }
+        try {
+          await vscode2.workspace.fs.writeFile(vscode2.Uri.file(outputPath), bytes);
+          surface.webview.postMessage({
+            type: "status",
+            message: `PDF saved: ${path.basename(outputPath)}`
+          });
+        } catch (error) {
+          surface.webview.postMessage({
+            type: "status",
+            message: `PDF export failed: ${error?.message || error}`,
+            persistent: true
+          });
+        }
+      }
       async openSource(uri) {
         if (!uri) {
           return;
@@ -69093,6 +69282,11 @@ var require_previewCoordinator = __commonJS({
           clearTimeout(timer);
         }
         this.debounceTimers.clear();
+        for (const timer of this.pdfSaveTimers.values()) {
+          clearTimeout(timer);
+        }
+        this.pdfSaveTimers.clear();
+        this.pendingPdfSaves.clear();
       }
       matchingSurfaces(uri) {
         const key = uri?.toString();

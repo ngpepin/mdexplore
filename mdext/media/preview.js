@@ -25,6 +25,16 @@ const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR = 'rgba(225, 214, 255, 0.76)'
 const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR = '#170534';
 const PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR = 'rgba(112, 90, 188, 0.92)';
 const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = 'rgba(154, 132, 220, 0.96)';
+const PDF_SAVE_RAW_CHUNK_BYTES = 48 * 1024;
+const PDF_SAVE_YIELD_CHUNK_INTERVAL = 6;
+const PDF_PAGE_WIDTH_IN = 8.5;
+const PDF_PAGE_HEIGHT_IN = 11;
+const PDF_MARGIN_TOP_IN = 0.55;
+const PDF_MARGIN_RIGHT_IN = 0.6;
+const PDF_MARGIN_BOTTOM_IN = 0.65;
+const PDF_MARGIN_LEFT_IN = 0.6;
+const CSS_PX_PER_IN = 96;
+const PDF_MIN_DIAGRAM_FONT_PT = 4;
 
 let renderRevision = 0;
 let mermaidConfigured = false;
@@ -36,6 +46,7 @@ let searchInputTimer = null;
 let selectionRefreshTimer = null;
 let searchBarVisible = false;
 let previewFontSize = Number(vscode.getState()?.previewFontSize) || null;
+let nextPdfSaveId = 0;
 let currentPersistentHighlights = [];
 let currentSearchState = {
   query: '',
@@ -150,21 +161,397 @@ async function waitForPdfAssets() {
   }
 }
 
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(String(reader.result || '')));
+    reader.addEventListener('error', () => reject(reader.error || new Error('Failed to read blob')));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function imageNaturalSize(image) {
+  const width = Math.max(1, Number(image?.naturalWidth) || Number(image?.width) || 0);
+  const height = Math.max(1, Number(image?.naturalHeight) || Number(image?.height) || 0);
+  return { width, height };
+}
+
+async function imageElementToDataUrl(image) {
+  const { width, height } = imageNaturalSize(image);
+  if (!(width > 0 && height > 0)) {
+    return '';
   }
-  return btoa(binary);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return '';
+  }
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL('image/png');
+}
+
+async function imageSourceToDataUrl(image, source) {
+  const rawSource = String(source || '').trim();
+  if (!rawSource || rawSource.toLowerCase().startsWith('data:')) {
+    return rawSource;
+  }
+
+  try {
+    const response = await fetch(rawSource);
+    if (response.ok) {
+      return await blobToDataUrl(await response.blob());
+    }
+  } catch {
+    // Fall through to canvas extraction from the already-loaded preview image.
+  }
+
+  try {
+    return await imageElementToDataUrl(image);
+  } catch {
+    return '';
+  }
+}
+
+async function inlinePdfExportImages() {
+  const images = Array.from(content.querySelectorAll('img'));
+  const replacements = [];
+  for (const image of images) {
+    const attributeSource = String(image.getAttribute('src') || '').trim();
+    const absoluteSource = String(image.currentSrc || image.src || '').trim();
+    const source = attributeSource || absoluteSource;
+    if (!source || source.toLowerCase().startsWith('data:')) {
+      continue;
+    }
+    const dataUrl = await imageSourceToDataUrl(image, source);
+    if (!dataUrl) {
+      continue;
+    }
+    replacements.push({ image, source });
+    image.setAttribute('src', dataUrl);
+    image.src = dataUrl;
+    try {
+      await image.decode?.();
+    } catch {
+      // Data-URL decode failures should not abort PDF export after src replacement.
+    }
+  }
+  return replacements;
+}
+
+function restorePdfExportImages(replacements) {
+  if (!Array.isArray(replacements)) {
+    return;
+  }
+  for (const item of replacements) {
+    const image = item?.image;
+    const source = String(item?.source || '');
+    if (!(image instanceof HTMLImageElement) || !source) {
+      continue;
+    }
+    image.setAttribute('src', source);
+    image.src = source;
+  }
+}
+
+function parseCssPixels(value) {
+  const parsed = Number.parseFloat(String(value || '').replace(/px$/i, '').trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function intrinsicSvgSizeForPdf(svg) {
+  if (!(svg instanceof SVGElement)) {
+    return { width: 0, height: 0 };
+  }
+  const viewBox = String(svg.getAttribute('viewBox') || '').trim();
+  if (viewBox) {
+    const parts = viewBox.split(/[\s,]+/).map((part) => Number.parseFloat(part));
+    if (parts.length === 4 && parts.every((value) => Number.isFinite(value))) {
+      const width = Math.abs(parts[2]);
+      const height = Math.abs(parts[3]);
+      if (width > 0 && height > 0) {
+        return { width, height };
+      }
+    }
+  }
+  const width = parseCssPixels(svg.getAttribute('width'));
+  const height = parseCssPixels(svg.getAttribute('height'));
+  if (width > 0 && height > 0) {
+    return { width, height };
+  }
+  try {
+    const box = svg.getBBox();
+    if (box && box.width > 0 && box.height > 0) {
+      return { width: box.width, height: box.height };
+    }
+  } catch {
+    // Ignore SVG bbox failures and fall back to the live box below.
+  }
+  const rect = svg.getBoundingClientRect();
+  return {
+    width: Math.max(0, rect.width),
+    height: Math.max(0, rect.height),
+  };
+}
+
+function maxSvgFontPxForPdf(shell) {
+  if (!(shell instanceof HTMLElement)) {
+    return 12;
+  }
+  let maxFontPx = 0;
+  for (const node of Array.from(shell.querySelectorAll('svg text, svg tspan, svg foreignObject, svg foreignObject *'))) {
+    if (!(node instanceof Element)) {
+      continue;
+    }
+    const rawFont = node.getAttribute('font-size')
+      || ((node instanceof HTMLElement || node instanceof SVGElement) ? getComputedStyle(node).fontSize : '');
+    const fontPx = parseCssPixels(rawFont);
+    if (fontPx > maxFontPx) {
+      maxFontPx = fontPx;
+    }
+  }
+  return Math.max(12, maxFontPx);
+}
+
+function printablePdfSizePx() {
+  return {
+    width: Math.max(1, Math.round((PDF_PAGE_WIDTH_IN - PDF_MARGIN_LEFT_IN - PDF_MARGIN_RIGHT_IN) * CSS_PX_PER_IN)),
+    height: Math.max(1, Math.round((PDF_PAGE_HEIGHT_IN - PDF_MARGIN_TOP_IN - PDF_MARGIN_BOTTOM_IN) * CSS_PX_PER_IN)),
+  };
+}
+
+function restoreStyleAttribute(element, styleText) {
+  if (!(element instanceof Element)) {
+    return;
+  }
+  if (styleText === null) {
+    element.removeAttribute('style');
+    return;
+  }
+  element.setAttribute('style', styleText);
+}
+
+function prepareDiagramLayoutForPdf() {
+  const shells = Array.from(content.querySelectorAll('.diagram-shell'));
+  const printable = printablePdfSizePx();
+  const minReadableFontPx = PDF_MIN_DIAGRAM_FONT_PT * (4 / 3);
+  const restoreEntries = [];
+  const contentTop = (content.getBoundingClientRect().top + window.scrollY) || 0;
+
+  for (const shell of shells) {
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+    const viewport = shell.querySelector('.diagram-viewport');
+    const canvas = shell.querySelector('.diagram-canvas');
+    const svg = shell.querySelector('.diagram-canvas svg');
+    if (!(viewport instanceof HTMLElement) || !(canvas instanceof HTMLElement) || !(svg instanceof SVGElement)) {
+      continue;
+    }
+
+    restoreEntries.push({
+      shell,
+      shellClassName: shell.className,
+      shellStyle: shell.getAttribute('style'),
+      viewport,
+      viewportStyle: viewport.getAttribute('style'),
+      canvas,
+      canvasStyle: canvas.getAttribute('style'),
+      svg,
+      svgStyle: svg.getAttribute('style'),
+    });
+
+    const size = intrinsicSvgSizeForPdf(svg);
+    if (!(size.width > 0 && size.height > 0)) {
+      continue;
+    }
+
+    const widthScale = Math.min(1, printable.width / size.width);
+    const pageFitScale = Math.min(widthScale, printable.height / size.height);
+    const fontPx = maxSvgFontPxForPdf(shell);
+    const fitFontPx = pageFitScale * fontPx;
+    const keepOnOnePage = (size.height * widthScale) <= printable.height || fitFontPx >= minReadableFontPx || pageFitScale >= 0.42;
+    const chosenScale = keepOnOnePage ? pageFitScale : widthScale;
+    const diagramWidth = Math.max(1, Math.round(size.width * chosenScale));
+    const diagramHeight = Math.max(1, Math.round(size.height * chosenScale));
+    const relativeTop = Math.max(0, (shell.getBoundingClientRect().top + window.scrollY) - contentTop);
+    const pageOffset = relativeTop % printable.height;
+    const remaining = Math.max(0, printable.height - pageOffset);
+    const shouldBreakBefore = keepOnOnePage && pageOffset > 1 && diagramHeight > (remaining + 1);
+
+    shell.classList.toggle('mdext-pdf-allow-break', !keepOnOnePage);
+    shell.classList.toggle('mdext-pdf-break-before', shouldBreakBefore);
+    shell.style.setProperty('--mdext-print-section-width', `${printable.width}px`);
+    shell.style.setProperty('--mdext-print-diagram-width', `${diagramWidth}px`);
+    shell.style.setProperty('--mdext-print-diagram-max-width', `${diagramWidth}px`);
+    if (keepOnOnePage) {
+      shell.style.setProperty('--mdext-print-diagram-height', `${diagramHeight}px`);
+      shell.style.setProperty('--mdext-print-diagram-max-height', `${diagramHeight}px`);
+    } else {
+      shell.style.removeProperty('--mdext-print-diagram-height');
+      shell.style.removeProperty('--mdext-print-diagram-max-height');
+    }
+
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+    viewport.style.setProperty('overflow', keepOnOnePage ? 'hidden' : 'visible', 'important');
+    viewport.style.setProperty('max-height', 'none', 'important');
+    viewport.style.setProperty('scrollbar-width', 'none', 'important');
+    viewport.style.setProperty('-ms-overflow-style', 'none', 'important');
+
+    canvas.style.setProperty('width', 'auto', 'important');
+    canvas.style.setProperty('min-width', '0', 'important');
+    svg.style.removeProperty('transform');
+    svg.style.setProperty('display', 'block', 'important');
+    svg.style.setProperty('margin', '0 auto', 'important');
+    svg.style.setProperty('width', 'var(--mdext-print-diagram-width, auto)', 'important');
+    svg.style.setProperty('max-width', 'var(--mdext-print-diagram-max-width, 100%)', 'important');
+    if (keepOnOnePage) {
+      svg.style.setProperty('height', 'var(--mdext-print-diagram-height, auto)', 'important');
+      svg.style.setProperty('max-height', 'var(--mdext-print-diagram-max-height, none)', 'important');
+    } else {
+      svg.style.removeProperty('height');
+      svg.style.removeProperty('max-height');
+    }
+  }
+
+  return restoreEntries;
+}
+
+function restoreDiagramLayoutAfterPdfExport(restoreEntries) {
+  if (!Array.isArray(restoreEntries)) {
+    return;
+  }
+  for (const entry of restoreEntries) {
+    if (!(entry?.shell instanceof HTMLElement)) {
+      continue;
+    }
+    entry.shell.className = entry.shellClassName;
+    restoreStyleAttribute(entry.shell, entry.shellStyle);
+    restoreStyleAttribute(entry.viewport, entry.viewportStyle);
+    restoreStyleAttribute(entry.canvas, entry.canvasStyle);
+    restoreStyleAttribute(entry.svg, entry.svgStyle);
+  }
+}
+
+function byteSliceToBinaryString(bytes, start, end) {
+  const clampStart = Math.max(0, Math.floor(Number(start) || 0));
+  const clampEnd = Math.max(clampStart, Math.min(bytes.length, Math.floor(Number(end) || bytes.length)));
+  const charChunk = 0x8000;
+  let binary = '';
+  for (let offset = clampStart; offset < clampEnd; offset += charChunk) {
+    const nextOffset = Math.min(clampEnd, offset + charChunk);
+    binary += String.fromCharCode(...bytes.subarray(offset, nextOffset));
+  }
+  return binary;
+}
+
+async function normalizePdfArrayBuffer(value) {
+  if (value instanceof ArrayBuffer) {
+    return value;
+  }
+  if (ArrayBuffer.isView(value)) {
+    const view = value;
+    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+  }
+  if (value && typeof value.arrayBuffer === 'function') {
+    return value.arrayBuffer();
+  }
+  throw new Error('PDF renderer returned an unsupported output type');
+}
+
+async function postVsCodeMessage(message) {
+  const delivered = await vscode.postMessage(message);
+  if (delivered === false) {
+    throw new Error('PDF export message delivery failed');
+  }
+}
+
+async function postPdfSavePayloadFromArrayBuffer(bufferLike) {
+  const arrayBuffer = await normalizePdfArrayBuffer(bufferLike);
+  const bytes = new Uint8Array(arrayBuffer);
+  if (!bytes.length) {
+    throw new Error('PDF renderer returned empty output');
+  }
+
+  const saveId = `pdf-${Date.now().toString(16)}-${(nextPdfSaveId += 1).toString(16)}`;
+  const totalChunks = Math.max(1, Math.ceil(bytes.length / PDF_SAVE_RAW_CHUNK_BYTES));
+  await postVsCodeMessage({ type: 'savePdfStart', saveId, totalChunks });
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * PDF_SAVE_RAW_CHUNK_BYTES;
+    const end = Math.min(bytes.length, start + PDF_SAVE_RAW_CHUNK_BYTES);
+    await postVsCodeMessage({
+      type: 'savePdfChunk',
+      saveId,
+      index,
+      data: btoa(byteSliceToBinaryString(bytes, start, end)),
+    });
+    if ((index + 1) % PDF_SAVE_YIELD_CHUNK_INTERVAL === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  await postVsCodeMessage({ type: 'savePdfEnd', saveId });
+}
+
+function resolvePdfFactory() {
+  if (typeof window.html2pdf === 'function') {
+    return window.html2pdf;
+  }
+  if (window.html2pdf && typeof window.html2pdf.default === 'function') {
+    return window.html2pdf.default;
+  }
+  if (window.html2pdf && typeof window.html2pdf.html2pdf === 'function') {
+    return window.html2pdf.html2pdf;
+  }
+  return null;
+}
+
+async function renderPdfArrayBuffer(pdfFactory) {
+  const worker = pdfFactory()
+    .set({
+      margin: [0.55, 0.6, 0.65, 0.6],
+      pagebreak: { mode: ['css', 'legacy'] },
+      html2canvas: {
+        scale: 1.5,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#ffffff',
+        logging: false,
+      },
+      jsPDF: {
+        unit: 'in',
+        format: 'letter',
+        orientation: 'portrait',
+        compress: true,
+      },
+    })
+    .from(content)
+    .toPdf();
+
+  if (typeof worker.outputPdf === 'function') {
+    return normalizePdfArrayBuffer(await worker.outputPdf('arraybuffer'));
+  }
+  if (typeof worker.output === 'function') {
+    return normalizePdfArrayBuffer(await worker.output('arraybuffer'));
+  }
+  if (typeof worker.get === 'function') {
+    const pdfDocument = await worker.get('pdf');
+    if (pdfDocument && typeof pdfDocument.output === 'function') {
+      return normalizePdfArrayBuffer(pdfDocument.output('arraybuffer'));
+    }
+  }
+  throw new Error('PDF renderer output API is unavailable');
 }
 
 async function createPdfFromPreview() {
   if (!pdfButton || pdfButton.disabled) {
     return;
   }
-  if (typeof window.html2pdf !== 'function') {
+  const pdfFactory = resolvePdfFactory();
+  if (!pdfFactory) {
     setStatus('PDF renderer is unavailable', true);
     return;
   }
@@ -172,41 +559,24 @@ async function createPdfFromPreview() {
   pdfButton.disabled = true;
   setStatus('Preparing PDF…', true);
   const previousScrollY = window.scrollY;
+  let imageRestoreState = [];
+  let diagramLayoutRestoreState = [];
   document.documentElement.classList.add('mdext-pdf-export-mode');
   document.body.classList.add('mdext-pdf-export-mode');
 
   try {
     await waitForPdfAssets();
+    diagramLayoutRestoreState = prepareDiagramLayoutForPdf();
+    imageRestoreState = await inlinePdfExportImages();
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const pdfBuffer = await window.html2pdf()
-      .set({
-        margin: [0.55, 0.6, 0.65, 0.6],
-        pagebreak: { mode: ['css', 'legacy'] },
-        html2canvas: {
-          scale: 1.5,
-          useCORS: true,
-          allowTaint: false,
-          backgroundColor: '#ffffff',
-          logging: false,
-        },
-        jsPDF: {
-          unit: 'in',
-          format: 'letter',
-          orientation: 'portrait',
-          compress: true,
-        },
-      })
-      .from(content)
-      .toPdf()
-      .outputPdf('arraybuffer');
+    const pdfBuffer = await renderPdfArrayBuffer(pdfFactory);
     setStatus('Saving PDF…', true);
-    vscode.postMessage({
-      type: 'savePdf',
-      data: arrayBufferToBase64(pdfBuffer),
-    });
+    await postPdfSavePayloadFromArrayBuffer(pdfBuffer);
   } catch (error) {
     setStatus(`PDF export failed: ${error?.message || error}`, true);
   } finally {
+    restorePdfExportImages(imageRestoreState);
+    restoreDiagramLayoutAfterPdfExport(diagramLayoutRestoreState);
     document.documentElement.classList.remove('mdext-pdf-export-mode');
     document.body.classList.remove('mdext-pdf-export-mode');
     window.scrollTo({ top: previousScrollY, behavior: 'auto' });
