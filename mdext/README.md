@@ -18,6 +18,7 @@
 - **PlantUML:** local SVG rendering through Java and the bundled PlantUML jar.
 - **mdexplore-style callouts:** NOTE, TIP, IMPORTANT, WARNING, and CAUTION blocks.
 - **Images and links:** relative images are resolved through VS Code webview resource URIs; relative Markdown links can reopen in mdExt.
+- **PDF creation:** the preview header includes a `PDF` button that waits for fonts and images, switches the rendered preview to PDF-safe layout, renders the preview in the webview, and writes `<filename>.pdf` beside the Markdown source without relying on VS Code's print dialog.
 - **Source navigation:** double-click rendered content with source-line metadata to reveal the corresponding source line.
 
 ## Development

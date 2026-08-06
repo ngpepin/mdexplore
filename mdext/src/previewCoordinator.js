@@ -115,6 +115,8 @@ class PreviewCoordinator {
         });
       } else if (type === 'persistentHighlightsResolved') {
         await this.onPersistentHighlightsResolved(surface, message.entries);
+      } else if (type === 'savePdf') {
+        await this.savePdf(surface, String(message.data || ''));
       } else if (type === 'openSource') {
         await this.openSource(surface.uri);
       } else if (type === 'openLink') {
@@ -326,6 +328,33 @@ class PreviewCoordinator {
     }
     const column = viewColumn ?? vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active;
     await vscode.commands.executeCommand('vscode.openWith', uri, 'mdExt.markdownEditor', column);
+  }
+
+  async savePdf(surface, base64Data) {
+    if (!surface?.uri || !base64Data) {
+      return;
+    }
+    const sourcePath = surface.uri.fsPath || surface.uri.path;
+    if (!sourcePath) {
+      return;
+    }
+    const outputPath = /\.(?:md|markdown)$/i.test(sourcePath)
+      ? sourcePath.replace(/\.(?:md|markdown)$/i, '.pdf')
+      : `${sourcePath}.pdf`;
+    try {
+      const bytes = Buffer.from(base64Data, 'base64');
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(outputPath), bytes);
+      surface.webview.postMessage({
+        type: 'status',
+        message: `PDF saved: ${path.basename(outputPath)}`,
+      });
+    } catch (error) {
+      surface.webview.postMessage({
+        type: 'status',
+        message: `PDF export failed: ${error?.message || error}`,
+        persistent: true,
+      });
+    }
   }
 
   async openSource(uri) {

@@ -6,7 +6,7 @@ const titleNode = document.getElementById('document-title');
 const pathNode = document.getElementById('document-path');
 const statusNode = document.getElementById('render-status');
 const refreshButton = document.getElementById('refresh-button');
-const openSourceButton = document.getElementById('open-source-button');
+const pdfButton = document.getElementById('pdf-button');
 const searchToggleButton = document.getElementById('search-toggle-button');
 const searchBar = document.getElementById('preview-searchbar');
 const searchInput = document.getElementById('preview-search-input');
@@ -125,6 +125,92 @@ function setStatus(message, persistent = false) {
   }
   if (message && !persistent) {
     statusTimer = setTimeout(() => statusNode.classList.remove('visible'), 1600);
+  }
+}
+
+async function waitForPdfAssets() {
+  try {
+    if (document.fonts?.ready) {
+      await document.fonts.ready;
+    }
+  } catch {
+    // Continue with the available fonts rather than blocking PDF creation.
+  }
+
+  const pendingImages = Array.from(content.querySelectorAll('img'))
+    .filter((image) => !image.complete)
+    .map((image) => new Promise((resolve) => {
+      const done = () => resolve();
+      image.addEventListener('load', done, { once: true });
+      image.addEventListener('error', done, { once: true });
+      setTimeout(done, 1500);
+    }));
+  if (pendingImages.length) {
+    await Promise.all(pendingImages);
+  }
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function createPdfFromPreview() {
+  if (!pdfButton || pdfButton.disabled) {
+    return;
+  }
+  if (typeof window.html2pdf !== 'function') {
+    setStatus('PDF renderer is unavailable', true);
+    return;
+  }
+
+  pdfButton.disabled = true;
+  setStatus('Preparing PDF…', true);
+  const previousScrollY = window.scrollY;
+  document.documentElement.classList.add('mdext-pdf-export-mode');
+  document.body.classList.add('mdext-pdf-export-mode');
+
+  try {
+    await waitForPdfAssets();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const pdfBuffer = await window.html2pdf()
+      .set({
+        margin: [0.55, 0.6, 0.65, 0.6],
+        pagebreak: { mode: ['css', 'legacy'] },
+        html2canvas: {
+          scale: 1.5,
+          useCORS: true,
+          allowTaint: false,
+          backgroundColor: '#ffffff',
+          logging: false,
+        },
+        jsPDF: {
+          unit: 'in',
+          format: 'letter',
+          orientation: 'portrait',
+          compress: true,
+        },
+      })
+      .from(content)
+      .toPdf()
+      .outputPdf('arraybuffer');
+    setStatus('Saving PDF…', true);
+    vscode.postMessage({
+      type: 'savePdf',
+      data: arrayBufferToBase64(pdfBuffer),
+    });
+  } catch (error) {
+    setStatus(`PDF export failed: ${error?.message || error}`, true);
+  } finally {
+    document.documentElement.classList.remove('mdext-pdf-export-mode');
+    document.body.classList.remove('mdext-pdf-export-mode');
+    window.scrollTo({ top: previousScrollY, behavior: 'auto' });
+    pdfButton.disabled = false;
   }
 }
 
@@ -833,9 +919,8 @@ contextHighlightImportantButton?.addEventListener('click', () => {
 });
 
 refreshButton.addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
-openSourceButton.addEventListener('click', () => {
-  reportVisibleLine(true);
-  vscode.postMessage({ type: 'openSource' });
+pdfButton?.addEventListener('click', () => {
+  createPdfFromPreview();
 });
 
 compatHighlights()?.installMarkerOverlays?.();

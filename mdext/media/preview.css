@@ -199,6 +199,143 @@ button:disabled { opacity: 0.5; cursor: default; }
 #render-status { position: fixed; right: 0.8rem; bottom: 0.8rem; z-index: 50; max-width: min(520px, calc(100vw - 1.6rem)); padding: 0.35rem 0.65rem; opacity: 0; pointer-events: none; color: var(--vscode-statusBar-foreground); background: var(--vscode-statusBar-background); border-radius: 4px; box-shadow: 0 3px 16px rgba(0,0,0,.25); transition: opacity 120ms ease; }
 #render-status.visible { opacity: 1; }
 
+html.mdext-pdf-export-mode,
+body.mdext-pdf-export-mode {
+  color-scheme: light;
+  background: #fff !important;
+  color: #111 !important;
+}
+body.mdext-pdf-export-mode {
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.mdext-pdf-export-mode .markdown-body {
+  width: auto;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  background: #fff !important;
+  color: #111 !important;
+}
+.mdext-pdf-export-mode .diagram-toolbar,
+.mdext-pdf-export-mode .diagram-notice,
+.mdext-pdf-export-mode .mdexplore-scroll-hit-overlay,
+.mdext-pdf-export-mode .mdexplore-scroll-highlight-overlay {
+  display: none !important;
+}
+.mdext-pdf-export-mode .diagram-shell {
+  overflow: visible;
+  background: #fff !important;
+}
+.mdext-pdf-export-mode .diagram-viewport {
+  max-height: none;
+  overflow: visible;
+}
+.mdext-pdf-export-mode .diagram-canvas {
+  width: auto;
+  min-width: 0;
+}
+.mdext-pdf-export-mode .diagram-canvas svg,
+.mdext-pdf-export-mode .markdown-body img,
+.mdext-pdf-export-mode mjx-container {
+  max-width: 100% !important;
+}
+
+@media print {
+  @page {
+    size: auto;
+    margin: 0.55in 0.6in 0.65in;
+  }
+
+  :root,
+  html,
+  body {
+    color-scheme: light;
+    background: #fff !important;
+    color: #111 !important;
+  }
+
+  body {
+    font-size: 11pt;
+    line-height: 1.45;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .preview-header,
+  .preview-context-menu,
+  #render-status,
+  .diagram-toolbar,
+  .diagram-notice,
+  .mdexplore-scroll-hit-overlay,
+  .mdexplore-scroll-highlight-overlay {
+    display: none !important;
+  }
+
+  .markdown-body {
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .markdown-body a {
+    color: #111 !important;
+    text-decoration: underline;
+  }
+
+  .markdown-body pre,
+  .markdown-body code,
+  .markdown-body th {
+    background: #f3f4f6 !important;
+  }
+
+  .markdown-body pre {
+    overflow: visible;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .markdown-body table {
+    display: table;
+    width: 100%;
+    max-width: 100%;
+    overflow: visible;
+    table-layout: auto;
+  }
+
+  .markdown-body img,
+  .diagram-shell,
+  .diagram-canvas svg,
+  mjx-container {
+    max-width: 100% !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .diagram-shell {
+    border-color: #d1d5db;
+    overflow: visible;
+    background: #fff !important;
+  }
+
+  .diagram-viewport {
+    max-height: none;
+    overflow: visible;
+    padding: 0;
+  }
+
+  .diagram-canvas {
+    width: auto;
+    min-width: 0;
+  }
+
+  .mdext-callout {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+
 .mdexplore-scroll-hit-overlay {
   position: fixed;
   top: 0;

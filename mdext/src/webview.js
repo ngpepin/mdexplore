@@ -18,6 +18,7 @@ function getWebviewHtml(webview, context) {
   const highlightStyle = resourceUri(webview, context, 'media', 'vendor', 'highlight.css');
   const mermaidScript = resourceUri(webview, context, 'media', 'vendor', 'mermaid.min.js');
   const mathJaxScript = resourceUri(webview, context, 'media', 'vendor', 'tex-svg.js');
+  const html2PdfScript = resourceUri(webview, context, 'media', 'vendor', 'html2pdf.bundle.min.js');
   const csp = [
     "default-src 'none'",
     `img-src ${webview.cspSource} https: data:`,
@@ -50,6 +51,7 @@ function getWebviewHtml(webview, context) {
   </script>
   <script nonce="${scriptNonce}" src="${mermaidScript}"></script>
   <script nonce="${scriptNonce}" src="${mathJaxScript}"></script>
+  <script nonce="${scriptNonce}" src="${html2PdfScript}"></script>
   <title>mdExt</title>
 </head>
 <body>
@@ -66,7 +68,7 @@ function getWebviewHtml(webview, context) {
           </svg>
           <span>Search</span>
         </button>
-        <button id="open-source-button" title="Open Markdown source">Source</button>
+        <button id="pdf-button" title="Create a PDF from this preview">PDF</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
       </div>
     </div>

@@ -68692,7 +68692,7 @@ var require_webview = __commonJS({
           </svg>
           <span>Search</span>
         </button>
-        <button id="open-source-button" title="Open Markdown source">Source</button>
+        <button id="pdf-button" title="Create a PDF from this preview">PDF</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
       </div>
     </div>
