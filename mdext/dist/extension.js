@@ -68815,7 +68815,38 @@ var require_previewCoordinator = __commonJS({
           this.lastMarkdownUri = editor.document.uri;
           return editor.document.uri;
         }
+        const activeTab = vscode2.window.tabGroups?.activeTabGroup?.activeTab;
+        const tabUri = activeTab?.input?.uri;
+        if (tabUri && isMarkdownPath(tabUri.fsPath || tabUri.path)) {
+          this.lastMarkdownUri = tabUri;
+          return tabUri;
+        }
         return this.lastMarkdownUri;
+      }
+      activeBuiltInTextEditorForUri(uri) {
+        const editor = vscode2.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== "markdown" || !uri) {
+          return null;
+        }
+        return editor.document.uri.toString() === uri.toString() ? editor : null;
+      }
+      activeEditorColumn() {
+        return vscode2.window.activeTextEditor?.viewColumn ?? vscode2.window.tabGroups?.activeTabGroup?.viewColumn ?? vscode2.ViewColumn.Active;
+      }
+      previewTabForUri(uri) {
+        if (!uri) {
+          return null;
+        }
+        const key = uri.toString();
+        for (const group of vscode2.window.tabGroups?.all || []) {
+          for (const tab of group.tabs || []) {
+            const input = tab?.input;
+            if (input?.viewType === "mdExt.markdownEditor" && input?.uri?.toString() === key) {
+              return tab;
+            }
+          }
+        }
+        return null;
       }
       onActiveEditorChanged(editor) {
         if (!editor || editor.document.languageId !== "markdown") {
@@ -68935,6 +68966,14 @@ var require_previewCoordinator = __commonJS({
         if (!uri || !isMarkdownPath(uri.fsPath || uri.path)) {
           vscode2.window.showInformationMessage("Open a Markdown document before starting mdExt preview.");
           return;
+        }
+        const existingPreviewTab = this.previewTabForUri(uri);
+        if (existingPreviewTab) {
+          await vscode2.window.tabGroups.close(existingPreviewTab);
+          return;
+        }
+        if (!this.activeBuiltInTextEditorForUri(uri)) {
+          await vscode2.commands.executeCommand("vscode.openWith", uri, "default", this.activeEditorColumn());
         }
         await this.openWithMdExt(uri, vscode2.ViewColumn.Beside);
       }

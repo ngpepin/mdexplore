@@ -131,7 +131,45 @@ class PreviewCoordinator {
       this.lastMarkdownUri = editor.document.uri;
       return editor.document.uri;
     }
+
+    const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+    const tabUri = activeTab?.input?.uri;
+    if (tabUri && isMarkdownPath(tabUri.fsPath || tabUri.path)) {
+      this.lastMarkdownUri = tabUri;
+      return tabUri;
+    }
+
     return this.lastMarkdownUri;
+  }
+
+  activeBuiltInTextEditorForUri(uri) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'markdown' || !uri) {
+      return null;
+    }
+    return editor.document.uri.toString() === uri.toString() ? editor : null;
+  }
+
+  activeEditorColumn() {
+    return vscode.window.activeTextEditor?.viewColumn
+      ?? vscode.window.tabGroups?.activeTabGroup?.viewColumn
+      ?? vscode.ViewColumn.Active;
+  }
+
+  previewTabForUri(uri) {
+    if (!uri) {
+      return null;
+    }
+    const key = uri.toString();
+    for (const group of vscode.window.tabGroups?.all || []) {
+      for (const tab of group.tabs || []) {
+        const input = tab?.input;
+        if (input?.viewType === 'mdExt.markdownEditor' && input?.uri?.toString() === key) {
+          return tab;
+        }
+      }
+    }
+    return null;
   }
 
   onActiveEditorChanged(editor) {
@@ -259,6 +297,17 @@ class PreviewCoordinator {
       vscode.window.showInformationMessage('Open a Markdown document before starting mdExt preview.');
       return;
     }
+
+    const existingPreviewTab = this.previewTabForUri(uri);
+    if (existingPreviewTab) {
+      await vscode.window.tabGroups.close(existingPreviewTab);
+      return;
+    }
+
+    if (!this.activeBuiltInTextEditorForUri(uri)) {
+      await vscode.commands.executeCommand('vscode.openWith', uri, 'default', this.activeEditorColumn());
+    }
+
     await this.openWithMdExt(uri, vscode.ViewColumn.Beside);
   }
 
