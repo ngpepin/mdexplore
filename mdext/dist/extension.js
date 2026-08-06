@@ -68426,6 +68426,42 @@ var require_renderer = __commonJS({
       WARNING: ["warning", "\u26A0", "Warning"],
       CAUTION: ["caution", "\u26D4", "Caution"]
     };
+    function installDollarMath(md) {
+      md.inline.ruler.before("escape", "mdext_dollar_math", (state, silent) => {
+        const start = state.pos;
+        if (state.src[start] !== "$" || state.src[start + 1] === "$" || state.src[start - 1] === "\\") {
+          return false;
+        }
+        const first = state.src[start + 1];
+        if (!first || /\s|\d/.test(first)) {
+          return false;
+        }
+        let end = start + 1;
+        while ((end = state.src.indexOf("$", end)) >= 0) {
+          if (state.src[end - 1] === "\\") {
+            end += 1;
+            continue;
+          }
+          if (state.src[end + 1] === "$" || /\s/.test(state.src[end - 1] || "")) {
+            end += 1;
+            continue;
+          }
+          break;
+        }
+        if (end < 0) {
+          return false;
+        }
+        if (!silent) {
+          const token = state.push("mdext_math_inline", "math", 0);
+          token.content = state.src.slice(start + 1, end);
+        }
+        state.pos = end + 1;
+        return true;
+      });
+      md.renderer.rules.mdext_math_inline = (tokens, index) => {
+        return `<span class="mdext-math-inline">\\(${escapeHtml(tokens[index].content)}\\)</span>`;
+      };
+    }
     function createMarkdownRenderer() {
       const md = new MarkdownIt({
         html: true,
@@ -68444,6 +68480,7 @@ var require_renderer = __commonJS({
         }
       }).enable(["table", "strikethrough"]);
       md.use(taskLists, { enabled: true, label: true, labelAfter: true });
+      installDollarMath(md);
       return md;
     }
     function addSourceLineMetadata(md) {
@@ -68627,7 +68664,10 @@ var require_webview = __commonJS({
     window.MathJax = {
       startup: { typeset: false },
       tex: {
-        inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
+        // The Markdown renderer classifies $...$ math and emits explicit
+        // \\(...\\) delimiters. Do not let MathJax rescan ordinary currency
+        // dollar signs as TeX delimiters.
+        inlineMath: [['\\\\(', '\\\\)']],
         displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']]
       },
       svg: { fontCache: 'global', scale: 1.05 },

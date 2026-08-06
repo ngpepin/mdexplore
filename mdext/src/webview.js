@@ -38,7 +38,10 @@ function getWebviewHtml(webview, context) {
     window.MathJax = {
       startup: { typeset: false },
       tex: {
-        inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
+        // The Markdown renderer classifies $...$ math and emits explicit
+        // \\(...\\) delimiters. Do not let MathJax rescan ordinary currency
+        // dollar signs as TeX delimiters.
+        inlineMath: [['\\\\(', '\\\\)']],
         displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']]
       },
       svg: { fontCache: 'global', scale: 1.05 },
