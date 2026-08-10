@@ -26,9 +26,9 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
-    hfind.py -bcrvpos QUERY [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-w] [-e PATH] [-l] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
+    hfind.py -bcrvlposw QUERY [PATTERN ...]
 
 Notes:
   If -q/--query is omitted, the first non-switch positional argument is used as QUERY.
@@ -42,6 +42,12 @@ Notes:
   --ocr-pdf/-o enables OCR fallback for PDFs that contain little/no extractable text;
     it implies --pdf and still requires -c. The -o form may be used alone or stacked
     with other short flags (for example, -cro or -crvo).
+  --wip/-w prints each checked file as one gray full-path line, with performed
+    operations such as content reading, PDF extraction, or OCR appended.
+  --exclude/-e PATH excludes PATH and all of its descendants; repeat for multiple paths.
+    Both '-e PATH' and '-e=PATH' forms are accepted, as are the long forms.
+  Symlinks are ignored by default, including files reached through symlinked directories.
+  --links/-l allows symlink files and traversal through symlinked directories.
   --cpu-limit PERCENT dynamically throttles concurrent work to keep observed system CPU
     near/below the target (default: 90).
   --sort/-s waits for full scan and emits case-insensitively sorted results.
@@ -79,6 +85,7 @@ Examples:
 
 ANSI_YELLOW = "\033[33m"
 ANSI_BOLD_PURPLE = "\033[1;35m"
+ANSI_GRAY = "\033[90m"
 ANSI_RESET = "\033[0m"
 OSC8_OPEN = "\033]8;;"
 OSC8_CLOSE = "\a"
@@ -266,9 +273,48 @@ def _style_filepath(path: Path) -> str:
     )
 
 
+def _style_wip_filepath(path: Path, operations: list[str]) -> str:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        try:
+            resolved = path.absolute()
+        except Exception:
+            resolved = path
+    label = str(resolved)
+    if operations:
+        label += " [" + ", ".join(operations) + "]"
+    try:
+        uri = "file://" + quote(str(resolved), safe="/:-._~")
+    except Exception:
+        uri = ""
+    if not uri:
+        return f"{ANSI_GRAY}{label}{ANSI_RESET}"
+    return (
+        f"{OSC8_OPEN}{uri}{OSC8_CLOSE}"
+        f"{ANSI_GRAY}{label}{ANSI_RESET}"
+        f"{OSC8_OPEN}{OSC8_CLOSE}"
+    )
+
+
 def _parse_args(
     argv: list[str],
-) -> tuple[str, bool, bool, bool, bool, bool, bool, float, bool, bool, list[str]]:
+) -> tuple[
+    str,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    float,
+    bool,
+    bool,
+    list[str],
+    list[str],
+    bool,
+]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
 
@@ -279,10 +325,13 @@ def _parse_args(
     verbose = False
     include_pdf = False
     ocr_pdf = False
+    wip = False
     cpu_limit = _configured_cpu_limit()
     sort_results = False
     sort_case_sensitive = False
     positionals: list[str] = []
+    excluded_paths: list[str] = []
+    follow_links = False
 
     i = 0
     while i < len(argv):
@@ -322,6 +371,28 @@ def _parse_args(
         if arg == "--ocr-pdf":
             ocr_pdf = True
             include_pdf = True
+            i += 1
+            continue
+        if arg == "--wip":
+            wip = True
+            i += 1
+            continue
+        if arg == "--links":
+            follow_links = True
+            i += 1
+            continue
+        if arg == "--exclude" or arg == "-e":
+            if i + 1 >= len(argv):
+                raise _usage_error(f"error: {arg} requires one PATH")
+            excluded_paths.append(argv[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--exclude=") or arg.startswith("-e="):
+            value = arg.split("=", 1)[1]
+            if not value:
+                option = "--exclude" if arg.startswith("--exclude=") else "-e"
+                raise _usage_error(f"error: {option} requires one PATH")
+            excluded_paths.append(value)
             i += 1
             continue
         if arg == "--cpu-limit":
@@ -368,6 +439,12 @@ def _parse_args(
                     ocr_pdf = True
                     include_pdf = True
                     continue
+                if flag == "w":
+                    wip = True
+                    continue
+                if flag == "l":
+                    follow_links = True
+                    continue
                 if flag == "s":
                     sort_results = True
                     sort_case_sensitive = False
@@ -405,10 +482,40 @@ def _parse_args(
         verbose,
         include_pdf,
         ocr_pdf,
+        wip,
         cpu_limit,
         sort_results,
         sort_case_sensitive,
         positionals,
+        excluded_paths,
+        follow_links,
+    )
+
+
+def _normalized_exclude_path(raw_path: str) -> Path:
+    expanded = Path(os.path.expanduser(raw_path))
+    try:
+        return expanded.resolve(strict=False)
+    except Exception:
+        try:
+            return expanded.absolute()
+        except Exception:
+            return expanded
+
+
+def _path_is_excluded(path: Path, excluded_paths: tuple[Path, ...]) -> bool:
+    if not excluded_paths:
+        return False
+    try:
+        candidate = path.resolve(strict=False)
+    except Exception:
+        try:
+            candidate = path.absolute()
+        except Exception:
+            candidate = path
+    return any(
+        candidate == excluded or excluded in candidate.parents
+        for excluded in excluded_paths
     )
 
 
@@ -439,6 +546,88 @@ def _safe_is_file(path: Path) -> bool:
         return False
 
 
+def _pattern_static_root(pattern: str) -> Path:
+    """Return the non-glob prefix that forms this pattern's search root."""
+    pattern_path = Path(pattern)
+    if pattern_path.is_absolute():
+        current = Path(pattern_path.anchor)
+        parts = pattern_path.parts[1:]
+    else:
+        current = Path.cwd()
+        parts = pattern_path.parts
+
+    saw_magic = False
+    for part in parts:
+        if glob.has_magic(part):
+            saw_magic = True
+            break
+        current = current / part
+
+    if not saw_magic:
+        current = current.parent
+    return current
+
+
+def _path_uses_symlink(path: Path, boundary: Path | None = None) -> bool:
+    """Return whether path uses a symlink at or below the pattern search root."""
+    try:
+        candidate = path.absolute()
+    except Exception:
+        candidate = path
+    if boundary is None:
+        boundary = candidate.parent
+    else:
+        try:
+            boundary = boundary.absolute()
+        except Exception:
+            pass
+
+    for part in (candidate, *candidate.parents):
+        try:
+            if part.is_symlink():
+                return True
+        except OSError:
+            pass
+        if part == boundary:
+            break
+    return False
+
+
+def _iter_glob_matches(pattern: str, *, recursive: bool, follow_links: bool):
+    """Yield glob matches without traversing symlink directories unless requested."""
+    if follow_links:
+        yield from glob.iglob(pattern, recursive=recursive)
+        return
+
+    boundary = _pattern_static_root(pattern)
+    if _path_uses_symlink(boundary, boundary):
+        return
+
+    if not recursive:
+        iterator = glob.iglob(pattern, recursive=False)
+    else:
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute():
+            anchor = Path(pattern_path.anchor)
+            relative_pattern = pattern[len(pattern_path.anchor) :].lstrip(os.sep)
+        else:
+            anchor = Path(".")
+            relative_pattern = pattern
+        try:
+            iterator = (str(item) for item in anchor.glob(relative_pattern))
+        except (OSError, ValueError):
+            return
+
+    try:
+        for item in iterator:
+            path = Path(item)
+            if _path_uses_symlink(path, boundary):
+                continue
+            yield str(path)
+    except (OSError, ValueError):
+        return
+
+
 def _safe_resolved_key(path: Path) -> str:
     """Build a stable dedupe key without failing on unreadable symlink targets."""
     try:
@@ -450,8 +639,13 @@ def _safe_resolved_key(path: Path) -> str:
             return str(path)
 
 
-def _iter_candidate_paths(patterns: list[str], recursive: bool):
-    """Yield candidate files progressively as globbing discovers them."""
+def _iter_candidate_paths(
+    patterns: list[str],
+    recursive: bool,
+    excluded_paths: tuple[Path, ...] = (),
+    follow_links: bool = False,
+):
+    """Yield candidates progressively, skipping exclusions and symlinks by default."""
     seen: set[str] = set()
 
     for raw in patterns:
@@ -463,10 +657,16 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
         if recursive:
             for raw_pattern in raw_patterns:
                 recursive_pattern = _recursive_pattern(raw_pattern)
-                for item in glob.iglob(recursive_pattern, recursive=True):
+                for item in _iter_glob_matches(
+                    recursive_pattern,
+                    recursive=True,
+                    follow_links=follow_links,
+                ):
                     matched_any = True
                     path = Path(item)
                     if not _safe_is_file(path):
+                        continue
+                    if _path_is_excluded(path, excluded_paths):
                         continue
                     key = _safe_resolved_key(path)
                     if key in seen:
@@ -476,10 +676,16 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
 
             if not matched_any:
                 for raw_pattern in raw_patterns:
-                    for item in glob.iglob(raw_pattern, recursive=True):
+                    for item in _iter_glob_matches(
+                        raw_pattern,
+                        recursive=True,
+                        follow_links=follow_links,
+                    ):
                         matched_any = True
                         path = Path(item)
                         if not _safe_is_file(path):
+                            continue
+                        if _path_is_excluded(path, excluded_paths):
                             continue
                         key = _safe_resolved_key(path)
                         if key in seen:
@@ -488,10 +694,16 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
                         yield path
         else:
             for raw_pattern in raw_patterns:
-                for item in glob.iglob(raw_pattern, recursive=False):
+                for item in _iter_glob_matches(
+                    raw_pattern,
+                    recursive=False,
+                    follow_links=follow_links,
+                ):
                     matched_any = True
                     path = Path(item)
                     if not _safe_is_file(path):
+                        continue
+                    if _path_is_excluded(path, excluded_paths):
                         continue
                     key = _safe_resolved_key(path)
                     if key in seen:
@@ -503,7 +715,11 @@ def _iter_candidate_paths(patterns: list[str], recursive: bool):
         # preserve them as literals too.
         if not matched_any and os.path.exists(raw):
             path = Path(raw)
-            if _safe_is_file(path):
+            if (
+                _safe_is_file(path)
+                and (follow_links or not _path_uses_symlink(path, path.parent))
+                and not _path_is_excluded(path, excluded_paths)
+            ):
                 key = _safe_resolved_key(path)
                 if key not in seen:
                     seen.add(key)
@@ -609,9 +825,16 @@ def _ocr_pdf_text_if_possible(path: Path) -> str:
         return ""
 
 
-def _read_pdf_text_if_possible(path: Path, *, ocr_pdf: bool = False) -> str | None:
+def _read_pdf_text_if_possible(
+    path: Path,
+    *,
+    ocr_pdf: bool = False,
+    operations: list[str] | None = None,
+) -> str | None:
     best_text = ""
     page_count = 1
+    if operations is not None:
+        operations.append("PDF text")
     scan_like_page_count = 0
     try:
         from pypdf import PdfReader
@@ -670,6 +893,8 @@ def _read_pdf_text_if_possible(path: Path, *, ocr_pdf: bool = False) -> str | No
         and scan_like_page_count >= scan_page_threshold
     )
     if ocr_pdf and clearly_scan_like:
+        if operations is not None:
+            operations.append("OCR")
         ocr_text = _ocr_pdf_text_if_possible(path)
         if ocr_text:
             return ocr_text
@@ -904,23 +1129,30 @@ def _scan_candidate_for_query(
     search_base_only: bool,
     include_pdf: bool,
     ocr_pdf: bool = False,
-) -> tuple[Path, str, bool]:
+) -> tuple[Path, str, bool, list[str]]:
     """Read one candidate and evaluate query match state."""
     is_pdf = path.suffix.lower() == ".pdf"
     search_target = path.name if search_base_only else str(path)
     content = ""
+    operations: list[str] = []
 
     if include_content:
         if is_pdf:
             if include_pdf:
-                text = _read_pdf_text_if_possible(path, ocr_pdf=ocr_pdf)
+                text = _read_pdf_text_if_possible(
+                    path,
+                    ocr_pdf=ocr_pdf,
+                    operations=operations,
+                )
                 content = text or ""
         else:
             if _is_clearly_binary_file(path):
                 # Preserve filename matching in content mode even when the
                 # file body is binary and cannot be meaningfully searched.
+                operations.append("binary skipped")
                 content = ""
             else:
+                operations.append("content read")
                 text = _read_text_if_possible(path)
                 if text is None:
                     # Keep filename matching active even when content cannot
@@ -937,7 +1169,7 @@ def _scan_candidate_for_query(
         matched = bool(predicate(search_target, searchable_content))
     except Exception:
         matched = False
-    return path, content, matched
+    return path, content, matched, operations
 
 
 def main(argv: list[str]) -> int:
@@ -950,10 +1182,13 @@ def main(argv: list[str]) -> int:
             verbose,
             include_pdf,
             ocr_pdf,
+            wip,
             cpu_limit,
             sort_results,
             sort_case_sensitive,
             patterns,
+            excluded_path_args,
+            follow_links,
         ) = _parse_args(argv)
         predicate = search_query.compile_match_predicate(
             query, strip_inline_image_data=False
@@ -969,9 +1204,21 @@ def main(argv: list[str]) -> int:
             )
 
         match_count = 0
-        candidate_iter = _iter_candidate_paths(patterns, recursive)
+        excluded_paths = tuple(
+            _normalized_exclude_path(path) for path in excluded_path_args
+        )
+        candidate_iter = _iter_candidate_paths(
+            patterns,
+            recursive,
+            excluded_paths,
+            follow_links,
+        )
         saw_candidate = False
         buffered_matches: list[tuple[Path, str]] = []
+
+        def _emit_wip(path: Path, operations: list[str]) -> None:
+            if wip:
+                print(_style_wip_filepath(path, operations), flush=True)
 
         def _emit_match(path: Path, content: str) -> None:
             nonlocal match_count
@@ -991,7 +1238,7 @@ def main(argv: list[str]) -> int:
         if worker_count <= 1:
             for candidate_path in candidate_iter:
                 saw_candidate = True
-                path, content, matched = _scan_candidate_for_query(
+                path, content, matched, operations = _scan_candidate_for_query(
                     candidate_path,
                     predicate,
                     include_content=include_content,
@@ -999,6 +1246,7 @@ def main(argv: list[str]) -> int:
                     include_pdf=include_pdf,
                     ocr_pdf=ocr_pdf,
                 )
+                _emit_wip(path, operations)
                 if not matched:
                     continue
                 _emit_match(path, content)
@@ -1060,9 +1308,10 @@ def main(argv: list[str]) -> int:
                         continue
                     for future in done:
                         try:
-                            path, content, matched = future.result()
+                            path, content, matched, operations = future.result()
                         except Exception:
                             continue
+                        _emit_wip(path, operations)
                         if not matched:
                             continue
                         _emit_match(path, content)
@@ -1088,9 +1337,31 @@ def main(argv: list[str]) -> int:
 
         return 0 if match_count else 1
     except KeyboardInterrupt:
-        print("Search interrupted by user.", file=sys.stderr)
+        print("Search interrupted by user.", file=sys.stderr, flush=True)
         return 130
 
 
+def _terminate_after_interrupt(exit_code: int) -> None:
+    """Exit immediately after an already-handled Ctrl-C.
+
+    ThreadPoolExecutor registers interpreter-shutdown callbacks that wait for
+    worker threads. A second Ctrl-C during that shutdown can otherwise expose
+    noisy threading/weakref/tempfile tracebacks even though hfind already
+    handled the interruption. os._exit() intentionally bypasses those atexit
+    callbacks only for the Ctrl-C exit path.
+    """
+    if exit_code != 130:
+        raise SystemExit(exit_code)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(130)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    _terminate_after_interrupt(main(sys.argv[1:]))

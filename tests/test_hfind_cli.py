@@ -697,6 +697,56 @@ class HfindCliTests(unittest.TestCase):
                 ],
             )
 
+    def test_wip_lists_checked_full_paths_and_excludes_nonmatches_from_sort(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-wip-sort-") as tmpdir:
+            root = Path(tmpdir)
+            matched = root / "z_match.txt"
+            missed = root / "a_miss.txt"
+            matched.write_text("needle\n", encoding="utf-8")
+            missed.write_text("nothing here\n", encoding="utf-8")
+
+            code, stdout_lines, _stderr_lines = self._run_main_with_stderr([
+                "-cws",
+                "needle",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            plain = [self._strip_ansi(line) for line in stdout_lines]
+            self.assertIn(f"{matched.resolve()} [content read]", plain)
+            self.assertIn(f"{missed.resolve()} [content read]", plain)
+            self.assertEqual(plain[-1], str(matched))
+            self.assertEqual(plain.count(str(missed)), 0)
+            self.assertTrue(any("\x1b[90m" in line for line in stdout_lines[:-1]))
+
+    def test_wip_reports_ocr_when_ocr_is_performed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-wip-ocr-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "scan.pdf"
+            pdf_path.write_bytes(b"not a real pdf")
+
+            original_reader = hfind._read_pdf_text_if_possible
+
+            def _fake_reader(_path: Path, *, ocr_pdf: bool = False, operations=None):
+                if operations is not None:
+                    operations.extend(["PDF text", "OCR"])
+                return "needle from OCR"
+
+            hfind._read_pdf_text_if_possible = _fake_reader
+            try:
+                code, lines = self._run_main([
+                    "-cpw",
+                    "needle",
+                    str(pdf_path),
+                ])
+            finally:
+                hfind._read_pdf_text_if_possible = original_reader
+
+            self.assertEqual(code, 0)
+            plain = [self._strip_ansi(line) for line in lines]
+            self.assertIn(f"{pdf_path.resolve()} [PDF text, OCR]", plain)
+            self.assertEqual(plain[-1], str(pdf_path))
+
     def test_ocr_pdf_is_opt_in_for_scan_like_pdf(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-ocr-opt-in-") as tmpdir:
             root = Path(tmpdir)
@@ -766,6 +816,160 @@ class HfindCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
 
+    def test_exclude_option_is_repeatable_and_consumes_path_atomically(self) -> None:
+        parsed = hfind._parse_args([
+            "-e",
+            "~/my-dir",
+            "-e=~/my-dir-2",
+            "--exclude",
+            "/tmp/my-dir-3",
+            "--exclude=/tmp/my-dir-4",
+            "needle",
+            "*.txt",
+        ])
+        self.assertEqual(parsed[0], "needle")
+        self.assertEqual(parsed[11], ["*.txt"])
+        self.assertEqual(
+            parsed[12],
+            ["~/my-dir", "~/my-dir-2", "/tmp/my-dir-3", "/tmp/my-dir-4"],
+        )
+
+        for args in (["-e"], ["--exclude"], ["-e="], ["--exclude="]):
+            with self.assertRaises(SystemExit) as raised:
+                hfind._parse_args(list(args))
+            self.assertIn("requires one PATH", str(raised.exception))
+
+    def test_exclude_omits_path_and_all_children(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-exclude-") as tmpdir:
+            root = Path(tmpdir)
+            keep = root / "keep"
+            excluded = root / "excluded"
+            nested = excluded / "nested"
+            keep.mkdir()
+            nested.mkdir(parents=True)
+            keep_file = keep / "needle-keep.txt"
+            excluded_file = excluded / "needle-direct.txt"
+            nested_file = nested / "needle-nested.txt"
+            keep_file.write_text("x\n", encoding="utf-8")
+            excluded_file.write_text("x\n", encoding="utf-8")
+            nested_file.write_text("x\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-r",
+                "-e",
+                str(excluded),
+                "needle",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(keep_file)],
+            )
+
+    def test_exclude_expands_home_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-exclude-home-") as tmpdir:
+            root = Path(tmpdir)
+            fake_home = root / "home"
+            excluded = fake_home / "skip"
+            included = fake_home / "keep"
+            excluded.mkdir(parents=True)
+            included.mkdir(parents=True)
+            (excluded / "needle.txt").write_text("x\n", encoding="utf-8")
+            included_file = included / "needle.txt"
+            included_file.write_text("x\n", encoding="utf-8")
+
+            original_home = os.environ.get("HOME")
+            os.environ["HOME"] = str(fake_home)
+            try:
+                code, lines = self._run_main([
+                    "-r",
+                    "-e=~/skip",
+                    "needle",
+                    str(fake_home / "*.txt"),
+                ])
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(included_file)],
+            )
+
+    def test_links_flag_is_opt_in_and_stackable(self) -> None:
+        default = hfind._parse_args(["needle", "*.txt"])
+        long_form = hfind._parse_args(["--links", "needle", "*.txt"])
+        short_form = hfind._parse_args(["-l", "needle", "*.txt"])
+        stacked = hfind._parse_args(["-crl", "needle", "*.txt"])
+
+        self.assertFalse(default[13])
+        self.assertTrue(long_form[13])
+        self.assertTrue(short_form[13])
+        self.assertTrue(stacked[13])
+        self.assertTrue(stacked[1])
+        self.assertTrue(stacked[3])
+
+    def test_symlink_file_is_ignored_by_default_and_allowed_with_links(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-links-file-") as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target.txt"
+            target.write_text("needle\n", encoding="utf-8")
+            link = root / "needle-link.txt"
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlink creation is not supported in this environment")
+
+            code_default, lines_default = self._run_main([
+                "needle-link",
+                str(link),
+            ])
+            code_links, lines_links = self._run_main([
+                "-l",
+                "needle-link",
+                str(link),
+            ])
+
+            self.assertEqual(code_default, 1)
+            self.assertEqual(lines_default, [])
+            self.assertEqual(code_links, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines_links],
+                [str(link)],
+            )
+
+    def test_recursive_symlink_directory_is_not_followed_without_links(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-links-dir-") as tmpdir:
+            root = Path(tmpdir)
+            outside = root / "outside"
+            outside.mkdir()
+            target = outside / "needle.txt"
+            target.write_text("x\n", encoding="utf-8")
+            search_root = root / "search"
+            search_root.mkdir()
+            link_dir = search_root / "linked"
+            try:
+                link_dir.symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlink creation is not supported in this environment")
+
+            pattern = str(search_root / "*.txt")
+            code_default, lines_default = self._run_main(["-r", "needle", pattern])
+            code_links, lines_links = self._run_main(["-rl", "needle", pattern])
+
+            self.assertEqual(code_default, 1)
+            self.assertEqual(lines_default, [])
+            self.assertEqual(code_links, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines_links],
+                [str(link_dir / "needle.txt")],
+            )
+
     def test_first_non_switch_positional_is_query_when_q_is_omitted(self) -> None:
         parsed = hfind._parse_args([
             "-crvo",
@@ -780,8 +984,9 @@ class HfindCliTests(unittest.TestCase):
         self.assertTrue(parsed[4])
         self.assertTrue(parsed[5])
         self.assertTrue(parsed[6])
-        self.assertEqual(parsed[7], 70.0)
-        self.assertEqual(parsed[10], ["*.pdf"])
+        self.assertFalse(parsed[7])
+        self.assertEqual(parsed[8], 70.0)
+        self.assertEqual(parsed[11], ["*.pdf"])
 
     def test_ocr_pdf_flag_implies_pdf_and_cpu_limit_parses(self) -> None:
         parsed = hfind._parse_args([
@@ -794,7 +999,8 @@ class HfindCliTests(unittest.TestCase):
         ])
         self.assertTrue(parsed[5])
         self.assertTrue(parsed[6])
-        self.assertEqual(parsed[7], 72.5)
+        self.assertFalse(parsed[7])
+        self.assertEqual(parsed[8], 72.5)
 
         short_only = hfind._parse_args(["-o", "-c", "pepin", "*.pdf"])
         self.assertTrue(short_only[5])
@@ -806,6 +1012,11 @@ class HfindCliTests(unittest.TestCase):
         self.assertTrue(stacked[3])
         self.assertTrue(stacked[5])
         self.assertTrue(stacked[6])
+
+        wip = hfind._parse_args(["-crw", "pepin", "*.pdf"])
+        self.assertTrue(wip[7])
+        long_wip = hfind._parse_args(["--wip", "pepin", "*.pdf"])
+        self.assertTrue(long_wip[7])
 
         with self.assertRaises(SystemExit) as raised:
             hfind._parse_args(["--cpu-limit", "101", "pepin", "*.pdf"])
@@ -834,6 +1045,53 @@ class HfindCliTests(unittest.TestCase):
         self.assertEqual(hfind._adjust_worker_limit(4, 75.0, 80.0, 16), 4)
         self.assertEqual(hfind._adjust_worker_limit(4, 60.0, 80.0, 16), 5)
         self.assertEqual(hfind._adjust_worker_limit(8, 99.0, 0.0, 16), 8)
+
+    def test_interrupt_returns_130_with_single_message(self) -> None:
+        original_iter = hfind._iter_candidate_paths
+
+        def _interrupted_iter(
+            _patterns,
+            _recursive,
+            _excluded_paths=(),
+            _follow_links=False,
+        ):
+            raise KeyboardInterrupt
+            yield  # pragma: no cover
+
+        hfind._iter_candidate_paths = _interrupted_iter
+        try:
+            code, stdout_lines, stderr_lines = self._run_main_with_stderr([
+                "needle",
+                "*.txt",
+            ])
+        finally:
+            hfind._iter_candidate_paths = original_iter
+
+        self.assertEqual(code, 130)
+        self.assertEqual(stdout_lines, [])
+        self.assertEqual(stderr_lines, ["Search interrupted by user."])
+
+    def test_interrupt_termination_bypasses_normal_python_shutdown(self) -> None:
+        original_exit = os._exit
+        calls: list[int] = []
+
+        def _fake_exit(code: int) -> None:
+            calls.append(code)
+            raise RuntimeError("hard exit intercepted")
+
+        os._exit = _fake_exit
+        try:
+            with self.assertRaisesRegex(RuntimeError, "hard exit intercepted"):
+                hfind._terminate_after_interrupt(130)
+        finally:
+            os._exit = original_exit
+
+        self.assertEqual(calls, [130])
+
+    def test_non_interrupt_termination_uses_system_exit(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            hfind._terminate_after_interrupt(0)
+        self.assertEqual(raised.exception.code, 0)
 
     def test_recursive_glob_skips_unreadable_symlink_targets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-unreadable-symlink-") as tmpdir:

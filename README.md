@@ -495,13 +495,13 @@ Its hfind-specific runtime defaults are stored in `hfind.settings.json`, followi
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -516,10 +516,19 @@ Notes:
   - Normal searchable PDFs stay on the fast text-extraction path.
   - PDFs with no extractable text, or sparse text plus raster-image evidence on most pages, are treated as scan-like.
   - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
+- `--wip` / `-w` prints one gray progress line for every file as it finishes being checked. The progress line uses the file's full path and appends operations that were actually performed, such as `[content read]`, `[PDF text]`, `[OCR]`, or `[binary skipped]`.
+  - WIP lines are progressive even when `--sort` / `-s` or `--sort-case-sensitive` / `-S` is active.
+  - A WIP line for a file with no match is never added to the sort buffer; only actual matches are sorted and emitted as results.
+- `--exclude PATH` / `-e PATH` excludes that path and every file beneath it. The option is repeatable, and `--exclude=PATH` / `-e=PATH` are also accepted.
+  - Exactly one path belongs to each `-e` / `--exclude` occurrence; the path is consumed atomically by the option and is never interpreted as the query or a search pattern/base path.
+  - `~` is expanded using the current user's home directory, and relative exclude paths are resolved from the current working directory.
+- Symlinks are ignored by default. This includes symlink files and files that would only be reached by traversing a symlinked directory.
+- `--links` / `-l` opts in to symlinks, allowing symlink files and recursive traversal through symlinked directories. The short flag may be stacked with other short flags, for example `-rl` or `-crvl`.
 - `--cpu-limit PERCENT` dynamically throttles work based on whole-system CPU use. The default is `90`; `--cpu-limit 0` disables CPU throttling.
   - `HFIND_CPU_LIMIT` sets the default CPU target.
   - `HFIND_SEARCH_THREADS` remains the maximum worker-pool size; hfind may keep fewer workers active while the system is busy.
 - Default output is progressive: matches print as they are found.
+- Ctrl-C interruption exits with status `130` after the single `Search interrupted by user.` message. For this interrupt path, hfind bypasses Python's normal interpreter-shutdown callbacks so worker/thread/tempfile cleanup tracebacks are not dumped after the interruption.
 - `--sort` / `-s` waits for full scan, then prints results sorted case-insensitively.
 - `--sort-case-sensitive` / `-S` waits for full scan, then prints results sorted case-sensitively.
   - when either sort mode is enabled, `hfind` prints:  
@@ -555,6 +564,9 @@ Recursively searches from current directory for readable `.txt` files whose path
 ./hfind.sh -crvps "OR(fred, paul)" *.txt
 ./hfind.sh -crvpS "OR(fred, paul)" *.txt
 ./hfind.sh -crvo "invoice" "./**/*.pdf"
+./hfind.sh -crvw "invoice" "./**/*.pdf"
+./hfind.sh -r -e ~/my-dir -e=~/my-dir-2 "invoice" "*.pdf"
+./hfind.sh -rl "invoice" "*.pdf"
 ./hfind.sh -crv -o --cpu-limit 70 "invoice" "./**/*.pdf"
 ```
 
