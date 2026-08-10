@@ -412,14 +412,22 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 
 ## Quick Start
 
-From any directory:
+For a new Debian/Ubuntu host, run the host bootstrap once:
+
+```bash
+/path/to/mdexplore/setup-host.sh
+```
+
+`setup-host.sh` installs/verifies the native host requirements (including Python venv support, Java, Poppler, and Tesseract) and then runs the project bootstrap. It is safe to rerun. Use `setup-host.sh --check-only` to verify an existing machine without making changes.
+
+If the host dependencies are already installed, you can run only the project bootstrap:
 
 ```bash
 /path/to/mdexplore/setup-mdexplore.sh
 /path/to/mdexplore/mdexplore.sh
 ```
 
-`setup-mdexplore.sh` is the full bootstrap path. It:
+`setup-mdexplore.sh` is the project bootstrap path. It:
 
 - creates or updates `.venv`
 - installs Python dependencies from `requirements.txt`
@@ -485,13 +493,13 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -502,6 +510,13 @@ Notes:
 - `--base` / `-b` switches query matching target to basename only (filename + extension).
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
+- `--ocr-pdf` enables OCR fallback for PDFs that appear to be scans. It implies `--pdf`, but content search still requires `--content` / `-c`.
+  - Normal searchable PDFs stay on the fast text-extraction path.
+  - PDFs with no extractable text, or sparse text plus raster-image evidence on most pages, are treated as scan-like.
+  - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
+- `--cpu-limit PERCENT` dynamically throttles work based on whole-system CPU use. The default is `80`; `--cpu-limit 0` disables CPU throttling.
+  - `HFIND_CPU_LIMIT` sets the default CPU target.
+  - `HFIND_SEARCH_THREADS` remains the maximum worker-pool size; hfind may keep fewer workers active while the system is busy.
 - Default output is progressive: matches print as they are found.
 - `--sort` / `-s` waits for full scan, then prints results sorted case-insensitively.
 - `--sort-case-sensitive` / `-S` waits for full scan, then prints results sorted case-sensitively.
@@ -537,6 +552,8 @@ Recursively searches from current directory for readable `.txt` files whose path
 ./hfind.sh -crvp "OR(fred, paul)" *.txt
 ./hfind.sh -crvps "OR(fred, paul)" *.txt
 ./hfind.sh -crvpS "OR(fred, paul)" *.txt
+./hfind.sh -crv --ocr-pdf "invoice" "./**/*.pdf"
+./hfind.sh -crv --ocr-pdf --cpu-limit 70 "invoice" "./**/*.pdf"
 ```
 
 All above are valid shorthand forms.

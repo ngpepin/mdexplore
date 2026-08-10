@@ -17,27 +17,33 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from urllib.parse import quote
 
 from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-s|-S] [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-s|-S] [--ocr-pdf] [--cpu-limit PERCENT] [PATTERN ...]
     hfind.py -bcrvps QUERY [PATTERN ...]
 
 Notes:
-  - If -q/--query is omitted, the first positional argument is used as QUERY.
-    - If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
-    - Default search checks the full discovered path (directories + filename).
-    - --base/-b switches matching target to basename only (filename + extension).
-  - --content/-c includes file contents in matching.
-  - --recursive/-r expands each pattern recursively under its base directory.
-    - --verbose/-v lists matching lines under each matched file with yellow hits.
-    - --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
-    - --sort/-s waits for full scan and emits case-insensitively sorted results.
-    - --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
+  If -q/--query is omitted, the first positional argument is used as QUERY.
+  If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
+  Default search checks the full discovered path (directories + filename).
+  --base/-b switches matching target to basename only (filename + extension).
+  --content/-c includes file contents in matching.
+  --recursive/-r expands each pattern recursively under its base directory.
+  --verbose/-v lists matching lines under each matched file with yellow hits.
+  --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
+  --ocr-pdf enables OCR fallback for PDFs that contain little/no extractable text; 
+    it implies --pdf and still requires -c.
+  --cpu-limit PERCENT dynamically throttles concurrent work to keep observed system CPU
+    near/below the target (default: 80).
+  --sort/-s waits for full scan and emits case-insensitively sorted results.
+  --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
 
 Examples:
     # Path search (default): path contains fred OR paul
@@ -75,6 +81,8 @@ ANSI_RESET = "\033[0m"
 OSC8_OPEN = "\033]8;;"
 OSC8_CLOSE = "\a"
 _BINARY_SAMPLE_BYTES = 8192
+_OCR_SPARSE_TEXT_ALNUM_THRESHOLD = 32
+_CPU_SAMPLE_INTERVAL_SECONDS = 0.20
 
 
 def _configured_search_workers() -> int:
@@ -89,6 +97,78 @@ def _configured_search_workers() -> int:
 
 
 _MAX_SEARCH_WORKERS = _configured_search_workers()
+
+
+def _configured_cpu_limit() -> float:
+    raw = os.environ.get("HFIND_CPU_LIMIT", "80").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 80.0
+    if value <= 0:
+        return 0.0
+    return min(100.0, value)
+
+
+def _read_cpu_times() -> tuple[int, int] | None:
+    """Return cumulative (total, idle) CPU jiffies on Linux when available."""
+    try:
+        first_line = Path("/proc/stat").read_text(encoding="ascii").splitlines()[0]
+        fields = first_line.split()
+        if not fields or fields[0] != "cpu":
+            return None
+        values = [int(value) for value in fields[1:]]
+        if len(values) < 4:
+            return None
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return total, idle
+    except Exception:
+        return None
+
+
+class _CpuUsageSampler:
+    """Sample whole-system CPU usage without adding a psutil dependency."""
+
+    def __init__(self) -> None:
+        self._previous = _read_cpu_times()
+        self._previous_time = time.monotonic()
+
+    def sample(self, *, force: bool = False) -> float | None:
+        now = time.monotonic()
+        if not force and (now - self._previous_time) < _CPU_SAMPLE_INTERVAL_SECONDS:
+            return None
+        current = _read_cpu_times()
+        previous = self._previous
+        self._previous = current
+        self._previous_time = now
+        if current is None or previous is None:
+            return None
+        total_delta = current[0] - previous[0]
+        idle_delta = current[1] - previous[1]
+        if total_delta <= 0:
+            return None
+        busy_delta = max(0, total_delta - idle_delta)
+        return max(0.0, min(100.0, (busy_delta / total_delta) * 100.0))
+
+
+def _adjust_worker_limit(
+    current_limit: int,
+    cpu_percent: float | None,
+    cpu_limit: float,
+    maximum: int,
+) -> int:
+    """Adapt concurrency conservatively around the configured CPU ceiling."""
+    current_limit = max(1, min(maximum, current_limit))
+    if cpu_percent is None or cpu_limit <= 0 or maximum <= 1:
+        return current_limit
+    if cpu_percent > cpu_limit:
+        # Back off quickly under pressure so expensive OCR/PDF jobs stop piling up.
+        return max(1, min(current_limit - 1, int(current_limit * 0.75)))
+    if cpu_percent < max(0.0, cpu_limit - 10.0) and current_limit < maximum:
+        # Ramp back up slowly to avoid oscillating around the limit.
+        return current_limit + 1
+    return current_limit
 
 
 def _style_filepath(path: Path) -> str:
@@ -109,7 +189,7 @@ def _style_filepath(path: Path) -> str:
 
 def _parse_args(
     argv: list[str],
-) -> tuple[str, bool, bool, bool, bool, bool, bool, bool, list[str]]:
+) -> tuple[str, bool, bool, bool, bool, bool, bool, float, bool, bool, list[str]]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
 
@@ -119,6 +199,8 @@ def _parse_args(
     recursive = False
     verbose = False
     include_pdf = False
+    ocr_pdf = False
+    cpu_limit = _configured_cpu_limit()
     sort_results = False
     sort_case_sensitive = False
     positionals: list[str] = []
@@ -157,6 +239,22 @@ def _parse_args(
         if arg == "--pdf":
             include_pdf = True
             i += 1
+            continue
+        if arg == "--ocr-pdf":
+            ocr_pdf = True
+            include_pdf = True
+            i += 1
+            continue
+        if arg == "--cpu-limit":
+            if i + 1 >= len(argv):
+                raise _usage_error("error: --cpu-limit requires a value")
+            try:
+                cpu_limit = float(argv[i + 1])
+            except ValueError:
+                raise _usage_error("error: --cpu-limit must be a number") from None
+            if cpu_limit < 0 or cpu_limit > 100:
+                raise _usage_error("error: --cpu-limit must be between 0 and 100")
+            i += 2
             continue
         if arg == "--sort":
             sort_results = True
@@ -223,6 +321,8 @@ def _parse_args(
         recursive,
         verbose,
         include_pdf,
+        ocr_pdf,
+        cpu_limit,
         sort_results,
         sort_case_sensitive,
         positionals,
@@ -334,7 +434,93 @@ def _read_text_if_possible(path: Path) -> str | None:
         return None
 
 
-def _read_pdf_text_if_possible(path: Path) -> str | None:
+def _pdf_text_is_sparse(text: str, page_count: int = 1) -> bool:
+    """Return whether extracted PDF text is sparse enough to indicate a scan."""
+    alnum_count = sum(1 for char in (text or "") if char.isalnum())
+    threshold = max(_OCR_SPARSE_TEXT_ALNUM_THRESHOLD, max(1, page_count) * 24)
+    return alnum_count < threshold
+
+
+def _pdf_page_has_image(page) -> bool:
+    """Best-effort detection of raster images on a pypdf page."""
+    try:
+        resources = page.get("/Resources")
+        if resources is None:
+            return False
+        resources = resources.get_object()
+        xobjects = resources.get("/XObject")
+        if xobjects is None:
+            return False
+        xobjects = xobjects.get_object()
+        for value in xobjects.values():
+            try:
+                obj = value.get_object()
+                if obj.get("/Subtype") == "/Image":
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _ocr_pdf_text_if_possible(path: Path) -> str:
+    """OCR a likely scanned PDF using Poppler plus Tesseract when available."""
+    pdftoppm_cmd = shutil.which("pdftoppm")
+    tesseract_cmd = shutil.which("tesseract")
+    if not pdftoppm_cmd or not tesseract_cmd:
+        return ""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="hfind-ocr-") as tmpdir:
+            prefix = Path(tmpdir) / "page"
+            render = subprocess.run(
+                [
+                    pdftoppm_cmd,
+                    "-jpeg",
+                    "-r",
+                    "160",
+                    str(path),
+                    str(prefix),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            if render.returncode != 0:
+                return ""
+
+            page_images = sorted(Path(tmpdir).glob("page-*.jpg"))
+            if not page_images:
+                return ""
+
+            env = os.environ.copy()
+            # Tesseract/OpenMP can otherwise multiply CPU use inside every
+            # hfind worker. One OCR thread per subprocess lets hfind's worker
+            # controller remain the single concurrency authority.
+            env.setdefault("OMP_THREAD_LIMIT", "1")
+            pages: list[str] = []
+            for image_path in page_images:
+                result = subprocess.run(
+                    [tesseract_cmd, str(image_path), "stdout", "--psm", "3"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=90,
+                    env=env,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pages.append(result.stdout.strip())
+            return "\n\n".join(pages).strip()
+    except Exception:
+        return ""
+
+
+def _read_pdf_text_if_possible(path: Path, *, ocr_pdf: bool = False) -> str | None:
+    best_text = ""
+    page_count = 1
+    scan_like_page_count = 0
     try:
         from pypdf import PdfReader
     except Exception:
@@ -343,6 +529,7 @@ def _read_pdf_text_if_possible(path: Path) -> str | None:
     if PdfReader is not None:
         try:
             reader = PdfReader(str(path), strict=False)
+            page_count = max(1, len(reader.pages))
             pages: list[str] = []
             for page in reader.pages:
                 try:
@@ -350,9 +537,14 @@ def _read_pdf_text_if_possible(path: Path) -> str | None:
                 except Exception:
                     page_text = ""
                 pages.append(page_text)
+                page_alnum = sum(1 for char in page_text if char.isalnum())
+                if page_alnum < 8 and _pdf_page_has_image(page):
+                    scan_like_page_count += 1
             extracted = "\n".join(pages).strip()
             if extracted:
-                return extracted
+                best_text = extracted
+                if not _pdf_text_is_sparse(extracted, page_count):
+                    return extracted
         except Exception:
             pass
 
@@ -368,12 +560,30 @@ def _read_pdf_text_if_possible(path: Path) -> str | None:
                 timeout=20,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout
+                poppler_text = result.stdout.strip()
+                if len(poppler_text) > len(best_text):
+                    best_text = poppler_text
+                if not _pdf_text_is_sparse(poppler_text, page_count):
+                    return poppler_text
         except Exception:
             pass
 
+    # OCR is intentionally opt-in. Zero-text PDFs are eligible because image-only
+    # scans commonly extract nothing. Sparse-but-nonempty PDFs are OCRed only when
+    # pypdf also found raster-image evidence on at least half of their pages; this
+    # avoids OCRing ordinary short text PDFs merely because they contain few words.
+    scan_page_threshold = max(1, (page_count + 1) // 2)
+    clearly_scan_like = (not best_text.strip()) or (
+        _pdf_text_is_sparse(best_text, page_count)
+        and scan_like_page_count >= scan_page_threshold
+    )
+    if ocr_pdf and clearly_scan_like:
+        ocr_text = _ocr_pdf_text_if_possible(path)
+        if ocr_text:
+            return ocr_text
+
     # Keep file eligible for filename matching even if content extraction fails.
-    return ""
+    return best_text
 
 
 def _is_clearly_binary_file(path: Path) -> bool:
@@ -601,6 +811,7 @@ def _scan_candidate_for_query(
     include_content: bool,
     search_base_only: bool,
     include_pdf: bool,
+    ocr_pdf: bool = False,
 ) -> tuple[Path, str, bool]:
     """Read one candidate and evaluate query match state."""
     is_pdf = path.suffix.lower() == ".pdf"
@@ -610,7 +821,7 @@ def _scan_candidate_for_query(
     if include_content:
         if is_pdf:
             if include_pdf:
-                text = _read_pdf_text_if_possible(path)
+                text = _read_pdf_text_if_possible(path, ocr_pdf=ocr_pdf)
                 content = text or ""
         else:
             if _is_clearly_binary_file(path):
@@ -646,6 +857,8 @@ def main(argv: list[str]) -> int:
             recursive,
             verbose,
             include_pdf,
+            ocr_pdf,
+            cpu_limit,
             sort_results,
             sort_case_sensitive,
             patterns,
@@ -655,7 +868,7 @@ def main(argv: list[str]) -> int:
         )
 
         if include_pdf and not include_content:
-            print("note: --pdf has no effect unless --content/-c is set", file=sys.stderr)
+            print("note: --pdf/--ocr-pdf has no effect unless --content/-c is set", file=sys.stderr)
         if sort_results:
             print(
                 "One moment please... finding all matches to sort them",
@@ -692,6 +905,7 @@ def main(argv: list[str]) -> int:
                     include_content=include_content,
                     search_base_only=search_base_only,
                     include_pdf=include_pdf,
+                    ocr_pdf=ocr_pdf,
                 )
                 if not matched:
                     continue
@@ -700,10 +914,28 @@ def main(argv: list[str]) -> int:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 pending_futures = set()
                 candidate_exhausted = False
-                max_in_flight = max(4, worker_count * 4)
+                cpu_sampler = _CpuUsageSampler()
+                if cpu_limit > 0:
+                    active_worker_limit = min(
+                        worker_count,
+                        max(1, os.cpu_count() or 1),
+                    )
+                else:
+                    active_worker_limit = worker_count
 
                 while True:
-                    while (not candidate_exhausted) and len(pending_futures) < max_in_flight:
+                    cpu_percent = cpu_sampler.sample()
+                    active_worker_limit = _adjust_worker_limit(
+                        active_worker_limit,
+                        cpu_percent,
+                        cpu_limit,
+                        worker_count,
+                    )
+
+                    while (
+                        not candidate_exhausted
+                        and len(pending_futures) < active_worker_limit
+                    ):
                         try:
                             path = next(candidate_iter)
                         except StopIteration:
@@ -718,6 +950,7 @@ def main(argv: list[str]) -> int:
                                 include_content=include_content,
                                 search_base_only=search_base_only,
                                 include_pdf=include_pdf,
+                                ocr_pdf=ocr_pdf,
                             )
                         )
 
@@ -726,8 +959,13 @@ def main(argv: list[str]) -> int:
 
                     done, pending_futures = wait(
                         pending_futures,
+                        timeout=_CPU_SAMPLE_INTERVAL_SECONDS,
                         return_when=FIRST_COMPLETED,
                     )
+                    if not done:
+                        # A timeout gives the controller a chance to observe
+                        # sustained CPU pressure even while long OCR jobs run.
+                        continue
                     for future in done:
                         try:
                             path, content, matched = future.result()

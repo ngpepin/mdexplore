@@ -610,7 +610,7 @@ class HfindCliTests(unittest.TestCase):
             pdf_path.write_bytes(b"not a real pdf")
 
             original_reader = hfind._read_pdf_text_if_possible
-            hfind._read_pdf_text_if_possible = lambda _path: ""
+            hfind._read_pdf_text_if_possible = lambda _path, **_kwargs: ""
             try:
                 code, lines = self._run_main([
                     "-cp",
@@ -696,6 +696,99 @@ class HfindCliTests(unittest.TestCase):
                     str(root / "c_conflicted.txt"),
                 ],
             )
+
+    def test_ocr_pdf_is_opt_in_for_scan_like_pdf(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-ocr-opt-in-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "scanned-document.pdf"
+            from reportlab.pdfgen import canvas
+
+            writer = canvas.Canvas(str(pdf_path))
+            writer.rect(72, 650, 300, 100)
+            writer.save()
+
+            calls: list[Path] = []
+            original_ocr = hfind._ocr_pdf_text_if_possible
+            hfind._ocr_pdf_text_if_possible = lambda path: (
+                calls.append(path) or "Scanned Nicolas Pepin record"
+            )
+            try:
+                code_without_ocr, lines_without_ocr = self._run_main([
+                    "-cp",
+                    "pepin",
+                    str(root / "*.pdf"),
+                ])
+                self.assertEqual(code_without_ocr, 1)
+                self.assertEqual(lines_without_ocr, [])
+                self.assertEqual(calls, [])
+
+                code_with_ocr, lines_with_ocr = self._run_main([
+                    "-c",
+                    "--ocr-pdf",
+                    "pepin",
+                    str(root / "*.pdf"),
+                ])
+            finally:
+                hfind._ocr_pdf_text_if_possible = original_ocr
+
+            self.assertEqual(code_with_ocr, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines_with_ocr],
+                [str(pdf_path)],
+            )
+            self.assertEqual(calls, [pdf_path])
+
+    def test_ocr_pdf_does_not_ocr_normal_searchable_pdf(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-ocr-text-pdf-") as tmpdir:
+            root = Path(tmpdir)
+            pdf_path = root / "searchable.pdf"
+            _create_pdf_with_text(
+                pdf_path,
+                "Nicolas Pepin searchable ordinary text document with enough words to avoid OCR",
+            )
+
+            original_ocr = hfind._ocr_pdf_text_if_possible
+
+            def _unexpected_ocr(_path: Path) -> str:
+                raise AssertionError("ordinary searchable PDF should not invoke OCR")
+
+            hfind._ocr_pdf_text_if_possible = _unexpected_ocr
+            try:
+                code, lines = self._run_main([
+                    "-c",
+                    "--ocr-pdf",
+                    "pepin",
+                    str(root / "*.pdf"),
+                ])
+            finally:
+                hfind._ocr_pdf_text_if_possible = original_ocr
+
+            self.assertEqual(code, 0)
+            self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
+
+    def test_ocr_pdf_flag_implies_pdf_and_cpu_limit_parses(self) -> None:
+        parsed = hfind._parse_args([
+            "--ocr-pdf",
+            "--cpu-limit",
+            "72.5",
+            "-c",
+            "pepin",
+            "*.pdf",
+        ])
+        self.assertTrue(parsed[5])
+        self.assertTrue(parsed[6])
+        self.assertEqual(parsed[7], 72.5)
+
+        with self.assertRaises(SystemExit) as raised:
+            hfind._parse_args(["--cpu-limit", "101", "pepin", "*.pdf"])
+        self.assertIn("between 0 and 100", str(raised.exception))
+
+    def test_cpu_worker_limit_backs_off_and_recovers(self) -> None:
+        self.assertEqual(hfind._adjust_worker_limit(8, 95.0, 80.0, 16), 6)
+        self.assertEqual(hfind._adjust_worker_limit(6, 82.0, 80.0, 16), 4)
+        self.assertEqual(hfind._adjust_worker_limit(4, 75.0, 80.0, 16), 4)
+        self.assertEqual(hfind._adjust_worker_limit(4, 60.0, 80.0, 16), 5)
+        self.assertEqual(hfind._adjust_worker_limit(8, 99.0, 0.0, 16), 8)
 
     def test_recursive_glob_skips_unreadable_symlink_targets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-unreadable-symlink-") as tmpdir:

@@ -68,6 +68,7 @@ vendor/fastbase64/results
 vendor/fastbase64/tests
 vendor/fastbase64/benchmarkscript.sh
 .venv-container-test
+.venv-container/
 .system-libs
 .cache
 bugs
