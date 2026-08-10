@@ -16,6 +16,8 @@ APT_PACKAGES=(
   build-essential
   poppler-utils
   tesseract-ocr
+  antiword
+  catdoc
 )
 
 JAVA_PACKAGE_CANDIDATES=(
@@ -35,7 +37,8 @@ The script:
   - installs required native/system packages with apt
   - ensures Python virtual-environment support is available
   - installs Java for PlantUML
-  - installs Poppler and Tesseract for hfind PDF extraction/OCR
+  - installs Poppler and Tesseract for hfind PDF/image extraction and OCR
+  - installs antiword/catdoc tools for legacy Microsoft Office text extraction
   - verifies the important host commands
   - runs setup-mdexplore.sh to create/update the project .venv and runtime assets
 
@@ -182,7 +185,10 @@ verify_host() {
   verify_command java 'PlantUML rendering' || failed=1
   verify_command pdftotext 'PDF text extraction' || failed=1
   verify_command pdftoppm 'PDF rasterization for OCR' || failed=1
-  verify_command tesseract 'OCR for scanned PDFs' || failed=1
+  verify_command tesseract 'OCR for scanned PDFs and explicitly selected images' || failed=1
+  verify_command antiword 'legacy Microsoft Word text extraction' || failed=1
+  verify_command xls2csv 'legacy Microsoft Excel text extraction' || failed=1
+  verify_command catppt 'legacy Microsoft PowerPoint text extraction' || failed=1
 
   if have_cmd python3; then
     if python3 -m venv --help >/dev/null 2>&1; then
@@ -278,4 +284,6 @@ fi
 
 log 'Host setup complete.'
 log "hfind OCR prerequisites: $(command -v pdftoppm), $(command -v tesseract)"
-log "Run hfind with OCR using: ${SCRIPT_DIR}/hfind.sh -c --ocr-pdf QUERY 'PATH/*.pdf'"
+log "hfind legacy Office prerequisites: $(command -v antiword), $(command -v xls2csv), $(command -v catppt)"
+log "Run PDF OCR using: ${SCRIPT_DIR}/hfind.sh -c --ocr-pdf QUERY 'PATH/*.pdf'"
+log "Run image OCR using: ${SCRIPT_DIR}/hfind.sh -c -t 'png|jpg|jpeg|tif|tiff' QUERY 'PATH/*'"

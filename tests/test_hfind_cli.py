@@ -5,8 +5,18 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
+import zipfile
 
 import hfind
+
+
+def _create_ooxml_with_text(path: Path, member: str, text: str) -> None:
+    payload = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<root xmlns:w="urn:test"><w:t>' + text + '</w:t></root>'
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member, payload)
 
 
 def _create_pdf_with_text(path: Path, text: str) -> None:
@@ -788,6 +798,23 @@ class HfindCliTests(unittest.TestCase):
             )
             self.assertEqual(calls, [pdf_path])
 
+    def test_pdf_ocr_text_is_combined_with_existing_extracted_text(self) -> None:
+        combined = hfind._merge_extracted_and_ocr_text(
+            "native heading and searchable paragraph",
+            "scanned attachment invoice number 12345",
+        )
+        self.assertIn("native heading and searchable paragraph", combined)
+        self.assertIn("scanned attachment invoice number 12345", combined)
+
+        self.assertEqual(
+            hfind._merge_extracted_and_ocr_text("same text", "same text"),
+            "same text",
+        )
+        self.assertEqual(
+            hfind._merge_extracted_and_ocr_text("", "OCR only"),
+            "OCR only",
+        )
+
     def test_ocr_pdf_does_not_ocr_normal_searchable_pdf(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-ocr-text-pdf-") as tmpdir:
             root = Path(tmpdir)
@@ -1022,6 +1049,230 @@ class HfindCliTests(unittest.TestCase):
             hfind._parse_args(["--cpu-limit", "101", "pepin", "*.pdf"])
         self.assertIn("between 0 and 100", str(raised.exception))
 
+    def test_type_option_is_repeatable_pipe_separated_and_atomic(self) -> None:
+        parsed = hfind._parse_args([
+            "-t",
+            "pdf",
+            "--type=TXT|md",
+            "needle",
+            "*",
+        ])
+        self.assertEqual(parsed[0], "needle")
+        self.assertEqual(parsed[11], ["*"])
+        self.assertEqual(parsed[14], ["pdf", "txt", "md"])
+
+        for args in (["-t"], ["--type"], ["-t="], ["--type="], ["-t", ".pdf", "needle"]):
+            with self.assertRaises(SystemExit) as raised:
+                hfind._parse_args(list(args))
+            self.assertIn("TYPE", str(raised.exception))
+
+    def test_type_option_filters_out_unnamed_extensions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-type-filter-") as tmpdir:
+            root = Path(tmpdir)
+            pdf = root / "needle.PDF"
+            text = root / "needle.txt"
+            markdown = root / "needle.md"
+            pdf.write_text("x\n", encoding="utf-8")
+            text.write_text("x\n", encoding="utf-8")
+            markdown.write_text("x\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-t",
+                "pdf|txt",
+                "needle",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertCountEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(pdf), str(text)],
+            )
+
+    def test_repeated_type_option_combines_allowed_extensions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-type-repeat-") as tmpdir:
+            root = Path(tmpdir)
+            pdf = root / "needle.pdf"
+            text = root / "needle.txt"
+            other = root / "needle.csv"
+            for path in (pdf, text, other):
+                path.write_text("x\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-t",
+                "pdf",
+                "-t",
+                "txt",
+                "needle",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertCountEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(pdf), str(text)],
+            )
+
+    def test_pseudo_types_expand_alone_and_when_pipe_separated(self) -> None:
+        images = hfind._parse_args(["-t=all-images", "needle", "*"])[14]
+        office = hfind._parse_args(["--type=all-office", "needle", "*"])[14]
+        combined = hfind._parse_args([
+            "-t=all-images|all-office",
+            "needle",
+            "*",
+        ])[14]
+
+        self.assertEqual(set(images), hfind._IMAGE_FILE_TYPES)
+        self.assertEqual(set(office), hfind._OFFICE_FILE_TYPES)
+        self.assertEqual(
+            set(combined),
+            hfind._IMAGE_FILE_TYPES | hfind._OFFICE_FILE_TYPES,
+        )
+        self.assertNotIn("all-images", combined)
+        self.assertNotIn("all-office", combined)
+
+    def test_all_images_pseudo_type_enables_ocr_for_each_supported_image_type(self) -> None:
+        parsed = hfind._parse_args(["-t=all-images", "needle", "*"])
+        selected_types = set(parsed[14])
+        self.assertTrue(selected_types & hfind._IMAGE_FILE_TYPES)
+        self.assertEqual(selected_types, hfind._IMAGE_FILE_TYPES)
+
+    def test_images_are_skipped_by_default_and_ocr_is_enabled_by_explicit_type(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-image-type-") as tmpdir:
+            root = Path(tmpdir)
+            image = root / "scan.JPG"
+            image.write_bytes(b"not-a-real-image")
+            text = root / "ordinary.txt"
+            text.write_text("needle in ordinary text\n", encoding="utf-8")
+
+            original_ocr = hfind._ocr_image_text_if_possible
+            calls: list[Path] = []
+
+            def _fake_ocr(path: Path) -> str:
+                calls.append(path)
+                return "needle extracted from image"
+
+            hfind._ocr_image_text_if_possible = _fake_ocr
+            try:
+                default_code, default_lines = self._run_main([
+                    "-c",
+                    "needle",
+                    str(root / "*"),
+                ])
+                image_code, image_lines = self._run_main([
+                    "-c",
+                    "-t=jpg",
+                    "needle",
+                    str(root / "*"),
+                ])
+            finally:
+                hfind._ocr_image_text_if_possible = original_ocr
+
+            self.assertEqual(default_code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in default_lines],
+                [str(text)],
+            )
+            self.assertEqual(image_code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in image_lines],
+                [str(image)],
+            )
+            self.assertEqual(calls, [image])
+
+    def test_modern_office_formats_are_content_searchable_by_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-office-default-") as tmpdir:
+            root = Path(tmpdir)
+            documents = [
+                (root / "report.docx", "word/document.xml"),
+                (root / "budget.xlsx", "xl/sharedStrings.xml"),
+                (root / "briefing.pptx", "ppt/slides/slide1.xml"),
+            ]
+            for path, member in documents:
+                _create_ooxml_with_text(path, member, "office needle content")
+
+            code, lines = self._run_main([
+                "-c",
+                "needle",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertCountEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(path) for path, _member in documents],
+            )
+
+    def test_office_formats_can_be_selected_explicitly_by_type(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-office-type-") as tmpdir:
+            root = Path(tmpdir)
+            document = root / "report.DOCX"
+            _create_ooxml_with_text(document, "word/document.xml", "needle content")
+            ignored = root / "ordinary.txt"
+            ignored.write_text("needle content\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-c",
+                "--type=docx",
+                "needle",
+                str(root / "*"),
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [self._strip_ansi(line) for line in lines],
+                [str(document)],
+            )
+
+    def test_legacy_office_formats_use_the_expected_extractors(self) -> None:
+        original_which = hfind.shutil.which
+        original_run = hfind.subprocess.run
+        commands: list[str] = []
+
+        class _Result:
+            returncode = 0
+            stdout = "legacy office needle"
+
+        def _fake_which(command: str) -> str:
+            return f"/usr/bin/{command}"
+
+        def _fake_run(command, **_kwargs):
+            commands.append(Path(command[0]).name)
+            return _Result()
+
+        hfind.shutil.which = _fake_which
+        hfind.subprocess.run = _fake_run
+        try:
+            with tempfile.TemporaryDirectory(prefix="hfind-legacy-office-") as tmpdir:
+                root = Path(tmpdir)
+                for extension, expected_command in (
+                    ("doc", "antiword"),
+                    ("dot", "antiword"),
+                    ("xls", "xls2csv"),
+                    ("xlt", "xls2csv"),
+                    ("ppt", "catppt"),
+                    ("pps", "catppt"),
+                ):
+                    path = root / f"sample.{extension}"
+                    path.write_bytes(b"legacy")
+                    self.assertIn("needle", hfind._read_office_text_if_possible(path))
+                    self.assertEqual(commands[-1], expected_command)
+        finally:
+            hfind.shutil.which = original_which
+            hfind.subprocess.run = original_run
+
+    def test_image_and_office_type_catalogs_cover_requested_formats(self) -> None:
+        self.assertEqual(
+            hfind._IMAGE_FILE_TYPES,
+            {"png", "jpg", "jpeg", "tif", "tiff"},
+        )
+        for extension in (
+            "doc", "dot", "docx", "docm", "dotx", "dotm",
+            "xls", "xlt", "xlsx", "xlsm", "xltx", "xltm",
+            "ppt", "pps", "pptx", "pptm", "ppsx", "ppsm", "potx", "potm",
+        ):
+            self.assertIn(extension, hfind._OFFICE_FILE_TYPES)
+
     def test_hfind_settings_file_exposes_runtime_defaults(self) -> None:
         self.assertEqual(hfind._SETTINGS_PATH.name, "hfind.settings.json")
         self.assertEqual(hfind.HFIND_SETTINGS["cpu_limit_percent"], 90.0)
@@ -1030,6 +1281,8 @@ class HfindCliTests(unittest.TestCase):
         self.assertEqual(hfind.HFIND_SETTINGS["binary_sample_bytes"], 8192)
         self.assertEqual(hfind.HFIND_SETTINGS["ocr_render_dpi"], 160)
         self.assertEqual(hfind.HFIND_SETTINGS["pdf_text_timeout_seconds"], 20)
+        self.assertEqual(hfind.HFIND_SETTINGS["office_text_timeout_seconds"], 60)
+        self.assertEqual(hfind.HFIND_SETTINGS["office_zip_max_members"], 10000)
 
     def test_default_cpu_limit_is_ninety_percent(self) -> None:
         original = os.environ.pop("HFIND_CPU_LIMIT", None)

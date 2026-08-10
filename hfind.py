@@ -21,37 +21,46 @@ import sys
 import tempfile
 import time
 from urllib.parse import quote
+import xml.etree.ElementTree as ET
+import zipfile
 
 from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-w] [-e PATH] [-l] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-w] [-e PATH] [-t TYPE] [-l] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
     hfind.py -bcrvlposw QUERY [PATTERN ...]
 
 Notes:
   If -q/--query is omitted, the first non-switch positional argument is used as QUERY.
   If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
   Default search checks the full discovered path (directories + filename).
-  --base/-b switches matching target to basename only (filename + extension).
-  --content/-c includes file contents in matching.
-  --recursive/-r expands each pattern recursively under its base directory.
-  --verbose/-v lists matching lines under each matched file with yellow hits.
-  --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
-  --ocr-pdf/-o enables OCR fallback for PDFs that contain little/no extractable text;
-    it implies --pdf and still requires -c. The -o form may be used alone or stacked
-    with other short flags (for example, -cro or -crvo).
-  --wip/-w prints each checked file as one gray full-path line, with performed
-    operations such as content reading, PDF extraction, or OCR appended.
-  --exclude/-e PATH excludes PATH and all of its descendants; repeat for multiple paths.
-    Both '-e PATH' and '-e=PATH' forms are accepted, as are the long forms.
-  Symlinks are ignored by default, including files reached through symlinked directories.
-  --links/-l allows symlink files and traversal through symlinked directories.
-  --cpu-limit PERCENT dynamically throttles concurrent work to keep observed system CPU
-    near/below the target (default: 90).
-  --sort/-s waits for full scan and emits case-insensitively sorted results.
-  --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
+  
+  --base/-b                 switches matching target to basename only (filename + extension).
+  --content/-c              includes file contents in matching.
+  --recursive/-r            expands each pattern recursively under its base directory.
+  --verbose/-v              lists matching lines under each matched file with yellow hits.
+  --pdf/-p                  includes searchable text extracted from PDF files (only when -c is set).
+  --ocr-pdf/-o              enables OCR fallback for PDFs that contain little/no extractable text;
+                            it implies --pdf and still requires -c. The -o form may be used alone or stacked
+                            with other short flags (for example, -cro or -crvo).
+  --wip/-w                  prints each checked file as one gray full-path line, with performed
+                            operations such as content reading, PDF extraction, or OCR appended.
+  --exclude/-e PATH         excludes PATH and all of its descendants; repeat for multiple paths.
+                            Both '-e PATH' and '-e=PATH' forms are accepted, as are the long forms.
+  --type/-t TYPE            limits candidates to the named file extension(s), without the leading
+                            period. Repeat the option or separate types with a pipe, for example '-t pdf -t txt'
+                            or '-t "pdf|txt"'. Named image types (png, jpg/jpeg, tif/tiff) are OCRed automatically.
+                            Images are skipped unless explicitly named. Use 'all-images' for every supported
+                            image type and 'all-office' for every legacy/new Microsoft Office type. Pseudo-types
+                            may be combined or pipe-separated, for example '-t="all-images|all-office"'.
+                            Symlinks are ignored by default, including files reached through symlinked directories.
+  --links/-l                allows symlink files and traversal through symlinked directories.
+  --cpu-limit PERCENT       dynamically throttles concurrent work to keep observed system CPU
+                            near/below the target (default: 90).
+  --sort/-s                 waits for full scan and emits case-insensitively sorted results.
+  --sort-case-sensitive/-S  waits for full scan and emits case-sensitively sorted results.
 
 Examples:
     # Path search (default): path contains fred OR paul
@@ -88,6 +97,19 @@ ANSI_BOLD_PURPLE = "\033[1;35m"
 ANSI_GRAY = "\033[90m"
 ANSI_RESET = "\033[0m"
 OSC8_OPEN = "\033]8;;"
+
+_IMAGE_FILE_TYPES = frozenset({"png", "jpg", "jpeg", "tif", "tiff"})
+_OOXML_FILE_TYPES = frozenset({
+    "docx", "docm", "dotx", "dotm",
+    "xlsx", "xlsm", "xltx", "xltm",
+    "pptx", "pptm", "ppsx", "ppsm", "potx", "potm",
+})
+_LEGACY_OFFICE_FILE_TYPES = frozenset({"doc", "dot", "xls", "xlt", "ppt", "pps"})
+_OFFICE_FILE_TYPES = _OOXML_FILE_TYPES | _LEGACY_OFFICE_FILE_TYPES
+_PSEUDO_FILE_TYPES = {
+    "all-images": _IMAGE_FILE_TYPES,
+    "all-office": _OFFICE_FILE_TYPES,
+}
 OSC8_CLOSE = "\a"
 
 _SETTINGS_PATH = Path(__file__).resolve().with_name("hfind.settings.json")
@@ -162,6 +184,13 @@ _OCR_TESSERACT_TIMEOUT_SECONDS = _setting_float(
 )
 _PDF_TEXT_TIMEOUT_SECONDS = _setting_float(
     "pdf_text_timeout_seconds", 20.0, minimum=0.1
+)
+_OFFICE_TEXT_TIMEOUT_SECONDS = _setting_float(
+    "office_text_timeout_seconds", 60.0, minimum=0.1
+)
+_OFFICE_ZIP_MAX_MEMBERS = _setting_int("office_zip_max_members", 10000, minimum=1)
+_OFFICE_ZIP_MAX_UNCOMPRESSED_BYTES = _setting_int(
+    "office_zip_max_uncompressed_bytes", 268435456, minimum=1
 )
 _DEFAULT_CPU_LIMIT_PERCENT = _setting_float(
     "cpu_limit_percent", 90.0, minimum=0.0, maximum=100.0
@@ -314,6 +343,7 @@ def _parse_args(
     list[str],
     list[str],
     bool,
+    list[str],
 ]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
@@ -332,6 +362,7 @@ def _parse_args(
     positionals: list[str] = []
     excluded_paths: list[str] = []
     follow_links = False
+    file_types: list[str] = []
 
     i = 0
     while i < len(argv):
@@ -393,6 +424,23 @@ def _parse_args(
                 option = "--exclude" if arg.startswith("--exclude=") else "-e"
                 raise _usage_error(f"error: {option} requires one PATH")
             excluded_paths.append(value)
+            i += 1
+            continue
+        if arg == "--type" or arg == "-t":
+            if i + 1 >= len(argv):
+                raise _usage_error(f"error: {arg} requires one TYPE")
+            value = argv[i + 1]
+            if not value or value.startswith("-"):
+                raise _usage_error(f"error: {arg} requires one TYPE")
+            file_types.extend(value.split("|"))
+            i += 2
+            continue
+        if arg.startswith("--type=") or arg.startswith("-t="):
+            value = arg.split("=", 1)[1]
+            if not value:
+                option = "--type" if arg.startswith("--type=") else "-t"
+                raise _usage_error(f"error: {option} requires one TYPE")
+            file_types.extend(value.split("|"))
             i += 1
             continue
         if arg == "--cpu-limit":
@@ -474,6 +522,20 @@ def _parse_args(
     if not positionals:
         positionals = ["**/*" if recursive else "*"]
 
+    normalized_file_types: list[str] = []
+    for file_type in file_types:
+        normalized = file_type.strip().casefold()
+        if not normalized:
+            raise _usage_error("error: --type/-t requires a non-empty TYPE")
+        if normalized.startswith("."):
+            raise _usage_error("error: TYPE must be a file extension without the initial period")
+        if any(separator in normalized for separator in ("/", "\\")):
+            raise _usage_error("error: TYPE must be a file extension, not a path")
+        expanded_types = _PSEUDO_FILE_TYPES.get(normalized, (normalized,))
+        for expanded_type in sorted(expanded_types):
+            if expanded_type not in normalized_file_types:
+                normalized_file_types.append(expanded_type)
+
     return (
         query,
         include_content,
@@ -489,6 +551,7 @@ def _parse_args(
         positionals,
         excluded_paths,
         follow_links,
+        normalized_file_types,
     )
 
 
@@ -858,7 +921,11 @@ def _read_pdf_text_if_possible(
             extracted = "\n".join(pages).strip()
             if extracted:
                 best_text = extracted
-                if not _pdf_text_is_sparse(extracted, page_count):
+                scan_page_threshold = max(1, (page_count + 1) // 2)
+                mostly_scan_pages = scan_like_page_count >= scan_page_threshold
+                if not _pdf_text_is_sparse(extracted, page_count) and not (
+                    ocr_pdf and mostly_scan_pages
+                ):
                     return extracted
         except Exception:
             pass
@@ -878,7 +945,11 @@ def _read_pdf_text_if_possible(
                 poppler_text = result.stdout.strip()
                 if len(poppler_text) > len(best_text):
                     best_text = poppler_text
-                if not _pdf_text_is_sparse(poppler_text, page_count):
+                scan_page_threshold = max(1, (page_count + 1) // 2)
+                mostly_scan_pages = scan_like_page_count >= scan_page_threshold
+                if not _pdf_text_is_sparse(poppler_text, page_count) and not (
+                    ocr_pdf and mostly_scan_pages
+                ):
                     return poppler_text
         except Exception:
             pass
@@ -888,19 +959,149 @@ def _read_pdf_text_if_possible(
     # pypdf also found raster-image evidence on at least half of their pages; this
     # avoids OCRing ordinary short text PDFs merely because they contain few words.
     scan_page_threshold = max(1, (page_count + 1) // 2)
-    clearly_scan_like = (not best_text.strip()) or (
+    mostly_scan_pages = scan_like_page_count >= scan_page_threshold
+    clearly_scan_like = (not best_text.strip()) or mostly_scan_pages or (
         _pdf_text_is_sparse(best_text, page_count)
-        and scan_like_page_count >= scan_page_threshold
+        and scan_like_page_count > 0
     )
     if ocr_pdf and clearly_scan_like:
         if operations is not None:
             operations.append("OCR")
         ocr_text = _ocr_pdf_text_if_possible(path)
         if ocr_text:
-            return ocr_text
+            return _merge_extracted_and_ocr_text(best_text, ocr_text)
 
     # Keep file eligible for filename matching even if content extraction fails.
     return best_text
+
+
+def _merge_extracted_and_ocr_text(extracted_text: str, ocr_text: str) -> str:
+    """Preserve native PDF text while adding text recovered from page images."""
+    extracted = (extracted_text or "").strip()
+    ocr = (ocr_text or "").strip()
+    if not extracted:
+        return ocr
+    if not ocr:
+        return extracted
+    if ocr in extracted:
+        return extracted
+    if extracted in ocr:
+        return ocr
+    return f"{extracted}\n\n{ocr}"
+
+
+def _ocr_image_text_if_possible(path: Path) -> str:
+    """OCR an explicitly selected image using Tesseract."""
+    tesseract_cmd = shutil.which("tesseract")
+    if not tesseract_cmd:
+        return ""
+    env = os.environ.copy()
+    env.setdefault("OMP_THREAD_LIMIT", "1")
+    try:
+        result = subprocess.run(
+            [
+                tesseract_cmd,
+                str(path),
+                "stdout",
+                "--psm",
+                str(_OCR_TESSERACT_PSM),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_OCR_TESSERACT_TIMEOUT_SECONDS,
+            env=env,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _ooxml_member_is_searchable(name: str, extension: str) -> bool:
+    """Select document-content XML while avoiding relationships and metadata."""
+    lowered = name.casefold()
+    if not lowered.endswith(".xml"):
+        return False
+    if extension in {"docx", "docm", "dotx", "dotm"}:
+        return lowered.startswith("word/") and "/_rels/" not in lowered
+    if extension in {"xlsx", "xlsm", "xltx", "xltm"}:
+        return lowered == "xl/sharedstrings.xml" or lowered.startswith("xl/worksheets/")
+    if extension in {"pptx", "pptm", "ppsx", "ppsm", "potx", "potm"}:
+        return lowered.startswith(("ppt/slides/", "ppt/notesslides/"))
+    return False
+
+
+def _read_ooxml_text_if_possible(path: Path, extension: str) -> str:
+    """Extract visible text from modern ZIP/XML Microsoft Office formats."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = [
+                info
+                for info in archive.infolist()
+                if _ooxml_member_is_searchable(info.filename, extension)
+            ]
+            if len(archive.infolist()) > _OFFICE_ZIP_MAX_MEMBERS:
+                return ""
+            if sum(info.file_size for info in members) > _OFFICE_ZIP_MAX_UNCOMPRESSED_BYTES:
+                return ""
+            chunks: list[str] = []
+            for info in members:
+                try:
+                    root = ET.fromstring(archive.read(info))
+                except Exception:
+                    continue
+                values: list[str] = []
+                for element in root.iter():
+                    local_name = element.tag.rsplit("}", 1)[-1]
+                    if local_name in {"t", "v"} and element.text:
+                        value = element.text.strip()
+                        if value:
+                            values.append(value)
+                if values:
+                    chunks.append(" ".join(values))
+            return "\n".join(chunks)
+    except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        return ""
+
+
+def _read_legacy_office_text_if_possible(path: Path, extension: str) -> str:
+    """Extract old binary Office formats with standard command-line readers."""
+    command_candidates: dict[str, list[list[str]]] = {
+        "doc": [["antiword", str(path)], ["catdoc", str(path)]],
+        "dot": [["antiword", str(path)], ["catdoc", str(path)]],
+        "xls": [["xls2csv", str(path)]],
+        "xlt": [["xls2csv", str(path)]],
+        "ppt": [["catppt", str(path)]],
+        "pps": [["catppt", str(path)]],
+    }
+    for command in command_candidates.get(extension, []):
+        executable = shutil.which(command[0])
+        if not executable:
+            continue
+        command[0] = executable
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=_OFFICE_TEXT_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return ""
+
+
+def _read_office_text_if_possible(path: Path) -> str:
+    extension = path.suffix.casefold().lstrip(".")
+    if extension in _OOXML_FILE_TYPES:
+        return _read_ooxml_text_if_possible(path, extension)
+    if extension in _LEGACY_OFFICE_FILE_TYPES:
+        return _read_legacy_office_text_if_possible(path, extension)
+    return ""
 
 
 def _is_clearly_binary_file(path: Path) -> bool:
@@ -1129,9 +1330,13 @@ def _scan_candidate_for_query(
     search_base_only: bool,
     include_pdf: bool,
     ocr_pdf: bool = False,
+    ocr_images: bool = False,
 ) -> tuple[Path, str, bool, list[str]]:
     """Read one candidate and evaluate query match state."""
-    is_pdf = path.suffix.lower() == ".pdf"
+    extension = path.suffix.casefold().lstrip(".")
+    is_pdf = extension == "pdf"
+    is_image = extension in _IMAGE_FILE_TYPES
+    is_office = extension in _OFFICE_FILE_TYPES
     search_target = path.name if search_base_only else str(path)
     content = ""
     operations: list[str] = []
@@ -1145,6 +1350,13 @@ def _scan_candidate_for_query(
                     operations=operations,
                 )
                 content = text or ""
+        elif is_image:
+            if ocr_images:
+                operations.append("image OCR")
+                content = _ocr_image_text_if_possible(path)
+        elif is_office:
+            operations.append("Office text")
+            content = _read_office_text_if_possible(path)
         else:
             if _is_clearly_binary_file(path):
                 # Preserve filename matching in content mode even when the
@@ -1189,6 +1401,7 @@ def main(argv: list[str]) -> int:
             patterns,
             excluded_path_args,
             follow_links,
+            file_types,
         ) = _parse_args(argv)
         predicate = search_query.compile_match_predicate(
             query, strip_inline_image_data=False
@@ -1213,6 +1426,21 @@ def main(argv: list[str]) -> int:
             excluded_paths,
             follow_links,
         )
+        selected_types = set(file_types)
+        if selected_types:
+            allowed_suffixes = {f".{file_type}" for file_type in selected_types}
+            candidate_iter = (
+                path for path in candidate_iter
+                if path.suffix.casefold() in allowed_suffixes
+            )
+        else:
+            # Images are intentionally opt-in because OCR is substantially more
+            # expensive than ordinary path/content matching.
+            candidate_iter = (
+                path for path in candidate_iter
+                if path.suffix.casefold().lstrip(".") not in _IMAGE_FILE_TYPES
+            )
+        ocr_images = bool(selected_types & _IMAGE_FILE_TYPES)
         saw_candidate = False
         buffered_matches: list[tuple[Path, str]] = []
 
@@ -1245,6 +1473,7 @@ def main(argv: list[str]) -> int:
                     search_base_only=search_base_only,
                     include_pdf=include_pdf,
                     ocr_pdf=ocr_pdf,
+                    ocr_images=ocr_images,
                 )
                 _emit_wip(path, operations)
                 if not matched:
@@ -1291,6 +1520,7 @@ def main(argv: list[str]) -> int:
                                 search_base_only=search_base_only,
                                 include_pdf=include_pdf,
                                 ocr_pdf=ocr_pdf,
+                                ocr_images=ocr_images,
                             )
                         )
 

@@ -490,18 +490,18 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 `hfind` reuses mdexplore search syntax (AND/OR/NOT, quoted terms, `NEAR(...)`) for file discovery.
 
-Its hfind-specific runtime defaults are stored in `hfind.settings.json`, following the same JSON-backed settings pattern used by mdexplore and pdfexplore. The file includes the default 90% CPU target plus hfind-only worker, CPU sampling, binary detection, PDF extraction, and OCR thresholds/timeouts. `HFIND_CPU_LIMIT` and `HFIND_SEARCH_THREADS` continue to override their corresponding defaults when set in the environment.
+Its hfind-specific runtime defaults are stored in `hfind.settings.json`, following the same JSON-backed settings pattern used by mdexplore and pdfexplore. The file includes the CPU target plus hfind-only worker, CPU sampling, binary detection, PDF/OCR settings, and Office extraction time/ZIP-safety limits. `HFIND_CPU_LIMIT` and `HFIND_SEARCH_THREADS` continue to override their corresponding defaults when set in the environment.
 
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -514,7 +514,8 @@ Notes:
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
 - `--ocr-pdf` / `-o` enables OCR fallback for PDFs that appear to be scans. It implies `--pdf`, but content search still requires `--content` / `-c`. The short form can be used alone (`-o`) or stacked with other short switches, such as `-cro` or `-crvo`.
   - Normal searchable PDFs stay on the fast text-extraction path.
-  - PDFs with no extractable text, or sparse text plus raster-image evidence on most pages, are treated as scan-like.
+  - PDFs with no extractable text, sparse text plus raster-image evidence, or mostly scan-like image pages are treated as OCR candidates.
+  - When a mixed PDF already contains searchable text, that native text is preserved and combined with OCR output from its image pages for matching; OCR does not replace the text that was already extracted.
   - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
 - `--wip` / `-w` prints one gray progress line for every file as it finishes being checked. The progress line uses the file's full path and appends operations that were actually performed, such as `[content read]`, `[PDF text]`, `[OCR]`, or `[binary skipped]`.
   - WIP lines are progressive even when `--sort` / `-s` or `--sort-case-sensitive` / `-S` is active.
@@ -522,6 +523,16 @@ Notes:
 - `--exclude PATH` / `-e PATH` excludes that path and every file beneath it. The option is repeatable, and `--exclude=PATH` / `-e=PATH` are also accepted.
   - Exactly one path belongs to each `-e` / `--exclude` occurrence; the path is consumed atomically by the option and is never interpreted as the query or a search pattern/base path.
   - `~` is expanded using the current user's home directory, and relative exclude paths are resolved from the current working directory.
+- `--type TYPE` / `-t TYPE` limits the search to files whose extension is explicitly named. Types are written without the initial period, matching is case-insensitive, and the option is repeatable: `-t pdf -t txt`.
+  - Multiple types can also be supplied with a pipe, such as `-t "pdf|txt"`. Quote or escape the pipe so the shell passes it to hfind instead of treating it as a pipeline.
+  - Each `-t` / `--type` consumes exactly one atomic TYPE value and does not treat that value as the query or a search pattern.
+  - Images are deliberately opt-in. Specifying `png`, `jpg`, `jpeg`, `tif`, or `tiff` causes matching images to be OCRed automatically during content searches; `-o` is not needed because it controls PDF OCR only. Without an image type in `-t`/`--type`, images are skipped.
+  - The pseudo-type `all-images` expands to every supported image type (`png`, `jpg`, `jpeg`, `tif`, and `tiff`).
+  - Microsoft Word, Excel, and PowerPoint files are content-searchable by default and can also be selected explicitly. Supported modern formats are `docx`, `docm`, `dotx`, `dotm`, `xlsx`, `xlsm`, `xltx`, `xltm`, `pptx`, `pptm`, `ppsx`, `ppsm`, `potx`, and `potm`. Their document XML is read directly from the ZIP package with member-count and expanded-size safety limits.
+  - Supported legacy formats are `doc`, `dot`, `xls`, `xlt`, `ppt`, and `pps`. They use `antiword`/`catdoc`, `xls2csv`, or `catppt`; `setup-host.sh` installs and verifies those tools.
+  - The pseudo-type `all-office` expands to every supported legacy and modern Microsoft Office type.
+  - Pseudo-types can be repeated or combined with pipes like ordinary types, including `-t=all-images|all-office` (quote or escape the pipe when required by your shell).
+  - When no type option is supplied, hfind considers every matched non-image type; Office extraction is automatic when `--content`/`-c` is active.
 - Symlinks are ignored by default. This includes symlink files and files that would only be reached by traversing a symlinked directory.
 - `--links` / `-l` opts in to symlinks, allowing symlink files and recursive traversal through symlinked directories. The short flag may be stacked with other short flags, for example `-rl` or `-crvl`.
 - `--cpu-limit PERCENT` dynamically throttles work based on whole-system CPU use. The default is `90`; `--cpu-limit 0` disables CPU throttling.
@@ -567,6 +578,13 @@ Recursively searches from current directory for readable `.txt` files whose path
 ./hfind.sh -crvw "invoice" "./**/*.pdf"
 ./hfind.sh -r -e ~/my-dir -e=~/my-dir-2 "invoice" "*.pdf"
 ./hfind.sh -rl "invoice" "*.pdf"
+./hfind.sh -r -t pdf -t txt "invoice" "*"
+./hfind.sh -r -t "pdf|txt" "invoice" "*"
+./hfind.sh -cr -t "png|jpg|jpeg|tif|tiff" "invoice number" "*"
+./hfind.sh -cr -t "doc|docx|xls|xlsx|ppt|pptx" "roadmap" "*"
+./hfind.sh -cr -t=all-images "invoice number" "*"
+./hfind.sh -cr -t=all-office "roadmap" "*"
+./hfind.sh -cr -t="all-images|all-office" "confidential" "*"
 ./hfind.sh -crv -o --cpu-limit 70 "invoice" "./**/*.pdf"
 ```
 
