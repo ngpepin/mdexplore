@@ -25,12 +25,12 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-s|-S] [--ocr-pdf] [--cpu-limit PERCENT] [PATTERN ...]
-    hfind.py -bcrvps QUERY [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
+    hfind.py -bcrvpos QUERY [PATTERN ...]
 
 Notes:
-  If -q/--query is omitted, the first positional argument is used as QUERY.
+  If -q/--query is omitted, the first non-switch positional argument is used as QUERY.
   If no PATTERN is provided, current directory is assumed (`*`, or `**/*` with -r).
   Default search checks the full discovered path (directories + filename).
   --base/-b switches matching target to basename only (filename + extension).
@@ -38,8 +38,9 @@ Notes:
   --recursive/-r expands each pattern recursively under its base directory.
   --verbose/-v lists matching lines under each matched file with yellow hits.
   --pdf/-p includes searchable text extracted from PDF files (only when -c is set).
-  --ocr-pdf enables OCR fallback for PDFs that contain little/no extractable text; 
-    it implies --pdf and still requires -c.
+  --ocr-pdf/-o enables OCR fallback for PDFs that contain little/no extractable text;
+    it implies --pdf and still requires -c. The -o form may be used alone or stacked
+    with other short flags (for example, -cro or -crvo).
   --cpu-limit PERCENT dynamically throttles concurrent work to keep observed system CPU
     near/below the target (default: 80).
   --sort/-s waits for full scan and emits case-insensitively sorted results.
@@ -283,6 +284,10 @@ def _parse_args(
                     verbose = True
                     continue
                 if flag == "p":
+                    include_pdf = True
+                    continue
+                if flag == "o":
+                    ocr_pdf = True
                     include_pdf = True
                     continue
                 if flag == "s":

@@ -493,13 +493,13 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -510,7 +510,7 @@ Notes:
 - `--base` / `-b` switches query matching target to basename only (filename + extension).
 - `--verbose` / `-v` prints matching line(s) under each matched file and highlights hit text in yellow.
 - `--pdf` / `-p` enables searching extracted text inside `.pdf` files.
-- `--ocr-pdf` enables OCR fallback for PDFs that appear to be scans. It implies `--pdf`, but content search still requires `--content` / `-c`.
+- `--ocr-pdf` / `-o` enables OCR fallback for PDFs that appear to be scans. It implies `--pdf`, but content search still requires `--content` / `-c`. The short form can be used alone (`-o`) or stacked with other short switches, such as `-cro` or `-crvo`.
   - Normal searchable PDFs stay on the fast text-extraction path.
   - PDFs with no extractable text, or sparse text plus raster-image evidence on most pages, are treated as scan-like.
   - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
@@ -552,8 +552,8 @@ Recursively searches from current directory for readable `.txt` files whose path
 ./hfind.sh -crvp "OR(fred, paul)" *.txt
 ./hfind.sh -crvps "OR(fred, paul)" *.txt
 ./hfind.sh -crvpS "OR(fred, paul)" *.txt
-./hfind.sh -crv --ocr-pdf "invoice" "./**/*.pdf"
-./hfind.sh -crv --ocr-pdf --cpu-limit 70 "invoice" "./**/*.pdf"
+./hfind.sh -crvo "invoice" "./**/*.pdf"
+./hfind.sh -crv -o --cpu-limit 70 "invoice" "./**/*.pdf"
 ```
 
 All above are valid shorthand forms.

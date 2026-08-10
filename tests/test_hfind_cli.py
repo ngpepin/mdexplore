@@ -766,6 +766,23 @@ class HfindCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual([self._strip_ansi(line) for line in lines], [str(pdf_path)])
 
+    def test_first_non_switch_positional_is_query_when_q_is_omitted(self) -> None:
+        parsed = hfind._parse_args([
+            "-crvo",
+            "--cpu-limit",
+            "70",
+            "needle",
+            "*.pdf",
+        ])
+        self.assertEqual(parsed[0], "needle")
+        self.assertTrue(parsed[1])
+        self.assertTrue(parsed[3])
+        self.assertTrue(parsed[4])
+        self.assertTrue(parsed[5])
+        self.assertTrue(parsed[6])
+        self.assertEqual(parsed[7], 70.0)
+        self.assertEqual(parsed[10], ["*.pdf"])
+
     def test_ocr_pdf_flag_implies_pdf_and_cpu_limit_parses(self) -> None:
         parsed = hfind._parse_args([
             "--ocr-pdf",
@@ -778,6 +795,17 @@ class HfindCliTests(unittest.TestCase):
         self.assertTrue(parsed[5])
         self.assertTrue(parsed[6])
         self.assertEqual(parsed[7], 72.5)
+
+        short_only = hfind._parse_args(["-o", "-c", "pepin", "*.pdf"])
+        self.assertTrue(short_only[5])
+        self.assertTrue(short_only[6])
+        self.assertTrue(short_only[1])
+
+        stacked = hfind._parse_args(["-cro", "pepin", "*.pdf"])
+        self.assertTrue(stacked[1])
+        self.assertTrue(stacked[3])
+        self.assertTrue(stacked[5])
+        self.assertTrue(stacked[6])
 
         with self.assertRaises(SystemExit) as raised:
             hfind._parse_args(["--cpu-limit", "101", "pepin", "*.pdf"])
