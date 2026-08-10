@@ -57,6 +57,34 @@ class PdfExploreRecentRootHistoryTests(unittest.TestCase):
         self.assertEqual(recent[0], navigated_roots[-2])
         self.assertNotIn(self.initial_root.resolve(), recent)
 
+    def test_recent_menu_keeps_entire_retained_history_newest_first(self) -> None:
+        retained: list[Path] = []
+        for name in (
+            "z-newest",
+            "y-02",
+            "x-03",
+            "w-04",
+            "v-05",
+            "u-06",
+            "t-07",
+            "s-08",
+            "r-09",
+            "q-10",
+            "a-11",
+            "p-oldest",
+        ):
+            directory = self.base / name
+            directory.mkdir()
+            retained.append(directory.resolve())
+
+        self.window._recent_root_directories = retained
+        self.window._refresh_recent_root_menu()
+        actions = self.window.recent_menu.actions()
+
+        self.assertEqual(len(actions), len(retained))
+        self.assertFalse(any(action.isSeparator() for action in actions))
+        self.assertEqual([action.text() for action in actions], [str(path) for path in retained])
+
     def test_recent_root_requires_minimum_dwell_before_recording(self) -> None:
         quick = self.base / "quick-root"
         quick.mkdir(parents=True, exist_ok=True)

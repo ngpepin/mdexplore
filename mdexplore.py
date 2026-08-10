@@ -6638,18 +6638,9 @@ class MdExploreWindow(QMainWindow):
             return
 
         current_key = self._path_key(self.root) if isinstance(self.root, Path) else ""
-        mru_count = max(
-            0,
-            min(
-                int(self.RECENT_ROOT_MENU_MRU_COUNT),
-                len(self._recent_root_directories),
-            ),
-        )
-        recent_directories = self._recent_root_directories[:mru_count]
-        remaining_directories = sorted(
-            self._recent_root_directories[mru_count:],
-            key=lambda path: str(path).casefold(),
-        )
+        # The stored list is already maintained in newest-first order. Preserve
+        # that order for every menu entry instead of alphabetizing the tail.
+        recent_directories = self._recent_root_directories
 
         def _add_recent_action(directory: Path) -> None:
             label = str(directory)
@@ -6665,11 +6656,6 @@ class MdExploreWindow(QMainWindow):
         for directory in recent_directories:
             _add_recent_action(directory)
 
-        if recent_directories and remaining_directories:
-            menu.addSeparator()
-
-        for directory in remaining_directories:
-            _add_recent_action(directory)
 
     def _reload_recent_root_directories_before_menu_open(self) -> None:
         """Refresh recent roots from disk every time the Recent menu opens."""

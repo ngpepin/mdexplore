@@ -136,8 +136,7 @@ gradually decomposed.
   - PlantUML diagrams (asynchronous local render with placeholders).
   - Markdown callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
 - Top actions:
-  - `Recent` opens a dropdown of up to 35 retained root directories:  
-  first 10 shown most-recent-first, then a separator, then up to 25 remaining entries sorted alphabetically.  
+  - `Recent` opens a dropdown of up to 35 retained root directories, with the entire list shown most-recent-first.
   The list refreshes from disk each time the menu is opened so multiple running instances stay in sync.  
   A root is added only after it has been active for at least 30 seconds and then you navigate to another root.
   - `^` moves root up one directory level.
@@ -222,8 +221,7 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 - Last effective root plus recent-root history are persisted to `~/.mdexplore.cfg` on root navigation and on exit.
   - Payload format is JSON with keys `default_root`, `recent_roots`, and `copy_base64_images_enabled`  
   (legacy plain-text config is still accepted on read).
-  - Recent roots are capped at 35 entries in rolling newest-first storage.  
-  Menu presentation is split: 10 most-recent-first, separator, then remaining entries alphabetically.
+  - Recent roots are capped at 35 entries in rolling newest-first storage, and the entire menu retains that newest-first order.
   - Config writes use a lock file (`~/.mdexplore.cfg.lock`) with non-blocking, momentary locking.
   - If another instance holds the lock during a save attempt, that save is skipped silently.
   - Lock files older than 2 minutes are cleaned up automatically (silently).
@@ -338,7 +336,7 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 | --- | --- | --- |
 | `MDEXPLORE_MAX_DOCUMENT_VIEWS` | `8` | Maximum tabs/views per document. |
 | `MDEXPLORE_MAX_RECENT_ROOT_DIRECTORIES` | `35` | Persistent recent-root history capacity. |
-| `MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT` | `10` | MRU block size shown first in `Recent` menu. |
+| `MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT` | `10` | Legacy compatibility setting; the full `Recent` menu is now newest-first. |
 | `MDEXPLORE_MIN_RECENT_ROOT_DWELL_SECONDS` | `30.0` | Minimum time a root must stay active before being persisted as recent. |
 | `MDEXPLORE_CONFIG_LOCK_STALE_SECONDS` | `120.0` | Age threshold for lock-file stale cleanup. |
 | `MDEXPLORE_VIEWS_FILE_NAME` | `.mdexplore-views.json` | Sidecar file for per-document multi-view sessions. |
