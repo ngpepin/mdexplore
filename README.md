@@ -519,7 +519,9 @@ Notes:
   - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
 - `--wip` / `-w` prints one gray progress line for every file as it finishes being checked. The progress line uses the file's full path and appends operations that were actually performed, such as `[content read]`, `[PDF text]`, `[OCR]`, or `[binary skipped]`.
   - WIP lines are progressive even when `--sort` / `-s` or `--sort-case-sensitive` / `-S` is active.
-  - A WIP line for a file with no match is never added to the sort buffer; only actual matches are sorted and emitted as results.
+  - Without sorting, matches still appear progressively and are then replayed together at the end so they are not lost among non-matching WIP lines. The replay uses the identical filepath colors, verbose excerpts, hit highlighting, and other formatting as the original match output.
+  - With `-s`/`-S`, matches are retained and emitted together at the end in the requested order, using that same complete formatting.
+  - A WIP line for a file with no match is never added to the final match output; only actual matches are replayed or sorted.
 - `--exclude PATH` / `-e PATH` excludes that path and every file beneath it. The option is repeatable, and `--exclude=PATH` / `-e=PATH` are also accepted.
   - Exactly one path belongs to each `-e` / `--exclude` occurrence; the path is consumed atomically by the option and is never interpreted as the query or a search pattern/base path.
   - `~` is expanded using the current user's home directory, and relative exclude paths are resolved from the current working directory.

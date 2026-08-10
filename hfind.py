@@ -1443,10 +1443,18 @@ def main(argv: list[str]) -> int:
         ocr_images = bool(selected_types & _IMAGE_FILE_TYPES)
         saw_candidate = False
         buffered_matches: list[tuple[Path, str]] = []
+        wip_replay_matches: list[tuple[Path, str]] = []
 
         def _emit_wip(path: Path, operations: list[str]) -> None:
             if wip:
                 print(_style_wip_filepath(path, operations), flush=True)
+
+        def _print_match(path: Path, content: str) -> None:
+            """Render one match identically for progressive and final output."""
+            if verbose and include_content:
+                _print_verbose_result(path, content, query)
+            else:
+                print(_style_filepath(path), flush=True)
 
         def _emit_match(path: Path, content: str) -> None:
             nonlocal match_count
@@ -1454,13 +1462,11 @@ def main(argv: list[str]) -> int:
             if sort_results:
                 buffered_matches.append((path, content))
                 return
-            if verbose:
-                if include_content:
-                    _print_verbose_result(path, content, query)
-                else:
-                    print(_style_filepath(path), flush=True)
-            else:
-                print(_style_filepath(path), flush=True)
+            _print_match(path, content)
+            if wip:
+                # WIP output can bury progressive matches among non-matching file
+                # lines, so retain the exact path/content pair for a final replay.
+                wip_replay_matches.append((path, content))
 
         worker_count = max(1, _MAX_SEARCH_WORKERS)
         if worker_count <= 1:
@@ -1549,6 +1555,7 @@ def main(argv: list[str]) -> int:
         if not saw_candidate:
             return 1
 
+        final_matches: list[tuple[Path, str]] = []
         if sort_results and buffered_matches:
             if sort_case_sensitive:
                 buffered_matches.sort(key=lambda item: str(item[0]))
@@ -1556,14 +1563,12 @@ def main(argv: list[str]) -> int:
                 buffered_matches.sort(
                     key=lambda item: (str(item[0]).casefold(), str(item[0]))
                 )
-            for path, content in buffered_matches:
-                if verbose:
-                    if include_content:
-                        _print_verbose_result(path, content, query)
-                    else:
-                        print(_style_filepath(path), flush=True)
-                else:
-                    print(_style_filepath(path), flush=True)
+            final_matches = buffered_matches
+        elif wip and wip_replay_matches:
+            final_matches = wip_replay_matches
+
+        for path, content in final_matches:
+            _print_match(path, content)
 
         return 0 if match_count else 1
     except KeyboardInterrupt:

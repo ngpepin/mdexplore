@@ -729,6 +729,74 @@ class HfindCliTests(unittest.TestCase):
             self.assertEqual(plain.count(str(missed)), 0)
             self.assertTrue(any("\x1b[90m" in line for line in stdout_lines[:-1]))
 
+    def test_wip_replays_progressive_matches_at_end(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-wip-replay-") as tmpdir:
+            root = Path(tmpdir)
+            matched = root / "matched.txt"
+            missed = root / "missed.txt"
+            matched.write_text("needle\n", encoding="utf-8")
+            missed.write_text("nothing\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-cw",
+                "needle",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            plain = [self._strip_ansi(line) for line in lines]
+            self.assertEqual(plain.count(str(matched)), 2)
+            self.assertEqual(plain[-1], str(matched))
+            self.assertIn(f"{missed.resolve()} [content read]", plain)
+
+    def test_wip_verbose_replay_preserves_content_excerpt_formatting(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-wip-verbose-replay-") as tmpdir:
+            root = Path(tmpdir)
+            matched = root / "matched.txt"
+            matched.write_text("first line\nneedle excerpt\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-cvw",
+                "needle",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            plain = [self._strip_ansi(line) for line in lines]
+            self.assertEqual(plain.count(str(matched)), 2)
+            self.assertEqual(plain.count("2: needle excerpt"), 2)
+            excerpt_lines = [
+                rendered
+                for rendered, unstyled in zip(lines, plain)
+                if unstyled == "2: needle excerpt"
+            ]
+            self.assertEqual(len(excerpt_lines), 2)
+            self.assertEqual(excerpt_lines[0], excerpt_lines[1])
+
+    def test_wip_sorted_verbose_results_are_final_sorted_and_fully_formatted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-wip-sort-verbose-") as tmpdir:
+            root = Path(tmpdir)
+            first = root / "a_match.txt"
+            second = root / "z_match.txt"
+            first.write_text("needle alpha\n", encoding="utf-8")
+            second.write_text("needle zulu\n", encoding="utf-8")
+
+            code, lines = self._run_main([
+                "-cvws",
+                "needle",
+                str(root / "*.txt"),
+            ])
+
+            self.assertEqual(code, 0)
+            plain = [self._strip_ansi(line) for line in lines]
+            first_result = plain.index(str(first))
+            second_result = plain.index(str(second))
+            self.assertLess(first_result, second_result)
+            self.assertEqual(plain[first_result + 1], "1: needle alpha")
+            self.assertEqual(plain[second_result + 1], "1: needle zulu")
+            self.assertEqual(plain.count(str(first)), 1)
+            self.assertEqual(plain.count(str(second)), 1)
+
     def test_wip_reports_ocr_when_ocr_is_performed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-wip-ocr-") as tmpdir:
             root = Path(tmpdir)
