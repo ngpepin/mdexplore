@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
+import json
 import os
 from pathlib import Path
 import re
@@ -42,7 +43,7 @@ Notes:
     it implies --pdf and still requires -c. The -o form may be used alone or stacked
     with other short flags (for example, -cro or -crvo).
   --cpu-limit PERCENT dynamically throttles concurrent work to keep observed system CPU
-    near/below the target (default: 80).
+    near/below the target (default: 90).
   --sort/-s waits for full scan and emits case-insensitively sorted results.
   --sort-case-sensitive/-S waits for full scan and emits case-sensitively sorted results.
 
@@ -81,9 +82,83 @@ ANSI_BOLD_PURPLE = "\033[1;35m"
 ANSI_RESET = "\033[0m"
 OSC8_OPEN = "\033]8;;"
 OSC8_CLOSE = "\a"
-_BINARY_SAMPLE_BYTES = 8192
-_OCR_SPARSE_TEXT_ALNUM_THRESHOLD = 32
-_CPU_SAMPLE_INTERVAL_SECONDS = 0.20
+
+_SETTINGS_PATH = Path(__file__).resolve().with_name("hfind.settings.json")
+
+
+def _load_settings() -> dict[str, object]:
+    try:
+        parsed = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    section = parsed.get("hfind")
+    return dict(section) if isinstance(section, dict) else {}
+
+
+HFIND_SETTINGS = _load_settings()
+
+
+def _setting_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(HFIND_SETTINGS.get(name, default))
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+
+def _setting_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    try:
+        value = float(HFIND_SETTINGS.get(name, default))
+    except Exception:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+_SEARCH_WORKER_MIN = _setting_int("search_worker_min", 4, minimum=1)
+_SEARCH_WORKER_MAX = _setting_int("search_worker_max", 24, minimum=_SEARCH_WORKER_MIN)
+_SEARCH_WORKER_CPU_MULTIPLIER = _setting_int("search_worker_cpu_multiplier", 3, minimum=1)
+_CPU_SAMPLE_INTERVAL_SECONDS = _setting_float("cpu_sample_interval_seconds", 0.20, minimum=0.01)
+_BINARY_SAMPLE_BYTES = _setting_int("binary_sample_bytes", 8192, minimum=1)
+_BINARY_NON_TEXT_RATIO_THRESHOLD = _setting_float(
+    "binary_non_text_ratio_threshold", 0.30, minimum=0.0, maximum=1.0
+)
+_OCR_SPARSE_TEXT_ALNUM_THRESHOLD = _setting_int(
+    "ocr_sparse_text_alnum_threshold", 32, minimum=0
+)
+_OCR_SPARSE_TEXT_ALNUM_PER_PAGE = _setting_int(
+    "ocr_sparse_text_alnum_per_page", 24, minimum=0
+)
+_OCR_SCAN_PAGE_ALNUM_THRESHOLD = _setting_int(
+    "ocr_scan_page_alnum_threshold", 8, minimum=0
+)
+_OCR_RENDER_DPI = _setting_int("ocr_render_dpi", 160, minimum=1)
+_OCR_RENDER_TIMEOUT_SECONDS = _setting_float(
+    "ocr_render_timeout_seconds", 120.0, minimum=0.1
+)
+_OCR_TESSERACT_PSM = _setting_int(
+    "ocr_tesseract_page_segmentation_mode", 3, minimum=0
+)
+_OCR_TESSERACT_TIMEOUT_SECONDS = _setting_float(
+    "ocr_tesseract_timeout_seconds", 90.0, minimum=0.1
+)
+_PDF_TEXT_TIMEOUT_SECONDS = _setting_float(
+    "pdf_text_timeout_seconds", 20.0, minimum=0.1
+)
+_DEFAULT_CPU_LIMIT_PERCENT = _setting_float(
+    "cpu_limit_percent", 90.0, minimum=0.0, maximum=100.0
+)
 
 
 def _configured_search_workers() -> int:
@@ -94,18 +169,21 @@ def _configured_search_workers() -> int:
         configured = 0
     if configured > 0:
         return configured
-    return max(4, min(24, (os.cpu_count() or 2) * 3))
+    return max(
+        _SEARCH_WORKER_MIN,
+        min(_SEARCH_WORKER_MAX, (os.cpu_count() or 2) * _SEARCH_WORKER_CPU_MULTIPLIER),
+    )
 
 
 _MAX_SEARCH_WORKERS = _configured_search_workers()
 
 
 def _configured_cpu_limit() -> float:
-    raw = os.environ.get("HFIND_CPU_LIMIT", "80").strip()
+    raw = os.environ.get("HFIND_CPU_LIMIT", str(_DEFAULT_CPU_LIMIT_PERCENT)).strip()
     try:
         value = float(raw)
     except Exception:
-        value = 80.0
+        value = _DEFAULT_CPU_LIMIT_PERCENT
     if value <= 0:
         return 0.0
     return min(100.0, value)
@@ -442,7 +520,10 @@ def _read_text_if_possible(path: Path) -> str | None:
 def _pdf_text_is_sparse(text: str, page_count: int = 1) -> bool:
     """Return whether extracted PDF text is sparse enough to indicate a scan."""
     alnum_count = sum(1 for char in (text or "") if char.isalnum())
-    threshold = max(_OCR_SPARSE_TEXT_ALNUM_THRESHOLD, max(1, page_count) * 24)
+    threshold = max(
+        _OCR_SPARSE_TEXT_ALNUM_THRESHOLD,
+        max(1, page_count) * _OCR_SPARSE_TEXT_ALNUM_PER_PAGE,
+    )
     return alnum_count < threshold
 
 
@@ -484,14 +565,14 @@ def _ocr_pdf_text_if_possible(path: Path) -> str:
                     pdftoppm_cmd,
                     "-jpeg",
                     "-r",
-                    "160",
+                    str(_OCR_RENDER_DPI),
                     str(path),
                     str(prefix),
                 ],
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=120,
+                timeout=_OCR_RENDER_TIMEOUT_SECONDS,
             )
             if render.returncode != 0:
                 return ""
@@ -508,11 +589,17 @@ def _ocr_pdf_text_if_possible(path: Path) -> str:
             pages: list[str] = []
             for image_path in page_images:
                 result = subprocess.run(
-                    [tesseract_cmd, str(image_path), "stdout", "--psm", "3"],
+                    [
+                        tesseract_cmd,
+                        str(image_path),
+                        "stdout",
+                        "--psm",
+                        str(_OCR_TESSERACT_PSM),
+                    ],
                     capture_output=True,
                     text=True,
                     check=False,
-                    timeout=90,
+                    timeout=_OCR_TESSERACT_TIMEOUT_SECONDS,
                     env=env,
                 )
                 if result.returncode == 0 and result.stdout.strip():
@@ -543,7 +630,7 @@ def _read_pdf_text_if_possible(path: Path, *, ocr_pdf: bool = False) -> str | No
                     page_text = ""
                 pages.append(page_text)
                 page_alnum = sum(1 for char in page_text if char.isalnum())
-                if page_alnum < 8 and _pdf_page_has_image(page):
+                if page_alnum < _OCR_SCAN_PAGE_ALNUM_THRESHOLD and _pdf_page_has_image(page):
                     scan_like_page_count += 1
             extracted = "\n".join(pages).strip()
             if extracted:
@@ -562,7 +649,7 @@ def _read_pdf_text_if_possible(path: Path, *, ocr_pdf: bool = False) -> str | No
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=20,
+                timeout=_PDF_TEXT_TIMEOUT_SECONDS,
             )
             if result.returncode == 0 and result.stdout.strip():
                 poppler_text = result.stdout.strip()
@@ -608,7 +695,7 @@ def _is_clearly_binary_file(path: Path) -> bool:
 
     text_like = set(b"\n\r\t\f\b") | set(range(32, 127))
     non_text_count = sum(1 for byte in sample if byte not in text_like)
-    return (non_text_count / len(sample)) > 0.30
+    return (non_text_count / len(sample)) > _BINARY_NON_TEXT_RATIO_THRESHOLD
 
 
 def _line_spans(content: str) -> list[tuple[int, int, str]]:

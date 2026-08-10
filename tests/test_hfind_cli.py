@@ -811,6 +811,23 @@ class HfindCliTests(unittest.TestCase):
             hfind._parse_args(["--cpu-limit", "101", "pepin", "*.pdf"])
         self.assertIn("between 0 and 100", str(raised.exception))
 
+    def test_hfind_settings_file_exposes_runtime_defaults(self) -> None:
+        self.assertEqual(hfind._SETTINGS_PATH.name, "hfind.settings.json")
+        self.assertEqual(hfind.HFIND_SETTINGS["cpu_limit_percent"], 90.0)
+        self.assertEqual(hfind.HFIND_SETTINGS["search_worker_min"], 4)
+        self.assertEqual(hfind.HFIND_SETTINGS["search_worker_max"], 24)
+        self.assertEqual(hfind.HFIND_SETTINGS["binary_sample_bytes"], 8192)
+        self.assertEqual(hfind.HFIND_SETTINGS["ocr_render_dpi"], 160)
+        self.assertEqual(hfind.HFIND_SETTINGS["pdf_text_timeout_seconds"], 20)
+
+    def test_default_cpu_limit_is_ninety_percent(self) -> None:
+        original = os.environ.pop("HFIND_CPU_LIMIT", None)
+        try:
+            self.assertEqual(hfind._configured_cpu_limit(), 90.0)
+        finally:
+            if original is not None:
+                os.environ["HFIND_CPU_LIMIT"] = original
+
     def test_cpu_worker_limit_backs_off_and_recovers(self) -> None:
         self.assertEqual(hfind._adjust_worker_limit(8, 95.0, 80.0, 16), 6)
         self.assertEqual(hfind._adjust_worker_limit(6, 82.0, 80.0, 16), 4)

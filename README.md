@@ -490,6 +490,8 @@ If `PATH` is omitted for direct run, the same config/home default rule applies.
 
 `hfind` reuses mdexplore search syntax (AND/OR/NOT, quoted terms, `NEAR(...)`) for file discovery.
 
+Its hfind-specific runtime defaults are stored in `hfind.settings.json`, following the same JSON-backed settings pattern used by mdexplore and pdfexplore. The file includes the default 90% CPU target plus hfind-only worker, CPU sampling, binary detection, PDF extraction, and OCR thresholds/timeouts. `HFIND_CPU_LIMIT` and `HFIND_SEARCH_THREADS` continue to override their corresponding defaults when set in the environment.
+
 Run via wrapper:
 
 ```bash
@@ -514,7 +516,7 @@ Notes:
   - Normal searchable PDFs stay on the fast text-extraction path.
   - PDFs with no extractable text, or sparse text plus raster-image evidence on most pages, are treated as scan-like.
   - OCR uses Poppler `pdftoppm` plus Tesseract when both commands are available; if either is unavailable, hfind falls back to ordinary PDF text extraction.
-- `--cpu-limit PERCENT` dynamically throttles work based on whole-system CPU use. The default is `80`; `--cpu-limit 0` disables CPU throttling.
+- `--cpu-limit PERCENT` dynamically throttles work based on whole-system CPU use. The default is `90`; `--cpu-limit 0` disables CPU throttling.
   - `HFIND_CPU_LIMIT` sets the default CPU target.
   - `HFIND_SEARCH_THREADS` remains the maximum worker-pool size; hfind may keep fewer workers active while the system is busy.
 - Default output is progressive: matches print as they are found.
