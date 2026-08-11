@@ -707,6 +707,60 @@ class HfindCliTests(unittest.TestCase):
                 ],
             )
 
+    def test_number_option_parses_standalone_stacked_and_long_forms(self) -> None:
+        self.assertTrue(hfind._parse_args(["-n", "needle", "*"])[15])
+        self.assertTrue(hfind._parse_args(["--number", "needle", "*"])[15])
+        self.assertTrue(hfind._parse_args(["-crn", "needle", "*"])[15])
+        self.assertFalse(hfind._parse_args(["needle", "*"])[15])
+
+    def test_number_and_wip_are_mutually_exclusive(self) -> None:
+        for args in (
+            ["-wn", "needle", "*"],
+            ["--wip", "--number", "needle", "*"],
+        ):
+            with self.subTest(args=args):
+                with self.assertRaises(SystemExit) as raised:
+                    hfind._parse_args(args)
+                self.assertIn("mutually exclusive", str(raised.exception))
+
+    def test_number_progress_is_aligned_by_extension(self) -> None:
+        summary = hfind._format_number_progress(
+            125,
+            {"png": 25, "pdf": 100},
+        )
+        self.assertEqual(
+            summary,
+            "   125 files examined;    100 pdf;     25 png",
+        )
+
+    def test_number_progress_updates_in_place_and_restarts_after_match(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hfind-number-progress-") as tmpdir:
+            root = Path(tmpdir)
+            (root / "a-miss.txt").write_text("nothing\n", encoding="utf-8")
+            matched = root / "b-hit.pdf"
+            matched.write_bytes(b"not a real pdf")
+            (root / "c-miss.md").write_text("nothing\n", encoding="utf-8")
+
+            stream = io.StringIO()
+            original_workers = hfind._MAX_SEARCH_WORKERS
+            hfind._MAX_SEARCH_WORKERS = 1
+            try:
+                with contextlib.redirect_stdout(stream):
+                    code = hfind.main(["-n", "hit", str(root / "*")])
+            finally:
+                hfind._MAX_SEARCH_WORKERS = original_workers
+
+            rendered = stream.getvalue()
+            plain = self._strip_ansi(rendered)
+            self.assertEqual(code, 0)
+            self.assertGreaterEqual(rendered.count("\r"), 3)
+            self.assertIn("\033[K", rendered)
+            self.assertIn("\033[90m", rendered)
+            self.assertIn("     3 files examined;      1 md;      1 pdf;      1 txt", plain)
+            match_position = plain.index(str(matched))
+            self.assertIn("     2 files examined", plain[:match_position])
+            self.assertIn("     3 files examined", plain[match_position:])
+
     def test_wip_lists_checked_full_paths_and_excludes_nonmatches_from_sort(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-wip-sort-") as tmpdir:
             root = Path(tmpdir)

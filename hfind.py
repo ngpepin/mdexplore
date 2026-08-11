@@ -28,9 +28,9 @@ from mdexplore_app import search as search_query
 
 
 USAGE = """Usage:
-    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
-    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-w] [-e PATH] [-t TYPE] [-l] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
-    hfind.py -bcrvlposw QUERY [PATTERN ...]
+    hfind.py --query QUERY [--base] [--content] [--recursive] [--verbose] [--pdf] [--ocr-pdf|-o] [--wip|-w|--number|-n] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|--sort-case-sensitive] [PATTERN ...]
+    hfind.py -q QUERY [-b] [-c] [-r] [-v] [-p] [-o] [-w|-n] [-e PATH] [-t TYPE] [-l] [-s|-S] [--cpu-limit PERCENT] [PATTERN ...]
+    hfind.py -bcrvlposwn QUERY [PATTERN ...]
 
 Notes:
   If -q/--query is omitted, the first non-switch positional argument is used as QUERY.
@@ -47,6 +47,8 @@ Notes:
                             with other short flags (for example, -cro or -crvo).
   --wip/-w                  prints each checked file as one gray full-path line, with performed
                             operations such as content reading, PDF extraction, or OCR appended.
+  --number/-n               shows one gray, in-place progress line with the total files examined
+                             and aligned per-extension counts. Mutually exclusive with --wip/-w.
   --exclude/-e PATH         excludes PATH and all of its descendants; repeat for multiple paths.
                             Both '-e PATH' and '-e=PATH' forms are accepted, as are the long forms.
   --type/-t TYPE            limits candidates to the named file extension(s), without the leading
@@ -326,6 +328,16 @@ def _style_wip_filepath(path: Path, operations: list[str]) -> str:
     )
 
 
+def _format_number_progress(total: int, counts: dict[str, int]) -> str:
+    """Format an aligned file-count summary for the in-place progress display."""
+    width = max(6, len(str(max(0, total))))
+    parts = [f"{max(0, total):>{width}} files examined"]
+    for extension in sorted(counts, key=lambda value: (value.casefold(), value)):
+        label = extension or "[no extension]"
+        parts.append(f"{max(0, counts[extension]):>{width}} {label}")
+    return "; ".join(parts)
+
+
 def _parse_args(
     argv: list[str],
 ) -> tuple[
@@ -344,6 +356,7 @@ def _parse_args(
     list[str],
     bool,
     list[str],
+    bool,
 ]:
     def _usage_error(message: str) -> SystemExit:
         return SystemExit(f"{message}\n\n{USAGE}")
@@ -356,6 +369,7 @@ def _parse_args(
     include_pdf = False
     ocr_pdf = False
     wip = False
+    number_progress = False
     cpu_limit = _configured_cpu_limit()
     sort_results = False
     sort_case_sensitive = False
@@ -406,6 +420,10 @@ def _parse_args(
             continue
         if arg == "--wip":
             wip = True
+            i += 1
+            continue
+        if arg == "--number":
+            number_progress = True
             i += 1
             continue
         if arg == "--links":
@@ -490,6 +508,9 @@ def _parse_args(
                 if flag == "w":
                     wip = True
                     continue
+                if flag == "n":
+                    number_progress = True
+                    continue
                 if flag == "l":
                     follow_links = True
                     continue
@@ -513,6 +534,9 @@ def _parse_args(
 
         positionals.append(arg)
         i += 1
+
+    if wip and number_progress:
+        raise _usage_error("error: --number/-n is mutually exclusive with --wip/-w")
 
     if query is None:
         if not positionals:
@@ -552,6 +576,7 @@ def _parse_args(
         excluded_paths,
         follow_links,
         normalized_file_types,
+        number_progress,
     )
 
 
@@ -1402,6 +1427,7 @@ def main(argv: list[str]) -> int:
             excluded_path_args,
             follow_links,
             file_types,
+            number_progress,
         ) = _parse_args(argv)
         predicate = search_query.compile_match_predicate(
             query, strip_inline_image_data=False
@@ -1444,13 +1470,47 @@ def main(argv: list[str]) -> int:
         saw_candidate = False
         buffered_matches: list[tuple[Path, str]] = []
         wip_replay_matches: list[tuple[Path, str]] = []
+        examined_count = 0
+        examined_by_type: dict[str, int] = {}
+        number_line_visible = False
 
-        def _emit_wip(path: Path, operations: list[str]) -> None:
+        def _clear_number_progress(*, newline: bool = False) -> None:
+            nonlocal number_line_visible
+            if not number_progress or not number_line_visible:
+                return
+            sys.stdout.write("\r\033[K")
+            if newline:
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+            number_line_visible = False
+
+        def _emit_progress(path: Path, operations: list[str]) -> None:
+            nonlocal examined_count, number_line_visible
             if wip:
                 print(_style_wip_filepath(path, operations), flush=True)
+                return
+            if not number_progress:
+                return
+            examined_count += 1
+            extension = path.suffix.casefold().lstrip(".")
+            examined_by_type[extension] = examined_by_type.get(extension, 0) + 1
+            summary = _format_number_progress(examined_count, examined_by_type)
+            sys.stdout.write(f"\r{ANSI_GRAY}{summary}{ANSI_RESET}\033[K")
+            sys.stdout.flush()
+            number_line_visible = True
+
+        def _restart_number_progress() -> None:
+            nonlocal number_line_visible
+            if not number_progress or examined_count <= 0:
+                return
+            summary = _format_number_progress(examined_count, examined_by_type)
+            sys.stdout.write(f"\r{ANSI_GRAY}{summary}{ANSI_RESET}\033[K")
+            sys.stdout.flush()
+            number_line_visible = True
 
         def _print_match(path: Path, content: str) -> None:
             """Render one match identically for progressive and final output."""
+            _clear_number_progress()
             if verbose and include_content:
                 _print_verbose_result(path, content, query)
             else:
@@ -1463,6 +1523,7 @@ def main(argv: list[str]) -> int:
                 buffered_matches.append((path, content))
                 return
             _print_match(path, content)
+            _restart_number_progress()
             if wip:
                 # WIP output can bury progressive matches among non-matching file
                 # lines, so retain the exact path/content pair for a final replay.
@@ -1481,7 +1542,7 @@ def main(argv: list[str]) -> int:
                     ocr_pdf=ocr_pdf,
                     ocr_images=ocr_images,
                 )
-                _emit_wip(path, operations)
+                _emit_progress(path, operations)
                 if not matched:
                     continue
                 _emit_match(path, content)
@@ -1547,13 +1608,18 @@ def main(argv: list[str]) -> int:
                             path, content, matched, operations = future.result()
                         except Exception:
                             continue
-                        _emit_wip(path, operations)
+                        _emit_progress(path, operations)
                         if not matched:
                             continue
                         _emit_match(path, content)
 
         if not saw_candidate:
             return 1
+
+        if number_progress and number_line_visible:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            number_line_visible = False
 
         final_matches: list[tuple[Path, str]] = []
         if sort_results and buffered_matches:

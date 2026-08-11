@@ -493,13 +493,13 @@ Its hfind-specific runtime defaults are stored in `hfind.settings.json`, followi
 Run via wrapper:
 
 ```bash
-./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+./hfind.sh [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w|--number|-n] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Run via Python directly:
 
 ```bash
-python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
+python3 /path/to/mdexplore/hfind.py [--query QUERY|-q QUERY] [--base|-b] [--content|-c] [--recursive|-r] [--verbose|-v] [--pdf|-p] [--ocr-pdf|-o] [--wip|-w|--number|-n] [--exclude PATH|-e PATH] [--type TYPE|-t TYPE] [--links|-l] [--cpu-limit PERCENT] [--sort|-s] [--sort-case-sensitive|-S] PATTERN [PATTERN ...]
 ```
 
 Notes:
@@ -520,6 +520,7 @@ Notes:
   - Without sorting, matches still appear progressively and are then replayed together at the end so they are not lost among non-matching WIP lines. The replay uses the identical filepath colors, verbose excerpts, hit highlighting, and other formatting as the original match output.
   - With `-s`/`-S`, matches are retained and emitted together at the end in the requested order, using that same complete formatting.
   - A WIP line for a file with no match is never added to the final match output; only actual matches are replayed or sorted.
+- `--number` / `-n` is mutually exclusive with `--wip` / `-w`. It displays a single gray status line such as `   125 files examined;    100 pdf;     25 png`, updating that line in place with aligned counts. When a match is printed, the status line is cleared; counting then resumes on a fresh in-place status line until the next match or the search completes.
 - `--exclude PATH` / `-e PATH` excludes that path and every file beneath it. The option is repeatable, and `--exclude=PATH` / `-e=PATH` are also accepted.
   - Exactly one path belongs to each `-e` / `--exclude` occurrence; the path is consumed atomically by the option and is never interpreted as the query or a search pattern/base path.
   - `~` is expanded using the current user's home directory, and relative exclude paths are resolved from the current working directory.
