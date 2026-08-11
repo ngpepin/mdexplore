@@ -80,6 +80,21 @@ var require_diagramRenderers = __commonJS({
     var { promisify } = require("node:util");
     var { sha1 } = require_utils();
     var execFileAsync = promisify(execFile);
+    function normalizeEmbeddedSvgSource(source) {
+      return String(source ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+    }
+    function sanitizeEmbeddedSvg(source) {
+      const normalized = normalizeEmbeddedSvgSource(source);
+      if (!normalized) {
+        return { svg: "", error: "Embedded SVG is empty." };
+      }
+      const svg = normalized.replace(/^\s*<\?xml[\s\S]*?\?>\s*/i, "").replace(/^\s*<!doctype[\s\S]*?>\s*/i, "");
+      if (!/^<svg\b/i.test(svg) || !/<\/svg\s*>\s*$/i.test(svg)) {
+        return { svg: "", error: "Embedded SVG must have an <svg> root element." };
+      }
+      const cleaned = svg.replace(/<(?:script|foreignObject|iframe|object|embed)\b[^>]*>[\s\S]*?<\/(?:script|foreignObject|iframe|object|embed)\s*>/gi, "").replace(/\s+on[a-z0-9:_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*javascript:[^\s>]+/gi, "");
+      return { svg: cleaned, error: "" };
+    }
     function runProcessWithInput(command, args, input, options = {}) {
       return new Promise((resolve, reject) => {
         const child = spawn(command, args, {
@@ -169,6 +184,7 @@ var require_diagramRenderers = __commonJS({
         this.getConfiguration = getConfiguration;
         this.mermaidCache = /* @__PURE__ */ new Map();
         this.plantUmlCache = /* @__PURE__ */ new Map();
+        this.embeddedSvgCache = /* @__PURE__ */ new Map();
         this.mmdrPath = context.asAbsolutePath(path.join("bin", "linux-x64", "mmdr"));
         this.plantUmlJar = context.asAbsolutePath(path.join("vendor", "plantuml", "plantuml.jar"));
         this.ensureExecutable();
@@ -242,6 +258,21 @@ ${normalized}`);
           }
         }
       }
+      renderEmbeddedSvg(source) {
+        const normalized = normalizeEmbeddedSvgSource(source);
+        const cacheKey = sha1(normalized);
+        const cached = this.embeddedSvgCache.get(cacheKey);
+        if (cached) {
+          return { dataUri: cached, error: "" };
+        }
+        const sanitized = sanitizeEmbeddedSvg(normalized);
+        if (!sanitized.svg) {
+          return { dataUri: "", error: sanitized.error || "Embedded SVG rendering failed." };
+        }
+        const dataUri = `data:image/svg+xml;base64,${Buffer.from(sanitized.svg, "utf8").toString("base64")}`;
+        this.embeddedSvgCache.set(cacheKey, dataUri);
+        return { dataUri, error: "" };
+      }
       async renderPlantUml(source) {
         if (!this.getConfiguration().get("plantUml.enabled", true)) {
           return { svg: "", error: "PlantUML rendering is disabled in mdExt settings." };
@@ -286,7 +317,7 @@ ${text}
 `;
       }
     };
-    module2.exports = { DiagramRenderers: DiagramRenderers2 };
+    module2.exports = { DiagramRenderers: DiagramRenderers2, sanitizeEmbeddedSvg };
   }
 });
 
@@ -68537,6 +68568,13 @@ var require_renderer = __commonJS({
         }
       );
     }
+    function embeddedSvgShell({ dataUri, error, lineStart, lineEnd }) {
+      const lineAttrs = Number.isInteger(lineStart) && Number.isInteger(lineEnd) ? ` data-md-line-start="${lineStart}" data-md-line-end="${lineEnd}"` : "";
+      if (dataUri) {
+        return `<div class="mdext-svg-fence"${lineAttrs}><img class="mdext-embedded-svg" src="${dataUri}" alt="Embedded SVG image"></div>`;
+      }
+      return `<div class="mdext-svg-error"${lineAttrs}>${escapeHtml(error || "Embedded SVG rendering failed.")}</div>`;
+    }
     function diagramShell({ id, kind, source, renderedSvg, renderer, error }) {
       const rustSvgB64 = renderedSvg ? textToBase64(renderedSvg) : "";
       const sourceB64 = textToBase64(source);
@@ -68550,6 +68588,7 @@ var require_renderer = __commonJS({
       const md = createMarkdownRenderer();
       addSourceLineMetadata(md);
       const diagrams = [];
+      const embeddedSvgs = [];
       const defaultFence = md.renderer.rules.fence.bind(md.renderer.rules);
       md.renderer.rules.fence = (tokens, index, options, env, self) => {
         const token = tokens[index];
@@ -68561,7 +68600,28 @@ var require_renderer = __commonJS({
           diagrams.push({ id, kind, source });
           return `<div class="mdext-diagram-placeholder" data-diagram-placeholder="${id}"></div>`;
         }
+        if (language === "svg") {
+          const source = String(token.content || "");
+          const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+          const lineStart = Array.isArray(token.map) ? token.map[0] : null;
+          const lineEnd = Array.isArray(token.map) ? token.map[1] : null;
+          embeddedSvgs.push({ id, source, lineStart, lineEnd });
+          return `<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>`;
+        }
         return defaultFence(tokens, index, options, env, self);
+      };
+      const defaultHtmlBlock = md.renderer.rules.html_block || ((tokens, index) => tokens[index].content);
+      md.renderer.rules.html_block = (tokens, index, options, env, self) => {
+        const token = tokens[index];
+        const source = String(token.content || "").trim();
+        if (/^<svg\b/i.test(source) && /<\/svg\s*>$/i.test(source)) {
+          const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+          const lineStart = Array.isArray(token.map) ? token.map[0] : null;
+          const lineEnd = Array.isArray(token.map) ? token.map[1] : null;
+          embeddedSvgs.push({ id, source, lineStart, lineEnd });
+          return `<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>`;
+        }
+        return defaultHtmlBlock(tokens, index, options, env, self);
       };
       const defaultImage = md.renderer.rules.image;
       md.renderer.rules.image = (tokens, index, options, env, self) => {
@@ -68592,6 +68652,15 @@ var require_renderer = __commonJS({
       };
       let body = md.render(String(markdown || ""));
       body = transformCallouts(body);
+      for (const embeddedSvg of embeddedSvgs) {
+        const result = typeof diagramRenderers?.renderEmbeddedSvg === "function" ? diagramRenderers.renderEmbeddedSvg(embeddedSvg.source) : { dataUri: "", error: "Embedded SVG renderer is unavailable." };
+        const placeholder = `<div class="mdext-svg-placeholder" data-svg-placeholder="${embeddedSvg.id}"></div>`;
+        body = body.replace(placeholder, embeddedSvgShell({
+          ...embeddedSvg,
+          dataUri: result.dataUri,
+          error: result.error
+        }));
+      }
       body = sanitizeRenderedMarkdown(body);
       const rendered = await Promise.all(diagrams.map(async (diagram) => {
         if (diagram.kind === "mermaid") {
@@ -68615,7 +68684,7 @@ var require_renderer = __commonJS({
         const placeholder = `<div class="mdext-diagram-placeholder" data-diagram-placeholder="${diagram.id}"></div>`;
         body = body.replace(placeholder, diagramShell(diagram));
       }
-      return { body, diagramCount: diagrams.length };
+      return { body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
     }
     module2.exports = {
       renderMarkdown,

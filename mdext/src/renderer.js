@@ -125,6 +125,18 @@ function transformCallouts(body) {
   );
 }
 
+function embeddedSvgShell({ dataUri, error, lineStart, lineEnd }) {
+  const lineAttrs = Number.isInteger(lineStart) && Number.isInteger(lineEnd)
+    ? ` data-md-line-start="${lineStart}" data-md-line-end="${lineEnd}"`
+    : '';
+  if (dataUri) {
+    return `<div class="mdext-svg-fence"${lineAttrs}>` +
+      `<img class="mdext-embedded-svg" src="${dataUri}" alt="Embedded SVG image">` +
+      '</div>';
+  }
+  return `<div class="mdext-svg-error"${lineAttrs}>${escapeHtml(error || 'Embedded SVG rendering failed.')}</div>`;
+}
+
 function diagramShell({ id, kind, source, renderedSvg, renderer, error }) {
   const rustSvgB64 = renderedSvg ? textToBase64(renderedSvg) : '';
   const sourceB64 = textToBase64(source);
@@ -159,6 +171,7 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
   const md = createMarkdownRenderer();
   addSourceLineMetadata(md);
   const diagrams = [];
+  const embeddedSvgs = [];
 
   const defaultFence = md.renderer.rules.fence.bind(md.renderer.rules);
   md.renderer.rules.fence = (tokens, index, options, env, self) => {
@@ -171,7 +184,29 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
       diagrams.push({ id, kind, source });
       return `<div class="mdext-diagram-placeholder" data-diagram-placeholder="${id}"></div>`;
     }
+    if (language === 'svg') {
+      const source = String(token.content || '');
+      const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+      const lineStart = Array.isArray(token.map) ? token.map[0] : null;
+      const lineEnd = Array.isArray(token.map) ? token.map[1] : null;
+      embeddedSvgs.push({ id, source, lineStart, lineEnd });
+      return `<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>`;
+    }
     return defaultFence(tokens, index, options, env, self);
+  };
+
+  const defaultHtmlBlock = md.renderer.rules.html_block || ((tokens, index) => tokens[index].content);
+  md.renderer.rules.html_block = (tokens, index, options, env, self) => {
+    const token = tokens[index];
+    const source = String(token.content || '').trim();
+    if (/^<svg\b/i.test(source) && /<\/svg\s*>$/i.test(source)) {
+      const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+      const lineStart = Array.isArray(token.map) ? token.map[0] : null;
+      const lineEnd = Array.isArray(token.map) ? token.map[1] : null;
+      embeddedSvgs.push({ id, source, lineStart, lineEnd });
+      return `<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>`;
+    }
+    return defaultHtmlBlock(tokens, index, options, env, self);
   };
 
   const defaultImage = md.renderer.rules.image;
@@ -205,6 +240,19 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
 
   let body = md.render(String(markdown || ''));
   body = transformCallouts(body);
+
+  for (const embeddedSvg of embeddedSvgs) {
+    const result = typeof diagramRenderers?.renderEmbeddedSvg === 'function'
+      ? diagramRenderers.renderEmbeddedSvg(embeddedSvg.source)
+      : { dataUri: '', error: 'Embedded SVG renderer is unavailable.' };
+    const placeholder = `<div class="mdext-svg-placeholder" data-svg-placeholder="${embeddedSvg.id}"></div>`;
+    body = body.replace(placeholder, embeddedSvgShell({
+      ...embeddedSvg,
+      dataUri: result.dataUri,
+      error: result.error,
+    }));
+  }
+
   body = sanitizeRenderedMarkdown(body);
 
   const rendered = await Promise.all(diagrams.map(async (diagram) => {
@@ -231,7 +279,7 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
     body = body.replace(placeholder, diagramShell(diagram));
   }
 
-  return { body, diagramCount: diagrams.length };
+  return { body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
 }
 
 module.exports = {

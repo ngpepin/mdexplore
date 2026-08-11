@@ -16,6 +16,7 @@
 - **R/J renderer toggle:** every Mermaid diagram can switch between cached Rust output (`R`) and JavaScript output (`J`) when Rust output is available.
 - **Diagram controls:** Fit, zoom, pan buttons, Ctrl/Cmd+wheel zoom, and pointer-drag panning.
 - **PlantUML:** local SVG rendering through Java and the bundled PlantUML jar.
+- **Embedded SVG:** fenced `svg` blocks and standalone raw `<svg>...</svg>` blocks render as cached SVG images instead of source markup; unchanged SVG source reuses the in-process cache while edits generate a new cache entry.
 - **mdexplore-style callouts:** NOTE, TIP, IMPORTANT, WARNING, and CAUTION blocks.
 - **Images and links:** relative images are resolved through VS Code webview resource URIs; relative Markdown links can reopen in mdExt.
 - **PDF creation:** the preview header includes a `PDF` button that waits for fonts and images, switches the rendered preview to PDF-safe layout, renders the preview in the webview, and writes `<filename>.pdf` beside the Markdown source without relying on VS Code's print dialog.

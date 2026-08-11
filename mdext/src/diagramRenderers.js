@@ -10,6 +10,34 @@ const { sha1 } = require('./utils');
 
 const execFileAsync = promisify(execFile);
 
+function normalizeEmbeddedSvgSource(source) {
+  return String(source ?? '').replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+}
+
+function sanitizeEmbeddedSvg(source) {
+  const normalized = normalizeEmbeddedSvgSource(source);
+  if (!normalized) {
+    return { svg: '', error: 'Embedded SVG is empty.' };
+  }
+
+  const svg = normalized
+    .replace(/^\s*<\?xml[\s\S]*?\?>\s*/i, '')
+    .replace(/^\s*<!doctype[\s\S]*?>\s*/i, '');
+  if (!/^<svg\b/i.test(svg) || !/<\/svg\s*>\s*$/i.test(svg)) {
+    return { svg: '', error: 'Embedded SVG must have an <svg> root element.' };
+  }
+
+  // Embedded SVG is ultimately loaded through an <img> data URI rather than
+  // injected as live SVG. Keep a defensive cleanup pass as well so source
+  // markup cannot carry executable SVG constructs into the generated image.
+  const cleaned = svg
+    .replace(/<(?:script|foreignObject|iframe|object|embed)\b[^>]*>[\s\S]*?<\/(?:script|foreignObject|iframe|object|embed)\s*>/gi, '')
+    .replace(/\s+on[a-z0-9:_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, '')
+    .replace(/\s+(?:href|xlink:href|src)\s*=\s*javascript:[^\s>]+/gi, '');
+  return { svg: cleaned, error: '' };
+}
+
 function runProcessWithInput(command, args, input, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -106,6 +134,7 @@ class DiagramRenderers {
     this.getConfiguration = getConfiguration;
     this.mermaidCache = new Map();
     this.plantUmlCache = new Map();
+    this.embeddedSvgCache = new Map();
     this.mmdrPath = context.asAbsolutePath(path.join('bin', 'linux-x64', 'mmdr'));
     this.plantUmlJar = context.asAbsolutePath(path.join('vendor', 'plantuml', 'plantuml.jar'));
     this.ensureExecutable();
@@ -185,6 +214,24 @@ class DiagramRenderers {
     }
   }
 
+  renderEmbeddedSvg(source) {
+    const normalized = normalizeEmbeddedSvgSource(source);
+    const cacheKey = sha1(normalized);
+    const cached = this.embeddedSvgCache.get(cacheKey);
+    if (cached) {
+      return { dataUri: cached, error: '' };
+    }
+
+    const sanitized = sanitizeEmbeddedSvg(normalized);
+    if (!sanitized.svg) {
+      return { dataUri: '', error: sanitized.error || 'Embedded SVG rendering failed.' };
+    }
+
+    const dataUri = `data:image/svg+xml;base64,${Buffer.from(sanitized.svg, 'utf8').toString('base64')}`;
+    this.embeddedSvgCache.set(cacheKey, dataUri);
+    return { dataUri, error: '' };
+  }
+
   async renderPlantUml(source) {
     if (!this.getConfiguration().get('plantUml.enabled', true)) {
       return { svg: '', error: 'PlantUML rendering is disabled in mdExt settings.' };
@@ -228,4 +275,4 @@ class DiagramRenderers {
   }
 }
 
-module.exports = { DiagramRenderers };
+module.exports = { DiagramRenderers, sanitizeEmbeddedSvg };
