@@ -174,6 +174,95 @@ class TemplateAssetTests(unittest.TestCase):
         tokens = renderer._md.parse(prepared)
         self.assertEqual([token.type for token in tokens], ["math_block"])
 
+    def test_markdown_renderer_renders_svg_fence_as_image(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '```svg\n'
+            '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">'
+            '<rect width="120" height="40" fill="orange"/>'
+            '<text x="8" y="25">Cached SVG</text>'
+            '</svg>\n'
+            '```\n'
+        )
+        rendered = renderer.render_document(source, "SVG")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn('class="mdexplore-embedded-svg"', main_html)
+        self.assertIn('src="data:image/svg+xml;base64,', main_html)
+        self.assertNotIn('&lt;svg', main_html)
+        self.assertNotIn('<code class="language-svg">', main_html)
+
+    def test_markdown_renderer_renders_raw_svg_block_as_image(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20">\n'
+            '<text x="2" y="15">Raw SVG</text>\n'
+            '</svg>\n'
+        )
+        rendered = renderer.render_document(source, "Raw SVG")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn('class="mdexplore-embedded-svg"', main_html)
+        self.assertIn('src="data:image/svg+xml;base64,', main_html)
+        self.assertNotIn('<svg xmlns=', main_html)
+        self.assertEqual(
+            renderer._rewrite_raw_embedded_svg_blocks(source).count("\n"),
+            source.count("\n"),
+        )
+
+    def test_raw_svg_inside_code_fence_is_not_rewritten(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '```text\n'
+            '<svg xmlns="http://www.w3.org/2000/svg"><text>Literal</text></svg>\n'
+            '```\n'
+        )
+        rewritten = renderer._rewrite_raw_embedded_svg_blocks(source)
+        self.assertEqual(rewritten, source)
+
+    def test_embedded_svg_cache_reuses_unchanged_source_and_invalidates_on_edit(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        original = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<rect width="10" height="10" fill="red"/>'
+            '</svg>'
+        )
+        changed = original.replace('fill="red"', 'fill="blue"')
+        original_sanitizer = renderer._sanitize_embedded_svg_markup
+        calls = []
+
+        def counting_sanitizer(svg_markup):
+            calls.append(svg_markup)
+            return original_sanitizer(svg_markup)
+
+        renderer._sanitize_embedded_svg_markup = counting_sanitizer
+        first_uri, first_error = renderer._render_embedded_svg_data_uri(original)
+        second_uri, second_error = renderer._render_embedded_svg_data_uri(original)
+        changed_uri, changed_error = renderer._render_embedded_svg_data_uri(changed)
+
+        self.assertIsNone(first_error)
+        self.assertIsNone(second_error)
+        self.assertIsNone(changed_error)
+        self.assertEqual(first_uri, second_uri)
+        self.assertNotEqual(first_uri, changed_uri)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(renderer._embedded_svg_image_cache), 2)
+
+    def test_embedded_svg_removes_executable_content(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+            '<script>alert(2)</script>'
+            '<a href="javascript:alert(3)"><text>Safe label</text></a>'
+            '</svg>'
+        )
+        cleaned, error = renderer._sanitize_embedded_svg_markup(source)
+        self.assertIsNone(error)
+        self.assertIsNotNone(cleaned)
+        lowered = (cleaned or "").casefold()
+        self.assertNotIn("<script", lowered)
+        self.assertNotIn("onload=", lowered)
+        self.assertNotIn("javascript:", lowered)
+        self.assertIn("safe label", lowered)
+
     def test_markdown_renderer_hides_chatgpt_writing_wrapper(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         source = (

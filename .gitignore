@@ -23,6 +23,7 @@ build/
 .eggs/
 mdext/node_modules/
 mdext/.npm/
+mdext/node-compile-cache/
 mdext/*.vsix
 
 # Local runtime files

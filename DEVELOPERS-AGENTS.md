@@ -188,6 +188,9 @@ callout boxes in preview and PDF output.
 - Navigating to a previously cached file must still stat-check mtime/size;  
 if changed, it must re-render instead of showing stale cached HTML.
 - PlantUML rendering jobs must run off the UI thread to keep the window responsive.
+- Fenced `svg` blocks and standalone raw `<svg>...</svg>` Markdown blocks must render as SVG images rather than visible source markup. Their normalized, sanitized data URIs are cached in-process by source hash so revisiting an unchanged document avoids repeated SVG parsing/encoding; changing the SVG source must naturally produce a new cache entry.
+- Raw SVG inside ordinary fenced code blocks must remain literal code and must not be converted.
+- Embedded SVG images must not execute SVG scripts/event handlers or `javascript:` links.
 - PlantUML blocks should not block markdown preview; show placeholders first,  
 then progressively replace each diagram as local render jobs complete.
 - PlantUML progressive updates should be applied in-place so the preview scroll  
@@ -1144,7 +1147,7 @@ For Rust, this means replacing with cached `auto` SVGs (or regenerating if unava
 This section consolidates the former `RENDER-PATHS.md` content into the  
 canonical agent guide.
 
-Use this section before changing Mermaid, PlantUML, preview caching, or PDF  
+Use this section before changing Mermaid, PlantUML, embedded SVG, preview caching, or PDF
 export.
 
 Support code has been split into `mdexplore_app/`, but render orchestration  

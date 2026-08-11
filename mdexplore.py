@@ -322,6 +322,12 @@ class MarkdownRenderer:
         self._plantuml_jar_path = self._resolve_plantuml_jar_path()
         self._plantuml_setup_issue = self._plantuml_setup_error()
         self._plantuml_svg_cache: dict[str, str] = {}
+        # Embedded SVG fences do not require an external renderer, but parsing,
+        # safety cleanup, and BASE64 encoding are still worth caching because
+        # previews are rebuilt frequently while navigating between documents.
+        # Key by normalized SVG source so unchanged diagrams are reused and any
+        # source edit naturally produces a new cache entry.
+        self._embedded_svg_image_cache: dict[str, str] = {}
         cmark_mode_raw = os.environ.get("MDEXPLORE_MARKDOWN_ENGINE", "cmark")
         cmark_mode = str(cmark_mode_raw or "cmark").strip().lower()
         if cmark_mode not in {"auto", "cmark", "markdown-it"}:
@@ -393,6 +399,9 @@ class MarkdownRenderer:
 
             if info in {"plantuml", "puml", "uml"}:
                 return self._render_plantuml_fence_html(info, code, line_attrs, env)
+
+            if info == "svg":
+                return self._render_embedded_svg_fence_html(code, line_attrs)
 
             return default_fence(tokens, idx, options, env)
 
@@ -544,7 +553,7 @@ class MarkdownRenderer:
         return ""
 
     def _rewrite_cmark_special_fences(self, html_body: str, env: dict[str, object]) -> str:
-        """Replace cmark-rendered Mermaid/PlantUML code fences with mdexplore blocks."""
+        """Replace cmark-rendered Mermaid/PlantUML/SVG fences with mdexplore blocks."""
 
         def _replace(match: re.Match[str]) -> str:
             pre_open = str(match.group("pre_open") or "")
@@ -569,6 +578,9 @@ class MarkdownRenderer:
             if language in {"plantuml", "puml", "uml"}:
                 code_text = html.unescape(match.group("code") or "")
                 return self._render_plantuml_fence_html(language, code_text, line_attrs, env)
+            if language == "svg":
+                code_text = html.unescape(match.group("code") or "")
+                return self._render_embedded_svg_fence_html(code_text, line_attrs)
             return match.group(0)
 
         try:
@@ -748,6 +760,170 @@ class MarkdownRenderer:
             f'<pre><code class="language-{language}">{escaped_code}</code></pre>'
             "</div>\n"
         )
+
+    @staticmethod
+    def _prepare_embedded_svg_source(code: str) -> str:
+        """Normalize embedded SVG source for deterministic validation and caching."""
+        return str(code or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @staticmethod
+    def _sanitize_embedded_svg_markup(svg_markup: str) -> tuple[str | None, str | None]:
+        """Validate an embedded SVG and remove executable SVG constructs.
+
+        SVG fences are displayed through an ``img`` data URI rather than being
+        inserted as live inline SVG.  The cleanup here is intentionally still
+        defensive: reject non-SVG roots, remove script/foreignObject content,
+        strip event-handler attributes, and discard javascript: links.
+        """
+        source = str(svg_markup or "").strip()
+        if not source:
+            return None, "Embedded SVG is empty"
+        try:
+            root = ET.fromstring(source)
+        except ET.ParseError as exc:
+            return None, f"Invalid embedded SVG: {exc}"
+        except Exception as exc:
+            return None, f"Invalid embedded SVG: {exc}"
+
+        def local_name(tag: object) -> str:
+            raw = str(tag or "")
+            return raw.rsplit("}", 1)[-1].lower()
+
+        if local_name(root.tag) != "svg":
+            return None, "Embedded SVG must have an <svg> root element"
+
+        forbidden_tags = {"script", "foreignobject"}
+        for parent in list(root.iter()):
+            for child in list(parent):
+                if local_name(child.tag) in forbidden_tags:
+                    parent.remove(child)
+
+        for element in root.iter():
+            for attr_name in list(element.attrib):
+                attr_local = local_name(attr_name)
+                raw_value = str(element.attrib.get(attr_name) or "").strip()
+                if attr_local.startswith("on"):
+                    del element.attrib[attr_name]
+                    continue
+                if attr_local in {"href", "src"} and raw_value.casefold().startswith(
+                    "javascript:"
+                ):
+                    del element.attrib[attr_name]
+
+        try:
+            cleaned = ET.tostring(root, encoding="unicode")
+        except Exception as exc:
+            return None, f"Could not serialize embedded SVG: {exc}"
+        # ElementTree may serialize a namespaced SVG root as <ns0:svg> even
+        # though the parsed root was already validated above. Do not reject
+        # that valid namespace-preserving representation.
+        return cleaned, None
+
+    def _render_embedded_svg_data_uri(self, code: str) -> tuple[str | None, str | None]:
+        """Return a cached, sanitized SVG data URI for one embedded SVG fence."""
+        prepared = self._prepare_embedded_svg_source(code)
+        cache_key = hashlib.sha1(
+            prepared.encode("utf-8", errors="replace")
+        ).hexdigest()
+        cached = self._embedded_svg_image_cache.get(cache_key)
+        if cached is not None:
+            return cached, None
+
+        cleaned_svg, error_message = self._sanitize_embedded_svg_markup(prepared)
+        if cleaned_svg is None:
+            return None, error_message or "Embedded SVG rendering failed"
+
+        encoded_svg = _b64encode_ascii(cleaned_svg.encode("utf-8"))
+        data_uri = f"data:image/svg+xml;base64,{encoded_svg}"
+        self._embedded_svg_image_cache[cache_key] = data_uri
+        return data_uri, None
+
+    def _render_embedded_svg_fence_html(self, code: str, line_attrs: str) -> str:
+        """Render one ```svg fence as an image instead of visible SVG markup."""
+        data_uri, error_message = self._render_embedded_svg_data_uri(code)
+        if data_uri is not None:
+            return (
+                f'<div class="mdexplore-fence mdexplore-svg-fence"{line_attrs}>'
+                f'<img class="mdexplore-embedded-svg" src="{data_uri}" '
+                'alt="Embedded SVG image"/>'
+                "</div>\n"
+            )
+
+        escaped_error = html.escape(error_message or "Embedded SVG rendering failed")
+        escaped_code = html.escape(code)
+        return (
+            f'<div class="mdexplore-fence mdexplore-svg-error"{line_attrs}>'
+            f'<div class="mdexplore-svg-error-message">{escaped_error}</div>'
+            f'<pre><code class="language-svg">{escaped_code}</code></pre>'
+            "</div>\n"
+        )
+
+    def _rewrite_raw_embedded_svg_blocks(self, markdown_text: str) -> str:
+        """Convert standalone raw <svg>...</svg> Markdown blocks to cached images.
+
+        Only standalone SVG blocks outside fenced code are rewritten. This
+        prevents Mermaid/PlantUML-generated SVG from being touched later in the
+        HTML pipeline and preserves source-line counts for preview mapping.
+        """
+        lines = str(markdown_text or "").splitlines(keepends=True)
+        if not lines:
+            return markdown_text or ""
+
+        output = list(lines)
+        fence_char = ""
+        fence_length = 0
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            content = line.rstrip("\r\n")
+            fence_match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", content)
+            if fence_char:
+                if (
+                    fence_match
+                    and fence_match.group(1)[0] == fence_char
+                    and len(fence_match.group(1)) >= fence_length
+                    and not fence_match.group(2).strip()
+                ):
+                    fence_char = ""
+                    fence_length = 0
+                index += 1
+                continue
+            if fence_match:
+                marker = fence_match.group(1)
+                fence_char = marker[0]
+                fence_length = len(marker)
+                index += 1
+                continue
+
+            if re.match(r"^[ \t]{0,3}<svg\b", content, flags=re.IGNORECASE) is None:
+                index += 1
+                continue
+
+            end_index = index
+            while end_index < len(lines):
+                if re.search(r"</svg\s*>", lines[end_index], flags=re.IGNORECASE):
+                    break
+                end_index += 1
+            if end_index >= len(lines):
+                index += 1
+                continue
+
+            svg_source = "".join(lines[index : end_index + 1]).strip("\r\n")
+            line_attrs = (
+                f' data-md-line-start="{index}"'
+                f' data-md-line-end="{end_index + 1}"'
+            )
+            replacement_html = self._render_embedded_svg_fence_html(
+                svg_source, line_attrs
+            ).rstrip("\r\n")
+            first_ending = lines[index][len(lines[index].rstrip("\r\n")) :]
+            output[index] = replacement_html + first_ending
+            for consumed in range(index + 1, end_index + 1):
+                original = lines[consumed]
+                output[consumed] = original[len(original.rstrip("\r\n")) :]
+            index = end_index + 1
+
+        return "".join(output)
 
     @property
     def mermaid_backend(self) -> str:
@@ -1406,6 +1582,7 @@ class MarkdownRenderer:
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
         prepared_markdown = self._prepare_markdown_for_render(markdown_text)
+        prepared_markdown = self._rewrite_raw_embedded_svg_blocks(prepared_markdown)
         body: str | None = None
         if self._should_use_cmark_fast_path(
             prepared_markdown, has_math_hint=has_math_hint
