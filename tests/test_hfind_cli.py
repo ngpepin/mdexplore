@@ -727,7 +727,7 @@ class HfindCliTests(unittest.TestCase):
     def test_number_progress_is_aligned_by_extension(self) -> None:
         summary = hfind._format_number_progress(
             125,
-            {"png": 25, "pdf": 100},
+            {"pdf": 100, "png": 25},
         )
         self.assertEqual(
             summary,
@@ -751,8 +751,20 @@ class HfindCliTests(unittest.TestCase):
         with mock.patch("hfind.shutil.get_terminal_size", return_value=os.terminal_size((60, 24))):
             fitted = hfind._fit_number_progress_to_terminal(summary)
         self.assertLessEqual(len(fitted), 59)
-        self.assertTrue(fitted.endswith("..."))
+        self.assertTrue(fitted.endswith("; ..."))
         self.assertTrue(fitted.startswith("   125 files examined"))
+        self.assertNotRegex(fitted, r";\s+\d+\s+[a-z]*\.\.\.$")
+
+    def test_number_progress_keeps_existing_type_columns_stable(self) -> None:
+        first = hfind._format_number_progress(1, {"pdf": 1})
+        second = hfind._format_number_progress(2, {"pdf": 1, "txt": 1})
+        third = hfind._format_number_progress(3, {"pdf": 1, "txt": 1, "md": 1})
+
+        pdf_column = first.index("     1 pdf")
+        self.assertEqual(second.index("     1 pdf"), pdf_column)
+        self.assertEqual(third.index("     1 pdf"), pdf_column)
+        txt_column = second.index("     1 txt")
+        self.assertEqual(third.index("     1 txt"), txt_column)
 
     def test_number_progress_updates_in_place_and_restarts_after_match(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-number-progress-") as tmpdir:
@@ -777,7 +789,11 @@ class HfindCliTests(unittest.TestCase):
             self.assertGreaterEqual(rendered.count("\r"), 3)
             self.assertIn("\033[K", rendered)
             self.assertIn("\033[90m", rendered)
-            self.assertIn("     3 files examined;      1 md;      1 pdf;      1 txt", plain)
+            self.assertIn("     3 files examined", plain)
+            final_progress = plain.rsplit("     3 files examined", 1)[-1]
+            self.assertIn("     1 md", final_progress)
+            self.assertIn("     1 pdf", final_progress)
+            self.assertIn("     1 txt", final_progress)
             match_position = plain.index(str(matched))
             self.assertIn("     2 files examined", plain[:match_position])
             self.assertIn("     3 files examined", plain[match_position:])

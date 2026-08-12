@@ -329,22 +329,25 @@ def _style_wip_filepath(path: Path, operations: list[str]) -> str:
 
 
 def _format_number_progress(total: int, counts: dict[str, int]) -> str:
-    """Format an aligned file-count summary for the in-place progress display."""
+    """Format stable, aligned file-count columns for the progress display.
+
+    ``counts`` keeps insertion order, so once an extension receives a column its
+    column does not move when a newly encountered extension is added later.
+    """
     width = max(6, len(str(max(0, total))))
     parts = [f"{max(0, total):>{width}} files examined"]
-    for extension in sorted(counts, key=lambda value: (value.casefold(), value)):
+    for extension, count in counts.items():
         label = extension or "[no extension]"
-        parts.append(f"{max(0, counts[extension]):>{width}} {label}")
+        parts.append(f"{max(0, count):>{width}} {label}")
     return "; ".join(parts)
 
 
 def _fit_number_progress_to_terminal(summary: str) -> str:
-    """Keep the in-place counter on one physical terminal row.
+    """Keep the in-place counter on one row without cutting a type column.
 
     A carriage return can only return to the start of the current visual row. If
-    a long per-extension summary wraps first, later updates appear on additional
-    lines. Limit the transient progress text to the current terminal width so
-    every refresh can reliably overwrite the same row.
+    the complete summary is too wide, omit complete trailing type columns and
+    append an ellipsis rather than slicing through a count/extension column.
     """
     try:
         columns = max(20, shutil.get_terminal_size(fallback=(120, 24)).columns)
@@ -355,9 +358,27 @@ def _fit_number_progress_to_terminal(summary: str) -> str:
     available = max(1, columns - 1)
     if len(summary) <= available:
         return summary
-    if available <= 3:
-        return summary[:available]
-    return summary[: available - 3].rstrip(" ;,") + "..."
+
+    parts = summary.split("; ")
+    rendered = parts[0]
+    marker = "; ..."
+    if len(rendered) > available:
+        if available <= 3:
+            return rendered[:available]
+        return rendered[: available - 3].rstrip() + "..."
+
+    for index, part in enumerate(parts[1:], start=1):
+        candidate = f"{rendered}; {part}"
+        if index == len(parts) - 1 and len(candidate) <= available:
+            return candidate
+        if len(candidate) + len(marker) <= available:
+            rendered = candidate
+            continue
+        if len(rendered) + len(marker) <= available:
+            return rendered + marker
+        return rendered
+
+    return rendered
 
 
 def _parse_args(
