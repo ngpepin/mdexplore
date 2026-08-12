@@ -338,6 +338,28 @@ def _format_number_progress(total: int, counts: dict[str, int]) -> str:
     return "; ".join(parts)
 
 
+def _fit_number_progress_to_terminal(summary: str) -> str:
+    """Keep the in-place counter on one physical terminal row.
+
+    A carriage return can only return to the start of the current visual row. If
+    a long per-extension summary wraps first, later updates appear on additional
+    lines. Limit the transient progress text to the current terminal width so
+    every refresh can reliably overwrite the same row.
+    """
+    try:
+        columns = max(20, shutil.get_terminal_size(fallback=(120, 24)).columns)
+    except Exception:
+        columns = 120
+    # Leave one column unused so terminals that wrap immediately at the final
+    # cell never advance onto a second visual row.
+    available = max(1, columns - 1)
+    if len(summary) <= available:
+        return summary
+    if available <= 3:
+        return summary[:available]
+    return summary[: available - 3].rstrip(" ;,") + "..."
+
+
 def _parse_args(
     argv: list[str],
 ) -> tuple[
@@ -1494,8 +1516,10 @@ def main(argv: list[str]) -> int:
             examined_count += 1
             extension = path.suffix.casefold().lstrip(".")
             examined_by_type[extension] = examined_by_type.get(extension, 0) + 1
-            summary = _format_number_progress(examined_count, examined_by_type)
-            sys.stdout.write(f"\r{ANSI_GRAY}{summary}{ANSI_RESET}\033[K")
+            summary = _fit_number_progress_to_terminal(
+                _format_number_progress(examined_count, examined_by_type)
+            )
+            sys.stdout.write(f"\r\033[K{ANSI_GRAY}{summary}{ANSI_RESET}")
             sys.stdout.flush()
             number_line_visible = True
 
@@ -1503,8 +1527,10 @@ def main(argv: list[str]) -> int:
             nonlocal number_line_visible
             if not number_progress or examined_count <= 0:
                 return
-            summary = _format_number_progress(examined_count, examined_by_type)
-            sys.stdout.write(f"\r{ANSI_GRAY}{summary}{ANSI_RESET}\033[K")
+            summary = _fit_number_progress_to_terminal(
+                _format_number_progress(examined_count, examined_by_type)
+            )
+            sys.stdout.write(f"\r\033[K{ANSI_GRAY}{summary}{ANSI_RESET}")
             sys.stdout.flush()
             number_line_visible = True
 

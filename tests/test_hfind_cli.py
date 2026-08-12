@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 import hfind
@@ -732,6 +733,26 @@ class HfindCliTests(unittest.TestCase):
             summary,
             "   125 files examined;    100 pdf;     25 png",
         )
+
+    def test_number_progress_is_trimmed_before_terminal_wrap(self) -> None:
+        summary = hfind._format_number_progress(
+            125,
+            {
+                "cfg": 1,
+                "csv": 2,
+                "docx": 3,
+                "html": 4,
+                "json": 5,
+                "md": 6,
+                "pdf": 7,
+                "txt": 8,
+            },
+        )
+        with mock.patch("hfind.shutil.get_terminal_size", return_value=os.terminal_size((60, 24))):
+            fitted = hfind._fit_number_progress_to_terminal(summary)
+        self.assertLessEqual(len(fitted), 59)
+        self.assertTrue(fitted.endswith("..."))
+        self.assertTrue(fitted.startswith("   125 files examined"))
 
     def test_number_progress_updates_in_place_and_restarts_after_match(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hfind-number-progress-") as tmpdir:

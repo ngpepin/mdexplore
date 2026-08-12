@@ -1,6 +1,6 @@
 {
   "hfind": {
-    "cpu_limit_percent": 75.0,
+    "cpu_limit_percent": 65.0,
     "search_worker_min": 4,
     "search_worker_max": 24,
     "search_worker_cpu_multiplier": 3,
