@@ -4,7 +4,7 @@
 
 ## Features
 
-- **Editor toolbar preview:** while viewing a Markdown document, click the mdExt preview button in the editor toolbar to reopen that document with the mdExt custom editor in the active editor group.
+- **Editor toolbar preview:** while viewing a Markdown document, click the mdExt preview button in the editor toolbar to keep the current Markdown editing surface open and open the mdExt preview beside it.
 - **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown Preview**.
 - **Live updates:** previews refresh as the source document changes, with a configurable debounce delay.
 - **Scroll sync:** when a source editor and mdExt preview are both visible, scrolling either one keeps the other aligned to the same approximate source line.
@@ -42,7 +42,7 @@ The package command creates a `.vsix` file in this directory. Install it through
 - `mdExt: Refresh Preview`
 - `mdExt: Open Markdown Source`
 
-The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown editor is active.
+The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown resource is active. VS Code's built-in Text Editor, Markdown Preview, and newer Markdown Editor/Hybrid Markdown Editor are preserved in place while mdExt opens beside them. Other third-party/custom Markdown editors are first reopened with the built-in Text Editor, then mdExt opens to the right.
 
 ## Settings
 

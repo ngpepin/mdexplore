@@ -68934,17 +68934,39 @@ var require_previewCoordinator = __commonJS({
           }
         });
       }
-      currentMarkdownUri() {
+      currentMarkdownUri(preferredUri = null) {
+        const rememberIfMarkdown = (candidate) => {
+          if (!candidate || !isMarkdownPath(candidate.fsPath || candidate.path || "")) {
+            return null;
+          }
+          this.lastMarkdownUri = candidate;
+          return candidate;
+        };
+        const preferred = rememberIfMarkdown(preferredUri);
+        if (preferred) {
+          return preferred;
+        }
         const editor = vscode2.window.activeTextEditor;
         if (editor && editor.document.languageId === "markdown") {
           this.lastMarkdownUri = editor.document.uri;
           return editor.document.uri;
         }
         const activeTab = vscode2.window.tabGroups?.activeTabGroup?.activeTab;
-        const tabUri = activeTab?.input?.uri;
-        if (tabUri && isMarkdownPath(tabUri.fsPath || tabUri.path)) {
-          this.lastMarkdownUri = tabUri;
-          return tabUri;
+        const input = activeTab?.input;
+        const tabCandidates = [
+          input?.uri,
+          input?.modified,
+          input?.original,
+          input?.resource,
+          input?.notebook?.uri,
+          input?.modified?.uri,
+          input?.original?.uri
+        ];
+        for (const candidate of tabCandidates) {
+          const resolved = rememberIfMarkdown(candidate);
+          if (resolved) {
+            return resolved;
+          }
         }
         return this.lastMarkdownUri;
       }
@@ -68954,6 +68976,17 @@ var require_previewCoordinator = __commonJS({
           return null;
         }
         return editor.document.uri.toString() === uri.toString() ? editor : null;
+      }
+      activeMarkdownSurfaceCanRemainOpen(uri) {
+        if (this.activeBuiltInTextEditorForUri(uri)) {
+          return true;
+        }
+        const activeTab = vscode2.window.tabGroups?.activeTabGroup?.activeTab;
+        const viewType = String(activeTab?.input?.viewType || "").toLowerCase();
+        if (!viewType) {
+          return false;
+        }
+        return viewType.startsWith("vscode.markdown.") || viewType === "markdown.preview" || viewType === "markdown.editor";
       }
       activeEditorColumn() {
         return vscode2.window.activeTextEditor?.viewColumn ?? vscode2.window.tabGroups?.activeTabGroup?.viewColumn ?? vscode2.ViewColumn.Active;
@@ -69086,8 +69119,8 @@ var require_previewCoordinator = __commonJS({
           }
         }
       }
-      async previewCurrent() {
-        const uri = this.currentMarkdownUri();
+      async previewCurrent(preferredUri = null) {
+        const uri = this.currentMarkdownUri(preferredUri);
         if (!uri || !isMarkdownPath(uri.fsPath || uri.path)) {
           vscode2.window.showInformationMessage("Open a Markdown document before starting mdExt preview.");
           return;
@@ -69097,7 +69130,7 @@ var require_previewCoordinator = __commonJS({
           await vscode2.window.tabGroups.close(existingPreviewTab);
           return;
         }
-        if (!this.activeBuiltInTextEditorForUri(uri)) {
+        if (!this.activeMarkdownSurfaceCanRemainOpen(uri)) {
           await vscode2.commands.executeCommand("vscode.openWith", uri, "default", this.activeEditorColumn());
         }
         await this.openWithMdExt(uri, vscode2.ViewColumn.Beside);
@@ -69596,7 +69629,7 @@ function activate(context) {
       webviewOptions: { retainContextWhenHidden: true },
       supportsMultipleEditorsPerDocument: true
     }),
-    vscode.commands.registerCommand("mdExt.previewCurrent", () => coordinator.previewCurrent()),
+    vscode.commands.registerCommand("mdExt.previewCurrent", (resourceUri) => coordinator.previewCurrent(resourceUri)),
     vscode.commands.registerCommand("mdExt.openAsEditor", () => coordinator.openAsEditor()),
     vscode.commands.registerCommand("mdExt.refreshPreview", () => coordinator.refreshVisible()),
     vscode.commands.registerCommand("mdExt.openSource", () => coordinator.openSource(coordinator.currentMarkdownUri())),

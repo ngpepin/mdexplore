@@ -20,7 +20,7 @@ function activate(context) {
       webviewOptions: { retainContextWhenHidden: true },
       supportsMultipleEditorsPerDocument: true,
     }),
-    vscode.commands.registerCommand('mdExt.previewCurrent', () => coordinator.previewCurrent()),
+    vscode.commands.registerCommand('mdExt.previewCurrent', (resourceUri) => coordinator.previewCurrent(resourceUri)),
     vscode.commands.registerCommand('mdExt.openAsEditor', () => coordinator.openAsEditor()),
     vscode.commands.registerCommand('mdExt.refreshPreview', () => coordinator.refreshVisible()),
     vscode.commands.registerCommand('mdExt.openSource', () => coordinator.openSource(coordinator.currentMarkdownUri())),

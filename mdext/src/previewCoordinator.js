@@ -139,7 +139,23 @@ class PreviewCoordinator {
     });
   }
 
-  currentMarkdownUri() {
+  currentMarkdownUri(preferredUri = null) {
+    const rememberIfMarkdown = (candidate) => {
+      if (!candidate || !isMarkdownPath(candidate.fsPath || candidate.path || '')) {
+        return null;
+      }
+      this.lastMarkdownUri = candidate;
+      return candidate;
+    };
+
+    // Editor-title commands can supply the underlying resource even when the
+    // active surface is a custom/webview-based editor (including VS Code's
+    // Markdown Editor) and therefore has no activeTextEditor.
+    const preferred = rememberIfMarkdown(preferredUri);
+    if (preferred) {
+      return preferred;
+    }
+
     const editor = vscode.window.activeTextEditor;
     if (editor && editor.document.languageId === 'markdown') {
       this.lastMarkdownUri = editor.document.uri;
@@ -147,10 +163,21 @@ class PreviewCoordinator {
     }
 
     const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
-    const tabUri = activeTab?.input?.uri;
-    if (tabUri && isMarkdownPath(tabUri.fsPath || tabUri.path)) {
-      this.lastMarkdownUri = tabUri;
-      return tabUri;
+    const input = activeTab?.input;
+    const tabCandidates = [
+      input?.uri,
+      input?.modified,
+      input?.original,
+      input?.resource,
+      input?.notebook?.uri,
+      input?.modified?.uri,
+      input?.original?.uri,
+    ];
+    for (const candidate of tabCandidates) {
+      const resolved = rememberIfMarkdown(candidate);
+      if (resolved) {
+        return resolved;
+      }
     }
 
     return this.lastMarkdownUri;
@@ -162,6 +189,26 @@ class PreviewCoordinator {
       return null;
     }
     return editor.document.uri.toString() === uri.toString() ? editor : null;
+  }
+
+  activeMarkdownSurfaceCanRemainOpen(uri) {
+    if (this.activeBuiltInTextEditorForUri(uri)) {
+      return true;
+    }
+
+    const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+    const viewType = String(activeTab?.input?.viewType || '').toLowerCase();
+    if (!viewType) {
+      return false;
+    }
+
+    // VS Code's built-in Markdown Preview and newer Hybrid Markdown Editor are
+    // custom/editor surfaces rather than activeTextEditor instances. Preserve
+    // those surfaces and open mdExt beside them instead of replacing them with
+    // the Text Editor. Third-party custom editors still take the legacy path.
+    return viewType.startsWith('vscode.markdown.')
+      || viewType === 'markdown.preview'
+      || viewType === 'markdown.editor';
   }
 
   activeEditorColumn() {
@@ -305,8 +352,8 @@ class PreviewCoordinator {
     }
   }
 
-  async previewCurrent() {
-    const uri = this.currentMarkdownUri();
+  async previewCurrent(preferredUri = null) {
+    const uri = this.currentMarkdownUri(preferredUri);
     if (!uri || !isMarkdownPath(uri.fsPath || uri.path)) {
       vscode.window.showInformationMessage('Open a Markdown document before starting mdExt preview.');
       return;
@@ -318,7 +365,7 @@ class PreviewCoordinator {
       return;
     }
 
-    if (!this.activeBuiltInTextEditorForUri(uri)) {
+    if (!this.activeMarkdownSurfaceCanRemainOpen(uri)) {
       await vscode.commands.executeCommand('vscode.openWith', uri, 'default', this.activeEditorColumn());
     }
 

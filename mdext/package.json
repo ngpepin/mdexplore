@@ -2,7 +2,7 @@
   "name": "mdext",
   "displayName": "mdExt",
   "description": "A high-fidelity Markdown preview editor for Visual Studio Code, based on mdexplore.",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "publisher": "mdexplore",
   "license": "MIT",
   "icon": "media/mdexplor-icon.png",
@@ -75,7 +75,7 @@
         "command": "mdExt.previewCurrent",
         "key": "ctrl+shift+v",
         "mac": "cmd+shift+v",
-        "when": "editorLangId == markdown"
+        "when": "editorLangId == markdown || resourceExtname == .md || resourceExtname == .markdown"
       }
     ],
     "configuration": {
