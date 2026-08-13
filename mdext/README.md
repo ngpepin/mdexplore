@@ -1,11 +1,15 @@
 # mdExt
 
-`mdExt` is a Visual Studio Code Markdown preview extension derived from the rendering ideas in **mdexplore**. It provides a real custom editor for `.md` and `.markdown` files.
+`mdExt` is a Visual Studio Code Markdown preview extension derived from the rendering ideas in **mdexplore**. It provides a real read-only custom editor for `.md` and `.markdown` files.
 
 ## Features
 
 - **Editor toolbar preview:** while viewing a Markdown document, click the mdExt preview button in the editor toolbar to keep the current Markdown editing surface open and open the mdExt preview beside it.
-- **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown Preview**.
+- **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown (Read-only)**.
+- **Edit from preview:** the `Edit` button immediately to the right of `Search` reopens the previewed document with the configured default Markdown editor. If mdExt itself is configured as the default for that Markdown file, `Edit` opens VS Code's Markdown Editor (not Markdown Preview); only when the Markdown Editor is unavailable does it fall back to the plain Text Editor.
+- **Comfortable default zoom:** preview text starts two font-size steps larger than VS Code's editor font. `Alt++` and `Alt+-` still adjust it one pixel at a time.
+- **Per-document zoom memory:** font-size adjustments are stored in VS Code workspace storage for each Markdown document and restored when it is previewed again. Stale zoom records are periodically garbage-collected, with a bounded retained history.
+- **PDF export:** the `PDF` button creates a letter-sized PDF using a dedicated high-contrast light export palette so text, tables, borders, links, code, and callouts remain crisp and readable regardless of the active VS Code theme.
 - **Live updates:** previews refresh as the source document changes, with a configurable debounce delay.
 - **Scroll sync:** when a source editor and mdExt preview are both visible, scrolling either one keeps the other aligned to the same approximate source line.
 - **In-preview search:** the header magnifier opens a search line that uses mdexplore-compatible query parsing and match highlighting, including `NEAR(...)` support.

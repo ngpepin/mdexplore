@@ -9,7 +9,7 @@
   --mdext-important: #8b5cf6;
   --mdext-warning: #f59e0b;
   --mdext-caution: #ef4444;
-  --mdext-preview-font-size: var(--vscode-font-size);
+  --mdext-preview-font-size: calc(var(--vscode-font-size) + 2px);
 }
 
 * { box-sizing: border-box; }
@@ -202,8 +202,18 @@ button:disabled { opacity: 0.5; cursor: default; }
 html.mdext-pdf-export-mode,
 body.mdext-pdf-export-mode {
   color-scheme: light;
+  --vscode-editor-background: #ffffff;
+  --vscode-editor-foreground: #111827;
+  --vscode-descriptionForeground: #4b5563;
+  --vscode-textLink-foreground: #1d4ed8;
+  --vscode-textLink-activeForeground: #1e40af;
+  --vscode-editor-font-family: var(--vscode-font-family);
+  --mdext-border: #9ca3af;
+  --mdext-muted: #4b5563;
+  --mdext-code-bg: #f3f4f6;
+  --mdext-toolbar-bg: #f9fafb;
   background: #fff !important;
-  color: #111 !important;
+  color: #111827 !important;
 }
 body.mdext-pdf-export-mode {
   -webkit-print-color-adjust: exact;
@@ -215,7 +225,33 @@ body.mdext-pdf-export-mode {
   margin: 0;
   padding: 0;
   background: #fff !important;
-  color: #111 !important;
+  color: #111827 !important;
+}
+.mdext-pdf-export-mode .markdown-body a {
+  color: #1d4ed8 !important;
+  text-decoration: underline;
+}
+.mdext-pdf-export-mode .markdown-body blockquote {
+  color: #374151 !important;
+  border-left-color: #6b7280 !important;
+}
+.mdext-pdf-export-mode .markdown-body h1,
+.mdext-pdf-export-mode .markdown-body h2 {
+  border-bottom-color: #9ca3af !important;
+}
+.mdext-pdf-export-mode .markdown-body th,
+.mdext-pdf-export-mode .markdown-body td {
+  border-color: #9ca3af !important;
+}
+.mdext-pdf-export-mode .markdown-body pre,
+.mdext-pdf-export-mode .markdown-body :not(pre) > code,
+.mdext-pdf-export-mode .markdown-body th,
+.mdext-pdf-export-mode .markdown-body kbd {
+  background: #f3f4f6 !important;
+}
+.mdext-pdf-export-mode .markdown-body hr,
+.mdext-pdf-export-mode .markdown-body kbd {
+  border-color: #9ca3af !important;
 }
 .mdext-pdf-export-mode .diagram-toolbar,
 .mdext-pdf-export-mode .diagram-notice,

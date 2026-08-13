@@ -8,6 +8,7 @@ const statusNode = document.getElementById('render-status');
 const refreshButton = document.getElementById('refresh-button');
 const pdfButton = document.getElementById('pdf-button');
 const searchToggleButton = document.getElementById('search-toggle-button');
+const editButton = document.getElementById('edit-button');
 const searchBar = document.getElementById('preview-searchbar');
 const searchInput = document.getElementById('preview-search-input');
 const searchResultNode = document.getElementById('preview-search-result');
@@ -45,7 +46,7 @@ let lastReportedLine = -1;
 let searchInputTimer = null;
 let selectionRefreshTimer = null;
 let searchBarVisible = false;
-let previewFontSize = Number(vscode.getState()?.previewFontSize) || null;
+let previewFontSize = null;
 let nextPdfSaveId = 0;
 let currentPersistentHighlights = [];
 let currentSearchState = {
@@ -113,11 +114,13 @@ function currentPreviewFontSize() {
   return previewFontSize;
 }
 
-function setPreviewFontSize(nextSize, announce = true) {
+function setPreviewFontSize(nextSize, announce = true, persist = true) {
   const size = Math.max(8, Math.min(40, Number(nextSize) || currentPreviewFontSize()));
   previewFontSize = Math.round(size * 10) / 10;
   document.documentElement.style.setProperty('--mdext-preview-font-size', `${previewFontSize}px`);
-  vscode.setState({ ...(vscode.getState() || {}), previewFontSize });
+  if (persist) {
+    vscode.postMessage({ type: 'setPreviewFontSize', size: previewFontSize });
+  }
   if (announce) {
     setStatus(`Preview font: ${previewFontSize}px`);
   }
@@ -1108,6 +1111,11 @@ async function applyRender(message) {
   const previousLine = approximateTopVisibleLine();
   const messageLine = Number(message.scrollLine);
   currentSearchState = normalizeSearchState(message.searchState);
+  if (message.previewFontSize !== null
+      && message.previewFontSize !== undefined
+      && Number.isFinite(Number(message.previewFontSize))) {
+    setPreviewFontSize(Number(message.previewFontSize), false, false);
+  }
   if (currentSearchState.query.trim()) {
     setSearchVisibility(true);
   } else if (searchToggleButton) {
@@ -1158,6 +1166,8 @@ window.addEventListener('message', (event) => {
   } else if (message.type === 'persistentHighlights') {
     applyPersistentHighlights(message.entries, false);
     applySearchState(currentSearchState);
+  } else if (message.type === 'previewFontSize') {
+    setPreviewFontSize(Number(message.size), false, false);
   } else if (message.type === 'syncScroll') {
     applySyncedScroll(Number(message.line));
   } else if (message.type === 'renderError') {
@@ -1195,10 +1205,6 @@ document.addEventListener('mousedown', (event) => {
     hideContextMenu();
   }
 });
-if (Number.isFinite(previewFontSize)) {
-  setPreviewFontSize(previewFontSize, false);
-}
-
 window.addEventListener('keyup', () => scheduleSelectionRefresh(), { passive: true });
 window.addEventListener('mouseup', () => scheduleSelectionRefresh(), { passive: true });
 
@@ -1233,6 +1239,10 @@ content.addEventListener('dblclick', (event) => {
 
 searchToggleButton?.addEventListener('click', () => {
   setSearchVisibility(!searchBarVisible, { focus: !searchBarVisible });
+});
+
+editButton?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'edit' });
 });
 
 searchCloseButton?.addEventListener('click', () => {

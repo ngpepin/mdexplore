@@ -68764,6 +68764,7 @@ var require_webview = __commonJS({
           </svg>
           <span>Search</span>
         </button>
+        <button id="edit-button" title="Edit this Markdown document with its configured default editor">Edit</button>
         <button id="pdf-button" title="Create a PDF from this preview">PDF</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
       </div>
@@ -68827,8 +68828,62 @@ var require_previewCoordinator = __commonJS({
     var PDF_SAVE_TIMEOUT_BASE_MS = 15e3;
     var PDF_SAVE_TIMEOUT_PER_CHUNK_MS = 300;
     var PDF_SAVE_TIMEOUT_MAX_MS = 18e4;
+    var PREVIEW_FONT_STATE_KEY = "mdExt.previewFontSizes.v1";
+    var PREVIEW_FONT_GC_KEY = "mdExt.previewFontSizes.lastGc.v1";
+    var PREVIEW_FONT_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1e3;
+    var PREVIEW_FONT_GC_INTERVAL_MS = 7 * 24 * 60 * 60 * 1e3;
+    var PREVIEW_FONT_MAX_ENTRIES = 500;
     function entriesSignature(entries) {
       return JSON.stringify(normalizeHighlightEntries(entries));
+    }
+    function escapeRegexCharacter(character) {
+      return "\\^$.*+?()[]{}|".includes(character) ? `\\${character}` : character;
+    }
+    function associationPatternMatchesUri(pattern, uri) {
+      let normalizedPattern = String(pattern || "").trim().replace(/\\\\/g, "/");
+      const sourcePath = String(uri?.fsPath || uri?.path || "").replace(/\\\\/g, "/");
+      if (!normalizedPattern || !sourcePath) {
+        return false;
+      }
+      while (normalizedPattern.startsWith("**/")) {
+        normalizedPattern = normalizedPattern.slice(3);
+      }
+      const target = normalizedPattern.includes("/") ? sourcePath : path.posix.basename(sourcePath);
+      let regexSource = "^";
+      for (let index = 0; index < normalizedPattern.length; index += 1) {
+        const character = normalizedPattern[index];
+        if (character === "*") {
+          if (normalizedPattern[index + 1] === "*") {
+            regexSource += ".*";
+            index += 1;
+          } else {
+            regexSource += "[^/]*";
+          }
+          continue;
+        }
+        if (character === "?") {
+          regexSource += "[^/]";
+          continue;
+        }
+        if (character === "{") {
+          const end = normalizedPattern.indexOf("}", index + 1);
+          if (end > index) {
+            const alternatives = normalizedPattern.slice(index + 1, end).split(",").map((item) => Array.from(item).map(escapeRegexCharacter).join("")).filter(Boolean);
+            if (alternatives.length) {
+              regexSource += `(?:${alternatives.join("|")})`;
+              index = end;
+              continue;
+            }
+          }
+        }
+        regexSource += escapeRegexCharacter(character);
+      }
+      regexSource += "$";
+      try {
+        return new RegExp(regexSource, "i").test(target);
+      } catch {
+        return false;
+      }
     }
     var PreviewCoordinator2 = class {
       constructor(context, diagramRenderers) {
@@ -68904,6 +68959,10 @@ var require_previewCoordinator = __commonJS({
           const type = String(message?.type || "");
           if (type === "refresh") {
             await this.renderSurface(surface);
+          } else if (type === "edit") {
+            await this.editPreviewedDocument(surface.uri);
+          } else if (type === "setPreviewFontSize") {
+            await this.savePreviewFontSize(surface.uri, Number(message.size));
           } else if (type === "setSearchQuery") {
             await this.updateSearch(surface, String(message.query || ""), Boolean(message.scrollToFirst));
           } else if (type === "previewScroll") {
@@ -69069,6 +69128,49 @@ var require_previewCoordinator = __commonJS({
           }
         }
       }
+      previewFontState() {
+        const stored = this.context.workspaceState?.get?.(PREVIEW_FONT_STATE_KEY, {});
+        return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+      }
+      previewFontSizeForUri(uri) {
+        const key = uri?.toString();
+        if (!key) {
+          return null;
+        }
+        const entry = this.previewFontState()[key];
+        const size = Number(entry?.size);
+        return Number.isFinite(size) && size >= 8 && size <= 40 ? size : null;
+      }
+      async savePreviewFontSize(uri, rawSize) {
+        const key = uri?.toString();
+        const size = Math.round(Math.max(8, Math.min(40, Number(rawSize))) * 10) / 10;
+        if (!key || !Number.isFinite(size) || !this.context.workspaceState?.update) {
+          return;
+        }
+        const now = Date.now();
+        const state = { ...this.previewFontState(), [key]: { size, touchedAt: now } };
+        await this.context.workspaceState.update(PREVIEW_FONT_STATE_KEY, state);
+        await this.maybeCollectPreviewFontState(now);
+        for (const matchingSurface of this.matchingSurfaces(uri)) {
+          if (!matchingSurface.disposed) {
+            matchingSurface.webview.postMessage({ type: "previewFontSize", size });
+          }
+        }
+      }
+      async maybeCollectPreviewFontState(now = Date.now()) {
+        const workspaceState = this.context.workspaceState;
+        if (!workspaceState?.get || !workspaceState?.update) {
+          return;
+        }
+        const lastGc = Number(workspaceState.get(PREVIEW_FONT_GC_KEY, 0)) || 0;
+        const state = this.previewFontState();
+        if (now - lastGc < PREVIEW_FONT_GC_INTERVAL_MS && Object.keys(state).length <= PREVIEW_FONT_MAX_ENTRIES) {
+          return;
+        }
+        const recentEntries = Object.entries(state).filter(([, entry]) => now - (Number(entry?.touchedAt) || 0) <= PREVIEW_FONT_MAX_AGE_MS).sort((left, right) => (Number(right[1]?.touchedAt) || 0) - (Number(left[1]?.touchedAt) || 0)).slice(0, PREVIEW_FONT_MAX_ENTRIES);
+        await workspaceState.update(PREVIEW_FONT_STATE_KEY, Object.fromEntries(recentEntries));
+        await workspaceState.update(PREVIEW_FONT_GC_KEY, now);
+      }
       async renderSurface(surface, knownDocument = null) {
         if (!surface || surface.disposed || !surface.uri) {
           return;
@@ -69107,6 +69209,7 @@ var require_previewCoordinator = __commonJS({
             path: document2.uri.fsPath || document2.uri.toString(),
             persistentHighlights,
             searchState: this.searchStateForSurface(surface),
+            previewFontSize: this.previewFontSizeForUri(document2.uri),
             scrollLine,
             revision: document2.version
           });
@@ -69142,6 +69245,53 @@ var require_previewCoordinator = __commonJS({
           return;
         }
         await this.openWithMdExt(uri);
+      }
+      configuredEditorIdForUri(uri) {
+        const associations = vscode2.workspace.getConfiguration("workbench", uri).get("editorAssociations", {});
+        const entries = [];
+        if (Array.isArray(associations)) {
+          for (const association of associations) {
+            const pattern = association?.filenamePattern || association?.pattern;
+            const editorId = association?.viewType || association?.editor || association?.editorId;
+            if (pattern && editorId) {
+              entries.push([pattern, editorId]);
+            }
+          }
+        } else if (associations && typeof associations === "object") {
+          entries.push(...Object.entries(associations));
+        }
+        let configuredEditorId = "default";
+        for (const [pattern, editorId] of entries) {
+          if (associationPatternMatchesUri(pattern, uri) && editorId) {
+            configuredEditorId = String(editorId);
+          }
+        }
+        return configuredEditorId;
+      }
+      async editPreviewedDocument(uri) {
+        if (!uri || !isMarkdownPath(uri.fsPath || uri.path)) {
+          return;
+        }
+        const configuredEditorId = this.configuredEditorIdForUri(uri);
+        const viewColumn = this.activeEditorColumn();
+        if (configuredEditorId !== "mdExt.markdownEditor") {
+          await vscode2.commands.executeCommand(
+            "vscode.openWith",
+            uri,
+            configuredEditorId || "default",
+            viewColumn
+          );
+          return;
+        }
+        const markdownEditorIds = ["vscode.markdown.editor", "markdown.editor"];
+        for (const editorId of markdownEditorIds) {
+          try {
+            await vscode2.commands.executeCommand("vscode.openWith", uri, editorId, viewColumn);
+            return;
+          } catch {
+          }
+        }
+        await vscode2.commands.executeCommand("vscode.openWith", uri, "default", viewColumn);
       }
       async openWithMdExt(uri, viewColumn = void 0) {
         if (!uri) {

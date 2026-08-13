@@ -79,3 +79,5 @@ mdext/bin/linux-x64
 .mdexplore-highlighting.json
 .COURSE.binoculars
 .loupe
+mdext/.tmp
+mdext/prior-versions

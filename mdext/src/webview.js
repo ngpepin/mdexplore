@@ -69,6 +69,7 @@ function getWebviewHtml(webview, context) {
           </svg>
           <span>Search</span>
         </button>
+        <button id="edit-button" title="Edit this Markdown document with its configured default editor">Edit</button>
         <button id="pdf-button" title="Create a PDF from this preview">PDF</button>
         <button id="refresh-button" title="Refresh preview">Refresh</button>
       </div>
