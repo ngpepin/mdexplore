@@ -9,10 +9,11 @@
 - **Edit from preview:** the `Edit` button immediately to the right of `Search` reopens the previewed document with the configured default Markdown editor. If mdExt itself is configured as the default for that Markdown file, `Edit` opens VS Code's Markdown Editor (not Markdown Preview); only when the Markdown Editor is unavailable does it fall back to the plain Text Editor.
 - **Comfortable default zoom:** preview text starts two font-size steps larger than VS Code's editor font. `Alt++` and `Alt+-` still adjust it one pixel at a time.
 - **Per-document zoom memory:** font-size adjustments are stored in VS Code workspace storage for each Markdown document and restored when it is previewed again. Stale zoom records are periodically garbage-collected, with a bounded retained history.
-- **PDF export:** the `PDF` button creates a letter-sized PDF using a dedicated high-contrast light export palette so text, tables, borders, links, code, and callouts remain crisp and readable regardless of the active VS Code theme.
+- **PDF export:** the `PDF` button creates a letter-sized **native Chromium PDF** through PySide6 Qt WebEngine, matching mdexplore's rendering architecture. Text stays selectable/searchable, SVG/MathJax/Mermaid content remains vector where Chromium supports it, and links are preserved instead of flattening each page to a screenshot.
 - **Live updates:** previews refresh as the source document changes, with a configurable debounce delay.
 - **Scroll sync:** when a source editor and mdExt preview are both visible, scrolling either one keeps the other aligned to the same approximate source line.
 - **In-preview search:** the header magnifier opens a search line that uses mdexplore-compatible query parsing and match highlighting, including `NEAR(...)` support.
+- **Preview selection copy:** select rendered preview text and right-click to choose **Copy Rendered Text** or **Copy Source Markdown**, matching mdexplore's preview copy choices. Rendered copy preserves the visible text; source copy uses the preview-to-source line mapping (with a source-text fallback) to copy the corresponding Markdown markup through VS Code's clipboard API.
 - **Persistent preview highlights:** the preview can add `Highlight` and `Highlight Important` ranges, stores them in `.mdexplore-highlighting.json`, and reapplies them when the document is previewed again.
 - **GitHub-flavoured Markdown:** tables, strikethrough, autolinks, task-list inputs, code fences, and syntax highlighting.
 - **MathJax:** inline and display TeX rendering using the bundled local MathJax runtime.
@@ -23,7 +24,7 @@
 - **Embedded SVG:** fenced `svg` blocks and standalone raw `<svg>...</svg>` blocks render as cached SVG images instead of source markup; unchanged SVG source reuses the in-process cache while edits generate a new cache entry.
 - **mdexplore-style callouts:** NOTE, TIP, IMPORTANT, WARNING, and CAUTION blocks.
 - **Images and links:** relative images are resolved through VS Code webview resource URIs; relative Markdown links can reopen in mdExt.
-- **PDF creation:** the preview header includes a `PDF` button that waits for fonts and images, switches the rendered preview to PDF-safe layout, renders the preview in the webview, and writes `<filename>.pdf` beside the Markdown source without relying on VS Code's print dialog.
+- **PDF creation:** the preview header includes a `PDF` button that waits for fonts and images, switches the rendered preview to PDF-safe layout, snapshots the already-rendered DOM, then hands that HTML to PySide6 Qt WebEngine's native `printToPdf` path. The resulting `<filename>.pdf` is written beside the Markdown source without VS Code's print dialog and without html2canvas/jsPDF rasterization.
 - **Source navigation:** double-click rendered content with source-line metadata to reveal the corresponding source line.
 
 ## Development
@@ -38,6 +39,8 @@ npm run package
 ```
 
 The package command creates a `.vsix` file in this directory. Install it through **Extensions: Install from VSIX…**.
+
+For PDF export, mdExt needs a Python runtime containing PySide6 Qt WebEngine. From the mdexplore repository root, run `./install-update.sh` once (or `./install-update.sh --check` to verify without changing anything). mdExt searches the project `.venv` automatically; `mdExt.pdfPythonPath` can point to another compatible Python executable when needed.
 
 ## Commands
 

@@ -16,6 +16,8 @@ const searchCloseButton = document.getElementById('preview-search-close-button')
 const highlightButton = document.getElementById('highlight-button');
 const highlightImportantButton = document.getElementById('highlight-important-button');
 const contextMenu = document.getElementById('preview-context-menu');
+const contextCopyRenderedButton = document.getElementById('context-copy-rendered-button');
+const contextCopySourceButton = document.getElementById('context-copy-source-button');
 const contextHighlightButton = document.getElementById('context-highlight-button');
 const contextHighlightImportantButton = document.getElementById('context-highlight-important-button');
 
@@ -26,8 +28,6 @@ const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR = 'rgba(225, 214, 255, 0.76)'
 const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR = '#170534';
 const PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR = 'rgba(112, 90, 188, 0.92)';
 const PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR = 'rgba(154, 132, 220, 0.96)';
-const PDF_SAVE_RAW_CHUNK_BYTES = 48 * 1024;
-const PDF_SAVE_YIELD_CHUNK_INTERVAL = 6;
 const PDF_PAGE_WIDTH_IN = 8.5;
 const PDF_PAGE_HEIGHT_IN = 11;
 const PDF_MARGIN_TOP_IN = 0.55;
@@ -47,7 +47,6 @@ let searchInputTimer = null;
 let selectionRefreshTimer = null;
 let searchBarVisible = false;
 let previewFontSize = null;
-let nextPdfSaveId = 0;
 let currentPersistentHighlights = [];
 let currentSearchState = {
   query: '',
@@ -173,29 +172,7 @@ function blobToDataUrl(blob) {
   });
 }
 
-function imageNaturalSize(image) {
-  const width = Math.max(1, Number(image?.naturalWidth) || Number(image?.width) || 0);
-  const height = Math.max(1, Number(image?.naturalHeight) || Number(image?.height) || 0);
-  return { width, height };
-}
-
-async function imageElementToDataUrl(image) {
-  const { width, height } = imageNaturalSize(image);
-  if (!(width > 0 && height > 0)) {
-    return '';
-  }
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    return '';
-  }
-  context.drawImage(image, 0, 0, width, height);
-  return canvas.toDataURL('image/png');
-}
-
-async function imageSourceToDataUrl(image, source) {
+async function imageSourceToDataUrl(source) {
   const rawSource = String(source || '').trim();
   if (!rawSource || rawSource.toLowerCase().startsWith('data:')) {
     return rawSource;
@@ -207,14 +184,10 @@ async function imageSourceToDataUrl(image, source) {
       return await blobToDataUrl(await response.blob());
     }
   } catch {
-    // Fall through to canvas extraction from the already-loaded preview image.
+    // Leave unresolved/broken image sources unchanged rather than rasterizing
+    // the already-rendered element through a canvas fallback.
   }
-
-  try {
-    return await imageElementToDataUrl(image);
-  } catch {
-    return '';
-  }
+  return '';
 }
 
 async function inlinePdfExportImages() {
@@ -227,7 +200,7 @@ async function inlinePdfExportImages() {
     if (!source || source.toLowerCase().startsWith('data:')) {
       continue;
     }
-    const dataUrl = await imageSourceToDataUrl(image, source);
+    const dataUrl = await imageSourceToDataUrl(source);
     if (!dataUrl) {
       continue;
     }
@@ -438,129 +411,82 @@ function restoreDiagramLayoutAfterPdfExport(restoreEntries) {
   }
 }
 
-function byteSliceToBinaryString(bytes, start, end) {
-  const clampStart = Math.max(0, Math.floor(Number(start) || 0));
-  const clampEnd = Math.max(clampStart, Math.min(bytes.length, Math.floor(Number(end) || bytes.length)));
-  const charChunk = 0x8000;
-  let binary = '';
-  for (let offset = clampStart; offset < clampEnd; offset += charChunk) {
-    const nextOffset = Math.min(clampEnd, offset + charChunk);
-    binary += String.fromCharCode(...bytes.subarray(offset, nextOffset));
-  }
-  return binary;
+function escapePdfHtmlAttribute(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
-async function normalizePdfArrayBuffer(value) {
-  if (value instanceof ArrayBuffer) {
-    return value;
-  }
-  if (ArrayBuffer.isView(value)) {
-    const view = value;
-    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-  }
-  if (value && typeof value.arrayBuffer === 'function') {
-    return value.arrayBuffer();
-  }
-  throw new Error('PDF renderer returned an unsupported output type');
-}
+async function collectPdfStyleText() {
+  const blocks = [];
+  for (const sheet of Array.from(document.styleSheets || [])) {
+    try {
+      const rules = Array.from(sheet.cssRules || []);
+      if (rules.length) {
+        blocks.push(rules.map((rule) => rule.cssText).join('\n'));
+        continue;
+      }
+    } catch {
+      // Linked webview styles can reject cssRules access. Fetch them below.
+    }
 
-async function postVsCodeMessage(message) {
-  const delivered = await vscode.postMessage(message);
-  if (delivered === false) {
-    throw new Error('PDF export message delivery failed');
-  }
-}
-
-async function postPdfSavePayloadFromArrayBuffer(bufferLike) {
-  const arrayBuffer = await normalizePdfArrayBuffer(bufferLike);
-  const bytes = new Uint8Array(arrayBuffer);
-  if (!bytes.length) {
-    throw new Error('PDF renderer returned empty output');
-  }
-
-  const saveId = `pdf-${Date.now().toString(16)}-${(nextPdfSaveId += 1).toString(16)}`;
-  const totalChunks = Math.max(1, Math.ceil(bytes.length / PDF_SAVE_RAW_CHUNK_BYTES));
-  await postVsCodeMessage({ type: 'savePdfStart', saveId, totalChunks });
-
-  for (let index = 0; index < totalChunks; index += 1) {
-    const start = index * PDF_SAVE_RAW_CHUNK_BYTES;
-    const end = Math.min(bytes.length, start + PDF_SAVE_RAW_CHUNK_BYTES);
-    await postVsCodeMessage({
-      type: 'savePdfChunk',
-      saveId,
-      index,
-      data: btoa(byteSliceToBinaryString(bytes, start, end)),
-    });
-    if ((index + 1) % PDF_SAVE_YIELD_CHUNK_INTERVAL === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    const href = String(sheet.href || '').trim();
+    if (!href) {
+      continue;
+    }
+    try {
+      const response = await fetch(href);
+      if (response.ok) {
+        blocks.push(await response.text());
+      }
+    } catch {
+      // A missing optional stylesheet should not prevent native PDF printing.
     }
   }
-
-  await postVsCodeMessage({ type: 'savePdfEnd', saveId });
+  return blocks.join('\n\n');
 }
 
-function resolvePdfFactory() {
-  if (typeof window.html2pdf === 'function') {
-    return window.html2pdf;
-  }
-  if (window.html2pdf && typeof window.html2pdf.default === 'function') {
-    return window.html2pdf.default;
-  }
-  if (window.html2pdf && typeof window.html2pdf.html2pdf === 'function') {
-    return window.html2pdf.html2pdf;
-  }
-  return null;
-}
-
-async function renderPdfArrayBuffer(pdfFactory) {
-  const worker = pdfFactory()
-    .set({
-      margin: [0.55, 0.6, 0.65, 0.6],
-      pagebreak: { mode: ['css', 'legacy'] },
-      html2canvas: {
-        scale: 1.5,
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: '#ffffff',
-        logging: false,
-      },
-      jsPDF: {
-        unit: 'in',
-        format: 'letter',
-        orientation: 'portrait',
-        compress: true,
-      },
-    })
-    .from(content)
-    .toPdf();
-
-  if (typeof worker.outputPdf === 'function') {
-    return normalizePdfArrayBuffer(await worker.outputPdf('arraybuffer'));
-  }
-  if (typeof worker.output === 'function') {
-    return normalizePdfArrayBuffer(await worker.output('arraybuffer'));
-  }
-  if (typeof worker.get === 'function') {
-    const pdfDocument = await worker.get('pdf');
-    if (pdfDocument && typeof pdfDocument.output === 'function') {
-      return normalizePdfArrayBuffer(pdfDocument.output('arraybuffer'));
+function preparePdfHtmlSnapshot(styleText) {
+  const bodyClone = document.body.cloneNode(true);
+  bodyClone.querySelectorAll('script').forEach((node) => node.remove());
+  bodyClone.querySelectorAll('a[data-mdext-href]').forEach((anchor) => {
+    const href = String(anchor.getAttribute('data-mdext-href') || '').trim();
+    if (href) {
+      anchor.setAttribute('href', href);
     }
-  }
-  throw new Error('PDF renderer output API is unavailable');
+  });
+  bodyClone.querySelectorAll('img[loading]').forEach((image) => image.removeAttribute('loading'));
+  bodyClone.classList.add('mdext-pdf-export-mode');
+
+  const htmlStyle = document.documentElement.getAttribute('style');
+  const bodyStyle = document.body.getAttribute('style');
+  const htmlStyleAttribute = htmlStyle ? ` style="${escapePdfHtmlAttribute(htmlStyle)}"` : '';
+  const bodyStyleAttribute = bodyStyle ? ` style="${escapePdfHtmlAttribute(bodyStyle)}"` : '';
+  const title = escapePdfHtmlAttribute(document.title || 'mdExt PDF');
+
+  return `<!DOCTYPE html>
+<html lang="en" class="mdext-pdf-export-mode"${htmlStyleAttribute}>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <style>${String(styleText || '').replace(/<\/style/gi, '<\\/style')}</style>
+</head>
+<body class="${escapePdfHtmlAttribute(bodyClone.className)}"${bodyStyleAttribute}>
+${bodyClone.innerHTML}
+</body>
+</html>`;
 }
 
 async function createPdfFromPreview() {
   if (!pdfButton || pdfButton.disabled) {
     return;
   }
-  const pdfFactory = resolvePdfFactory();
-  if (!pdfFactory) {
-    setStatus('PDF renderer is unavailable', true);
-    return;
-  }
 
   pdfButton.disabled = true;
-  setStatus('Preparing PDF…', true);
+  setStatus('Preparing vector PDF…', true);
   const previousScrollY = window.scrollY;
   let imageRestoreState = [];
   let diagramLayoutRestoreState = [];
@@ -572,9 +498,13 @@ async function createPdfFromPreview() {
     diagramLayoutRestoreState = prepareDiagramLayoutForPdf();
     imageRestoreState = await inlinePdfExportImages();
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const pdfBuffer = await renderPdfArrayBuffer(pdfFactory);
-    setStatus('Saving PDF…', true);
-    await postPdfSavePayloadFromArrayBuffer(pdfBuffer);
+    const styleText = await collectPdfStyleText();
+    const html = preparePdfHtmlSnapshot(styleText);
+    setStatus('Printing PDF…', true);
+    const delivered = await vscode.postMessage({ type: 'createPdf', html });
+    if (delivered === false) {
+      throw new Error('PDF export message delivery failed');
+    }
   } catch (error) {
     setStatus(`PDF export failed: ${error?.message || error}`, true);
   } finally {
@@ -762,6 +692,56 @@ function showContextMenu(x, y) {
   const top = Math.max(6, Math.min(Number(y) || 0, window.innerHeight - rect.height - 6));
   contextMenu.style.left = `${left}px`;
   contextMenu.style.top = `${top}px`;
+}
+
+function selectedSourceLineRange() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount < 1 || selection.isCollapsed) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  const taggedNodes = Array.from(content.querySelectorAll('[data-md-line-start]')).filter((node) => {
+    try {
+      return range.intersectsNode(node);
+    } catch {
+      return false;
+    }
+  });
+  if (!taggedNodes.length) {
+    return null;
+  }
+  const starts = taggedNodes
+    .map((node) => parseLineAttribute(node, 'data-md-line-start'))
+    .filter((value) => Number.isFinite(value));
+  const ends = taggedNodes
+    .map((node) => parseLineAttribute(node, 'data-md-line-end'))
+    .filter((value) => Number.isFinite(value));
+  if (!starts.length) {
+    return null;
+  }
+  const startLine = Math.min(...starts);
+  const endLine = ends.length ? Math.max(...ends) : startLine + 1;
+  return { startLine, endLine: Math.max(startLine + 1, endLine) };
+}
+
+function handleCopyRequest(kind) {
+  refreshSelectionState();
+  if (!latestSelectionInfo.hasSelection) {
+    setStatus('Select preview text to copy', true);
+    return;
+  }
+  const selectedText = String(latestSelectionInfo.selectedText || '');
+  if (kind === 'rendered') {
+    vscode.postMessage({ type: 'copyRenderedText', text: selectedText });
+    return;
+  }
+  const sourceRange = selectedSourceLineRange();
+  vscode.postMessage({
+    type: 'copySourceMarkdown',
+    selectedText,
+    startLine: sourceRange?.startLine,
+    endLine: sourceRange?.endLine,
+  });
 }
 
 function handleHighlightRequest(kind) {
@@ -1286,9 +1266,22 @@ highlightImportantButton?.addEventListener('click', () => {
   handleHighlightRequest(PREVIEW_HIGHLIGHT_KIND_IMPORTANT);
 });
 
-for (const button of [contextHighlightButton, contextHighlightImportantButton]) {
+for (const button of [
+  contextCopyRenderedButton,
+  contextCopySourceButton,
+  contextHighlightButton,
+  contextHighlightImportantButton,
+]) {
   button?.addEventListener('mousedown', (event) => event.preventDefault());
 }
+contextCopyRenderedButton?.addEventListener('click', () => {
+  hideContextMenu();
+  handleCopyRequest('rendered');
+});
+contextCopySourceButton?.addEventListener('click', () => {
+  hideContextMenu();
+  handleCopyRequest('source');
+});
 contextHighlightButton?.addEventListener('click', () => {
   hideContextMenu();
   handleHighlightRequest(PREVIEW_HIGHLIGHT_KIND_NORMAL);

@@ -205,15 +205,14 @@ verify_host() {
   log 'Host command verification passed.'
 }
 
-run_project_setup() {
-  [[ -x "${PROJECT_SETUP}" ]] || die "Project bootstrap script is not executable: ${PROJECT_SETUP}"
-  log 'Running mdexplore project bootstrap.'
-  "${PROJECT_SETUP}"
-
+verify_project_runtime() {
   local venv_python="${SCRIPT_DIR}/.venv/bin/python"
-  [[ -x "${venv_python}" ]] || die "Project virtual-environment Python is missing: ${venv_python}"
+  if [[ ! -x "${venv_python}" ]]; then
+    warn "Project virtual-environment Python is missing: ${venv_python}"
+    return 1
+  fi
 
-  "${venv_python}" - <<'PY'
+  if "${venv_python}" - <<'PY'
 import importlib
 
 required = [
@@ -226,8 +225,21 @@ required = [
 ]
 for name in required:
     importlib.import_module(name)
-print("[host-setup] OK: project Python runtime imports")
 PY
+  then
+    log 'OK: project Python runtime imports'
+    return 0
+  fi
+
+  warn 'Project .venv exists but one or more required Python imports failed.'
+  return 1
+}
+
+run_project_setup() {
+  [[ -x "${PROJECT_SETUP}" ]] || die "Project bootstrap script is not executable: ${PROJECT_SETUP}"
+  log 'Running mdexplore project bootstrap.'
+  "${PROJECT_SETUP}"
+  verify_project_runtime || die 'Project Python runtime verification failed after bootstrap.'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -258,16 +270,12 @@ verify_status=0
 verify_host || verify_status=$?
 
 if [[ "${CHECK_ONLY}" -eq 1 ]]; then
-  if [[ "${package_status}" -ne 0 || "${verify_status}" -ne 0 ]]; then
-    die 'Host configuration check failed. Run setup-host.sh without --check-only to install missing requirements.'
-  fi
+  project_status=0
   if [[ "${SKIP_PROJECT_SETUP}" -eq 0 ]]; then
-    if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then
-      log 'Project .venv exists.'
-    else
-      warn 'Project .venv does not exist yet. Run setup-host.sh without --check-only to complete project bootstrap.'
-      exit 1
-    fi
+    verify_project_runtime || project_status=$?
+  fi
+  if [[ "${package_status}" -ne 0 || "${verify_status}" -ne 0 || "${project_status}" -ne 0 ]]; then
+    die 'Host configuration check failed. Run setup-host.sh without --check-only to install or repair missing requirements.'
   fi
   log 'Host configuration check passed.'
   exit 0

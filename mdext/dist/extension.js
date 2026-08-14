@@ -68694,6 +68694,170 @@ var require_renderer = __commonJS({
   }
 });
 
+// src/pdfExporter.js
+var require_pdfExporter = __commonJS({
+  "src/pdfExporter.js"(exports2, module2) {
+    "use strict";
+    var fs = require("node:fs");
+    var fsp = require("node:fs/promises");
+    var os = require("node:os");
+    var path = require("node:path");
+    var { execFile } = require("node:child_process");
+    var { promisify } = require("node:util");
+    var { pathToFileURL } = require("node:url");
+    var vscode2 = require("vscode");
+    var execFileAsync = promisify(execFile);
+    var PYTHON_CHECK = "import PySide6.QtWebEngineCore, PySide6.QtWebEngineWidgets";
+    function unique(values) {
+      return [...new Set(values.filter(Boolean))];
+    }
+    function expandHome(value) {
+      const text = String(value || "").trim();
+      if (!text.startsWith("~")) {
+        return text;
+      }
+      if (text === "~") {
+        return os.homedir();
+      }
+      if (text.startsWith(`~${path.sep}`) || text.startsWith("~/")) {
+        return path.join(os.homedir(), text.slice(2));
+      }
+      return text;
+    }
+    function venvPython(root) {
+      if (!root) {
+        return [];
+      }
+      return process.platform === "win32" ? [path.join(root, ".venv", "Scripts", "python.exe")] : [path.join(root, ".venv", "bin", "python")];
+    }
+    function pythonCandidates(context) {
+      const configured = expandHome(vscode2.workspace.getConfiguration("mdExt").get("pdfPythonPath", ""));
+      const environment = expandHome(process.env.MDEXPLORE_PYTHON || "");
+      const roots = [];
+      for (const folder of vscode2.workspace.workspaceFolders || []) {
+        roots.push(folder.uri?.fsPath || "");
+      }
+      const extensionPath = context.extensionUri?.fsPath || context.extensionPath || "";
+      if (extensionPath) {
+        roots.push(path.dirname(extensionPath));
+      }
+      const discovered = roots.flatMap(venvPython);
+      return unique([
+        configured,
+        environment,
+        ...discovered,
+        process.platform === "win32" ? "python.exe" : "python3",
+        process.platform === "win32" ? "py.exe" : "python"
+      ]);
+    }
+    async function candidateExists(candidate) {
+      if (!candidate || !candidate.includes(path.sep)) {
+        return true;
+      }
+      try {
+        await fsp.access(candidate, fs.constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    async function resolvePdfPython(context) {
+      const failures = [];
+      for (const candidate of pythonCandidates(context)) {
+        if (!await candidateExists(candidate)) {
+          continue;
+        }
+        try {
+          await execFileAsync(candidate, ["-c", PYTHON_CHECK], {
+            timeout: 8e3,
+            windowsHide: true,
+            maxBuffer: 256 * 1024
+          });
+          return candidate;
+        } catch (error) {
+          failures.push(`${candidate}: ${String(error?.stderr || error?.message || error).trim()}`);
+        }
+      }
+      const detail = failures.length ? ` Checked: ${failures.map((item) => item.split("\n")[0]).join("; ")}` : "";
+      throw new Error(
+        "Vector PDF export requires Python with PySide6 Qt WebEngine. Run the mdexplore install-update.sh setup or set mdExt.pdfPythonPath to a compatible Python executable." + detail
+      );
+    }
+    function escapeHtmlAttribute(value) {
+      return String(value || "").replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+    function injectSourceBase(html, sourcePath) {
+      const sourceDirectory = path.dirname(sourcePath);
+      const baseHref = pathToFileURL(`${sourceDirectory}${path.sep}`).href;
+      const baseTag = `<base href="${escapeHtmlAttribute(baseHref)}">`;
+      const source = String(html || "");
+      if (/<head(?:\s[^>]*)?>/i.test(source)) {
+        return source.replace(/<head(?:\s[^>]*)?>/i, (match) => `${match}
+  ${baseTag}`);
+      }
+      return `${baseTag}
+${source}`;
+    }
+    var PdfExporter = class {
+      constructor(context) {
+        this.context = context;
+        this.python = null;
+      }
+      helperPath() {
+        const extensionPath = this.context.extensionUri?.fsPath || this.context.extensionPath || "";
+        return path.join(extensionPath, "python", "pdf_export.py");
+      }
+      async pythonExecutable() {
+        if (this.python) {
+          return this.python;
+        }
+        this.python = await resolvePdfPython(this.context);
+        return this.python;
+      }
+      async exportHtml({ html, sourcePath }) {
+        if (!String(html || "").trim()) {
+          throw new Error("PDF export received an empty HTML snapshot");
+        }
+        if (!sourcePath) {
+          throw new Error("PDF export source path is unavailable");
+        }
+        const helper = this.helperPath();
+        await fsp.access(helper, fs.constants.R_OK);
+        const tempDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "mdext-pdf-"));
+        const htmlPath = path.join(tempDirectory, "preview.html");
+        const pdfPath = path.join(tempDirectory, "preview.pdf");
+        try {
+          await fsp.writeFile(htmlPath, injectSourceBase(html, sourcePath), "utf8");
+          const python = await this.pythonExecutable();
+          const env = { ...process.env };
+          if (process.platform === "linux") {
+            env.QT_QPA_PLATFORM ||= "offscreen";
+            env.QT_QUICK_BACKEND ||= "software";
+            env.QT_OPENGL ||= "software";
+            if (typeof process.getuid === "function" && process.getuid() === 0) {
+              env.QTWEBENGINE_DISABLE_SANDBOX ||= "1";
+            }
+          }
+          await execFileAsync(python, [helper, "--html", htmlPath, "--output", pdfPath], {
+            timeout: 9e4,
+            windowsHide: true,
+            maxBuffer: 1024 * 1024,
+            env
+          });
+          const bytes = await fsp.readFile(pdfPath);
+          if (!bytes.length) {
+            throw new Error("Native PDF renderer produced an empty file");
+          }
+          return bytes;
+        } finally {
+          await fsp.rm(tempDirectory, { recursive: true, force: true });
+        }
+      }
+    };
+    module2.exports = { PdfExporter, injectSourceBase, pythonCandidates, resolvePdfPython };
+  }
+});
+
 // src/webview.js
 var require_webview = __commonJS({
   "src/webview.js"(exports2, module2) {
@@ -68714,7 +68878,6 @@ var require_webview = __commonJS({
       const highlightStyle = resourceUri(webview, context, "media", "vendor", "highlight.css");
       const mermaidScript = resourceUri(webview, context, "media", "vendor", "mermaid.min.js");
       const mathJaxScript = resourceUri(webview, context, "media", "vendor", "tex-svg.js");
-      const html2PdfScript = resourceUri(webview, context, "media", "vendor", "html2pdf.bundle.min.js");
       const csp = [
         "default-src 'none'",
         `img-src ${webview.cspSource} https: data: blob:`,
@@ -68747,7 +68910,6 @@ var require_webview = __commonJS({
   </script>
   <script nonce="${scriptNonce}" src="${mermaidScript}"></script>
   <script nonce="${scriptNonce}" src="${mathJaxScript}"></script>
-  <script nonce="${scriptNonce}" src="${html2PdfScript}"></script>
   <title>mdExt</title>
 </head>
 <body>
@@ -68788,6 +68950,8 @@ var require_webview = __commonJS({
     </section>
   </main>
   <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-copy-rendered-button" role="menuitem">Copy Rendered Text</button>
+    <button id="context-copy-source-button" role="menuitem">Copy Source Markdown</button>
     <button id="context-highlight-button" role="menuitem">Highlight</button>
     <button id="context-highlight-important-button" role="menuitem">Important highlight</button>
   </div>
@@ -68818,6 +68982,7 @@ var require_previewCoordinator = __commonJS({
       saveHighlightEntries
     } = require_highlightStore();
     var { renderMarkdown } = require_renderer();
+    var { PdfExporter } = require_pdfExporter();
     var { getWebviewHtml } = require_webview();
     var {
       isMarkdownPath,
@@ -68825,9 +68990,6 @@ var require_previewCoordinator = __commonJS({
       isMarkdownPath: isMarkdownHref,
       resolveRelativeFile
     } = require_utils();
-    var PDF_SAVE_TIMEOUT_BASE_MS = 15e3;
-    var PDF_SAVE_TIMEOUT_PER_CHUNK_MS = 300;
-    var PDF_SAVE_TIMEOUT_MAX_MS = 18e4;
     var PREVIEW_FONT_STATE_KEY = "mdExt.previewFontSizes.v1";
     var PREVIEW_FONT_GC_KEY = "mdExt.previewFontSizes.lastGc.v1";
     var PREVIEW_FONT_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1e3;
@@ -68895,8 +69057,7 @@ var require_previewCoordinator = __commonJS({
         this.anchorLineByUri = /* @__PURE__ */ new Map();
         this.renderGeneration = /* @__PURE__ */ new WeakMap();
         this.debounceTimers = /* @__PURE__ */ new Map();
-        this.pendingPdfSaves = /* @__PURE__ */ new Map();
-        this.pdfSaveTimers = /* @__PURE__ */ new Map();
+        this.pdfExporter = new PdfExporter(context);
         this.sourceScrollSuppressions = /* @__PURE__ */ new WeakMap();
         this.scrollLeaderByUri = /* @__PURE__ */ new Map();
       }
@@ -68967,6 +69128,14 @@ var require_previewCoordinator = __commonJS({
             await this.updateSearch(surface, String(message.query || ""), Boolean(message.scrollToFirst));
           } else if (type === "previewScroll") {
             await this.onPreviewScroll(surface, Number(message.line));
+          } else if (type === "copyRenderedText") {
+            await this.copyRenderedText(surface, String(message.text || ""));
+          } else if (type === "copySourceMarkdown") {
+            await this.copySourceMarkdown(surface, {
+              startLine: Number(message.startLine),
+              endLine: Number(message.endLine),
+              selectedText: String(message.selectedText || "")
+            });
           } else if (type === "addPersistentHighlight") {
             await this.addPersistentHighlight(surface, {
               start: Number(message.start),
@@ -68976,14 +69145,8 @@ var require_previewCoordinator = __commonJS({
             });
           } else if (type === "persistentHighlightsResolved") {
             await this.onPersistentHighlightsResolved(surface, message.entries);
-          } else if (type === "savePdfStart") {
-            this.beginPdfSave(surface, String(message.saveId || ""), Number(message.totalChunks));
-          } else if (type === "savePdfChunk") {
-            this.appendPdfSaveChunk(surface, String(message.saveId || ""), Number(message.index), String(message.data || ""));
-          } else if (type === "savePdfEnd") {
-            await this.finishPdfSave(surface, String(message.saveId || ""));
-          } else if (type === "savePdf") {
-            await this.savePdf(surface, String(message.data || ""));
+          } else if (type === "createPdf") {
+            await this.createPdf(surface, String(message.html || ""));
           } else if (type === "openSource") {
             await this.openSource(surface.uri);
           } else if (type === "openLink") {
@@ -69300,15 +69463,25 @@ var require_previewCoordinator = __commonJS({
         const column = viewColumn ?? vscode2.window.activeTextEditor?.viewColumn ?? vscode2.ViewColumn.Active;
         await vscode2.commands.executeCommand("vscode.openWith", uri, "mdExt.markdownEditor", column);
       }
-      async savePdf(surface, base64Data) {
-        if (!surface?.uri || !base64Data) {
+      async createPdf(surface, html) {
+        if (!surface?.uri || !String(html || "").trim()) {
           return;
         }
         const outputPath = this.pdfOutputPath(surface.uri);
-        if (!outputPath) {
+        const sourcePath = surface.uri.fsPath || surface.uri.path;
+        if (!outputPath || !sourcePath) {
           return;
         }
-        await this.writePdfOutput(surface, outputPath, base64Data);
+        try {
+          const bytes = await this.pdfExporter.exportHtml({ html, sourcePath });
+          await this.writePdfOutputBytes(surface, outputPath, bytes);
+        } catch (error) {
+          surface.webview.postMessage({
+            type: "status",
+            message: `PDF export failed: ${error?.message || error}`,
+            persistent: true
+          });
+        }
       }
       pdfOutputPath(uri) {
         const sourcePath = uri?.fsPath || uri?.path;
@@ -69316,140 +69489,6 @@ var require_previewCoordinator = __commonJS({
           return "";
         }
         return /\.(?:md|markdown)$/i.test(sourcePath) ? sourcePath.replace(/\.(?:md|markdown)$/i, ".pdf") : `${sourcePath}.pdf`;
-      }
-      pdfSaveKey(surface, saveId) {
-        return `${surface?.uri?.toString?.() || ""}\0${String(saveId || "")}`;
-      }
-      pdfSaveHasAllChunks(pending) {
-        if (!pending || !Number.isInteger(pending.expectedChunks) || pending.expectedChunks <= 0) {
-          return false;
-        }
-        for (let index = 0; index < pending.expectedChunks; index += 1) {
-          if (!Buffer.isBuffer(pending.chunks[index])) {
-            return false;
-          }
-        }
-        return true;
-      }
-      clearPdfSaveTimer(key) {
-        const timer = this.pdfSaveTimers.get(key);
-        if (timer) {
-          clearTimeout(timer);
-          this.pdfSaveTimers.delete(key);
-        }
-      }
-      schedulePdfSaveTimeout(surface, key, expectedChunks) {
-        this.clearPdfSaveTimer(key);
-        const timeoutMs = Math.min(
-          PDF_SAVE_TIMEOUT_MAX_MS,
-          PDF_SAVE_TIMEOUT_BASE_MS + Math.max(1, expectedChunks) * PDF_SAVE_TIMEOUT_PER_CHUNK_MS
-        );
-        const timer = setTimeout(() => {
-          const pending = this.pendingPdfSaves.get(key);
-          if (!pending || this.pdfSaveHasAllChunks(pending)) {
-            return;
-          }
-          this.pendingPdfSaves.delete(key);
-          this.pdfSaveTimers.delete(key);
-          surface.webview.postMessage({
-            type: "status",
-            message: "PDF export failed: timed out while receiving PDF data",
-            persistent: true
-          });
-        }, timeoutMs);
-        this.pdfSaveTimers.set(key, timer);
-      }
-      base64ChunkToBytes(base64Chunk) {
-        const payload = String(base64Chunk || "");
-        if (!payload) {
-          return null;
-        }
-        try {
-          const bytes = Buffer.from(payload, "base64");
-          return bytes.length ? bytes : null;
-        } catch {
-          return null;
-        }
-      }
-      beginPdfSave(surface, saveId, totalChunks) {
-        if (!surface?.uri || !saveId) {
-          return;
-        }
-        const key = this.pdfSaveKey(surface, saveId);
-        this.pendingPdfSaves.delete(key);
-        this.clearPdfSaveTimer(key);
-        const expectedChunks = Math.max(1, Math.floor(Number(totalChunks) || 0));
-        this.pendingPdfSaves.set(key, {
-          outputPath: this.pdfOutputPath(surface.uri),
-          chunks: new Array(expectedChunks),
-          expectedChunks,
-          ended: false
-        });
-        this.schedulePdfSaveTimeout(surface, key, expectedChunks);
-      }
-      appendPdfSaveChunk(surface, saveId, index, chunkData) {
-        const key = this.pdfSaveKey(surface, saveId);
-        const pending = this.pendingPdfSaves.get(key);
-        if (!pending) {
-          return;
-        }
-        const safeIndex = Math.floor(Number(index));
-        if (safeIndex < 0 || safeIndex >= pending.expectedChunks) {
-          return;
-        }
-        const bytes = this.base64ChunkToBytes(chunkData);
-        if (!bytes) {
-          return;
-        }
-        pending.chunks[safeIndex] = bytes;
-        if (pending.ended && this.pdfSaveHasAllChunks(pending)) {
-          void this.finalizePendingPdfSave(surface, key, pending);
-        }
-      }
-      async finishPdfSave(surface, saveId) {
-        const key = this.pdfSaveKey(surface, saveId);
-        const pending = this.pendingPdfSaves.get(key);
-        if (!surface?.uri || !pending?.outputPath) {
-          return;
-        }
-        pending.ended = true;
-        if (!this.pdfSaveHasAllChunks(pending)) {
-          return;
-        }
-        await this.finalizePendingPdfSave(surface, key, pending);
-      }
-      async finalizePendingPdfSave(surface, key, pending) {
-        if (!surface?.uri || !pending?.outputPath) {
-          this.pendingPdfSaves.delete(key);
-          this.clearPdfSaveTimer(key);
-          return;
-        }
-        if (!this.pdfSaveHasAllChunks(pending)) {
-          surface.webview.postMessage({
-            type: "status",
-            message: "PDF export failed: incomplete PDF payload",
-            persistent: true
-          });
-          return;
-        }
-        this.pendingPdfSaves.delete(key);
-        this.clearPdfSaveTimer(key);
-        await this.writePdfOutputBytes(surface, pending.outputPath, Buffer.concat(pending.chunks));
-      }
-      async writePdfOutput(surface, outputPath, base64Data) {
-        if (!outputPath || !base64Data) {
-          return;
-        }
-        const bytes = this.base64ChunkToBytes(base64Data);
-        if (!bytes) {
-          surface.webview.postMessage({
-            type: "status",
-            message: "PDF export failed: empty PDF payload",
-            persistent: true
-          });
-          return;
-        }
-        await this.writePdfOutputBytes(surface, outputPath, bytes);
       }
       async writePdfOutputBytes(surface, outputPath, bytes) {
         if (!outputPath || !bytes) {
@@ -69471,6 +69510,61 @@ var require_previewCoordinator = __commonJS({
             message: `PDF export failed: ${error?.message || error}`,
             persistent: true
           });
+        }
+      }
+      async writeClipboard(surface, text, successMessage) {
+        try {
+          await vscode2.env.clipboard.writeText(String(text ?? ""));
+          this.postSurfaceStatus(surface, successMessage);
+          return true;
+        } catch (error) {
+          this.postSurfaceStatus(surface, `Copy failed: ${error?.message || error}`, true);
+          return false;
+        }
+      }
+      async copyRenderedText(surface, selectedText) {
+        const text = String(selectedText || "");
+        if (!text.trim()) {
+          this.postSurfaceStatus(surface, "No selected rendered text to copy", true);
+          return;
+        }
+        await this.writeClipboard(surface, text, "Copied rendered text");
+      }
+      sourceLinesWithEndings(source) {
+        return String(source || "").match(/[^\n]*\n|[^\n]+$/g) || [];
+      }
+      async copySourceMarkdown(surface, selection) {
+        if (!surface?.uri) {
+          return;
+        }
+        try {
+          const document2 = await vscode2.workspace.openTextDocument(surface.uri);
+          const source = document2.getText();
+          if (!source) {
+            await this.writeClipboard(surface, "", "Copied source markdown (empty file)");
+            return;
+          }
+          const lines = this.sourceLinesWithEndings(source);
+          const requestedStart = Number(selection?.startLine);
+          const requestedEnd = Number(selection?.endLine);
+          if (Number.isFinite(requestedStart) && Number.isFinite(requestedEnd) && requestedEnd > requestedStart && lines.length) {
+            const start = Math.max(0, Math.min(lines.length - 1, Math.floor(requestedStart)));
+            const end = Math.max(start + 1, Math.min(lines.length, Math.floor(requestedEnd)));
+            await this.writeClipboard(surface, lines.slice(start, end).join(""), `Copied source markdown lines ${start + 1}-${end}`);
+            return;
+          }
+          const selectedText = String(selection?.selectedText || "").trim();
+          const index = selectedText ? source.indexOf(selectedText) : -1;
+          if (index >= 0) {
+            const start = source.slice(0, index).split("\n").length - 1;
+            const endOffset = index + selectedText.length;
+            const end = Math.max(start + 1, source.slice(0, endOffset).split("\n").length);
+            await this.writeClipboard(surface, lines.slice(start, Math.min(lines.length, end)).join(""), `Copied source markdown lines ${start + 1}-${Math.min(lines.length, end)} (fallback)`);
+            return;
+          }
+          this.postSurfaceStatus(surface, "Could not map the preview selection to source Markdown", true);
+        } catch (error) {
+          this.postSurfaceStatus(surface, `Could not read source markdown: ${error?.message || error}`, true);
         }
       }
       async openSource(uri) {
@@ -69534,11 +69628,6 @@ var require_previewCoordinator = __commonJS({
           clearTimeout(timer);
         }
         this.debounceTimers.clear();
-        for (const timer of this.pdfSaveTimers.values()) {
-          clearTimeout(timer);
-        }
-        this.pdfSaveTimers.clear();
-        this.pendingPdfSaves.clear();
       }
       matchingSurfaces(uri) {
         const key = uri?.toString();

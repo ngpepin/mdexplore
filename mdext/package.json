@@ -2,7 +2,7 @@
   "name": "mdext",
   "displayName": "mdExt",
   "description": "A high-fidelity Markdown preview editor for Visual Studio Code, based on mdexplore.",
-  "version": "0.1.8",
+  "version": "0.1.12",
   "publisher": "mdexplore",
   "license": "MIT",
   "icon": "media/mdexplor-icon.png",
@@ -110,6 +110,11 @@
           ],
           "default": "mdExt",
           "description": "Choose how relative Markdown links are opened."
+        },
+        "mdExt.pdfPythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Python executable for native vector PDF export. It must provide PySide6 Qt WebEngine. When empty, mdExt searches the mdexplore .venv and then PATH."
         }
       }
     }
@@ -117,14 +122,13 @@
   "scripts": {
     "build": "esbuild src/extension.js --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check src/extension.js && node --check src/previewCoordinator.js && node --check src/searchQuery.js && node --check src/highlightStore.js && node --check src/renderer.js && node --check src/diagramRenderers.js && node --check src/webview.js && node --check media/preview.js && node --check media/searchCompat.js && node --check media/highlightCompat.js && npm run build && node --check dist/extension.js",
+    "check": "node --check src/extension.js && node --check src/previewCoordinator.js && node --check src/pdfExporter.js && node --check src/searchQuery.js && node --check src/highlightStore.js && node --check src/renderer.js && node --check src/diagramRenderers.js && node --check src/webview.js && node --check media/preview.js && node --check media/searchCompat.js && node --check media/highlightCompat.js && npm run build && node --check dist/extension.js",
     "package": "npm run build && vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
     "@vscode/vsce": "3.6.0",
     "esbuild": "0.25.8",
     "highlight.js": "11.11.1",
-    "html2pdf.js": "^0.14.0",
     "markdown-it": "14.1.0",
     "markdown-it-task-lists": "2.1.1",
     "sanitize-html": "2.16.0"

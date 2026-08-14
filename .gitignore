@@ -81,3 +81,5 @@ mdext/bin/linux-x64
 .loupe
 mdext/.tmp
 mdext/prior-versions
+node-compile-cache
+.npm/

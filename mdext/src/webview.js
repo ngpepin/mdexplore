@@ -18,7 +18,6 @@ function getWebviewHtml(webview, context) {
   const highlightStyle = resourceUri(webview, context, 'media', 'vendor', 'highlight.css');
   const mermaidScript = resourceUri(webview, context, 'media', 'vendor', 'mermaid.min.js');
   const mathJaxScript = resourceUri(webview, context, 'media', 'vendor', 'tex-svg.js');
-  const html2PdfScript = resourceUri(webview, context, 'media', 'vendor', 'html2pdf.bundle.min.js');
   const csp = [
     "default-src 'none'",
     `img-src ${webview.cspSource} https: data: blob:`,
@@ -52,7 +51,6 @@ function getWebviewHtml(webview, context) {
   </script>
   <script nonce="${scriptNonce}" src="${mermaidScript}"></script>
   <script nonce="${scriptNonce}" src="${mathJaxScript}"></script>
-  <script nonce="${scriptNonce}" src="${html2PdfScript}"></script>
   <title>mdExt</title>
 </head>
 <body>
@@ -93,6 +91,8 @@ function getWebviewHtml(webview, context) {
     </section>
   </main>
   <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-copy-rendered-button" role="menuitem">Copy Rendered Text</button>
+    <button id="context-copy-source-button" role="menuitem">Copy Source Markdown</button>
     <button id="context-highlight-button" role="menuitem">Highlight</button>
     <button id="context-highlight-important-button" role="menuitem">Important highlight</button>
   </div>

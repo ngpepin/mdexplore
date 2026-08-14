@@ -12,6 +12,7 @@ const {
   saveHighlightEntries,
 } = require('./highlightStore');
 const { renderMarkdown } = require('./renderer');
+const { PdfExporter } = require('./pdfExporter');
 const { getWebviewHtml } = require('./webview');
 const {
   isMarkdownPath,
@@ -20,9 +21,6 @@ const {
   resolveRelativeFile,
 } = require('./utils');
 
-const PDF_SAVE_TIMEOUT_BASE_MS = 15000;
-const PDF_SAVE_TIMEOUT_PER_CHUNK_MS = 300;
-const PDF_SAVE_TIMEOUT_MAX_MS = 180000;
 const PREVIEW_FONT_STATE_KEY = 'mdExt.previewFontSizes.v1';
 const PREVIEW_FONT_GC_KEY = 'mdExt.previewFontSizes.lastGc.v1';
 const PREVIEW_FONT_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000;
@@ -100,8 +98,7 @@ class PreviewCoordinator {
     this.anchorLineByUri = new Map();
     this.renderGeneration = new WeakMap();
     this.debounceTimers = new Map();
-    this.pendingPdfSaves = new Map();
-    this.pdfSaveTimers = new Map();
+    this.pdfExporter = new PdfExporter(context);
     this.sourceScrollSuppressions = new WeakMap();
     this.scrollLeaderByUri = new Map();
   }
@@ -178,6 +175,14 @@ class PreviewCoordinator {
         await this.updateSearch(surface, String(message.query || ''), Boolean(message.scrollToFirst));
       } else if (type === 'previewScroll') {
         await this.onPreviewScroll(surface, Number(message.line));
+      } else if (type === 'copyRenderedText') {
+        await this.copyRenderedText(surface, String(message.text || ''));
+      } else if (type === 'copySourceMarkdown') {
+        await this.copySourceMarkdown(surface, {
+          startLine: Number(message.startLine),
+          endLine: Number(message.endLine),
+          selectedText: String(message.selectedText || ''),
+        });
       } else if (type === 'addPersistentHighlight') {
         await this.addPersistentHighlight(surface, {
           start: Number(message.start),
@@ -187,14 +192,8 @@ class PreviewCoordinator {
         });
       } else if (type === 'persistentHighlightsResolved') {
         await this.onPersistentHighlightsResolved(surface, message.entries);
-      } else if (type === 'savePdfStart') {
-        this.beginPdfSave(surface, String(message.saveId || ''), Number(message.totalChunks));
-      } else if (type === 'savePdfChunk') {
-        this.appendPdfSaveChunk(surface, String(message.saveId || ''), Number(message.index), String(message.data || ''));
-      } else if (type === 'savePdfEnd') {
-        await this.finishPdfSave(surface, String(message.saveId || ''));
-      } else if (type === 'savePdf') {
-        await this.savePdf(surface, String(message.data || ''));
+      } else if (type === 'createPdf') {
+        await this.createPdf(surface, String(message.html || ''));
       } else if (type === 'openSource') {
         await this.openSource(surface.uri);
       } else if (type === 'openLink') {
@@ -565,15 +564,25 @@ class PreviewCoordinator {
     await vscode.commands.executeCommand('vscode.openWith', uri, 'mdExt.markdownEditor', column);
   }
 
-  async savePdf(surface, base64Data) {
-    if (!surface?.uri || !base64Data) {
+  async createPdf(surface, html) {
+    if (!surface?.uri || !String(html || '').trim()) {
       return;
     }
     const outputPath = this.pdfOutputPath(surface.uri);
-    if (!outputPath) {
+    const sourcePath = surface.uri.fsPath || surface.uri.path;
+    if (!outputPath || !sourcePath) {
       return;
     }
-    await this.writePdfOutput(surface, outputPath, base64Data);
+    try {
+      const bytes = await this.pdfExporter.exportHtml({ html, sourcePath });
+      await this.writePdfOutputBytes(surface, outputPath, bytes);
+    } catch (error) {
+      surface.webview.postMessage({
+        type: 'status',
+        message: `PDF export failed: ${error?.message || error}`,
+        persistent: true,
+      });
+    }
   }
 
   pdfOutputPath(uri) {
@@ -584,150 +593,6 @@ class PreviewCoordinator {
     return /\.(?:md|markdown)$/i.test(sourcePath)
       ? sourcePath.replace(/\.(?:md|markdown)$/i, '.pdf')
       : `${sourcePath}.pdf`;
-  }
-
-  pdfSaveKey(surface, saveId) {
-    return `${surface?.uri?.toString?.() || ''}\u0000${String(saveId || '')}`;
-  }
-
-  pdfSaveHasAllChunks(pending) {
-    if (!pending || !Number.isInteger(pending.expectedChunks) || pending.expectedChunks <= 0) {
-      return false;
-    }
-    for (let index = 0; index < pending.expectedChunks; index += 1) {
-      if (!Buffer.isBuffer(pending.chunks[index])) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  clearPdfSaveTimer(key) {
-    const timer = this.pdfSaveTimers.get(key);
-    if (timer) {
-      clearTimeout(timer);
-      this.pdfSaveTimers.delete(key);
-    }
-  }
-
-  schedulePdfSaveTimeout(surface, key, expectedChunks) {
-    this.clearPdfSaveTimer(key);
-    const timeoutMs = Math.min(
-      PDF_SAVE_TIMEOUT_MAX_MS,
-      PDF_SAVE_TIMEOUT_BASE_MS + (Math.max(1, expectedChunks) * PDF_SAVE_TIMEOUT_PER_CHUNK_MS),
-    );
-    const timer = setTimeout(() => {
-      const pending = this.pendingPdfSaves.get(key);
-      if (!pending || this.pdfSaveHasAllChunks(pending)) {
-        return;
-      }
-      this.pendingPdfSaves.delete(key);
-      this.pdfSaveTimers.delete(key);
-      surface.webview.postMessage({
-        type: 'status',
-        message: 'PDF export failed: timed out while receiving PDF data',
-        persistent: true,
-      });
-    }, timeoutMs);
-    this.pdfSaveTimers.set(key, timer);
-  }
-
-  base64ChunkToBytes(base64Chunk) {
-    const payload = String(base64Chunk || '');
-    if (!payload) {
-      return null;
-    }
-    try {
-      const bytes = Buffer.from(payload, 'base64');
-      return bytes.length ? bytes : null;
-    } catch {
-      return null;
-    }
-  }
-
-  beginPdfSave(surface, saveId, totalChunks) {
-    if (!surface?.uri || !saveId) {
-      return;
-    }
-    const key = this.pdfSaveKey(surface, saveId);
-    this.pendingPdfSaves.delete(key);
-    this.clearPdfSaveTimer(key);
-    const expectedChunks = Math.max(1, Math.floor(Number(totalChunks) || 0));
-    this.pendingPdfSaves.set(key, {
-      outputPath: this.pdfOutputPath(surface.uri),
-      chunks: new Array(expectedChunks),
-      expectedChunks,
-      ended: false,
-    });
-    this.schedulePdfSaveTimeout(surface, key, expectedChunks);
-  }
-
-  appendPdfSaveChunk(surface, saveId, index, chunkData) {
-    const key = this.pdfSaveKey(surface, saveId);
-    const pending = this.pendingPdfSaves.get(key);
-    if (!pending) {
-      return;
-    }
-    const safeIndex = Math.floor(Number(index));
-    if (safeIndex < 0 || safeIndex >= pending.expectedChunks) {
-      return;
-    }
-    const bytes = this.base64ChunkToBytes(chunkData);
-    if (!bytes) {
-      return;
-    }
-    pending.chunks[safeIndex] = bytes;
-    if (pending.ended && this.pdfSaveHasAllChunks(pending)) {
-      void this.finalizePendingPdfSave(surface, key, pending);
-    }
-  }
-
-  async finishPdfSave(surface, saveId) {
-    const key = this.pdfSaveKey(surface, saveId);
-    const pending = this.pendingPdfSaves.get(key);
-    if (!surface?.uri || !pending?.outputPath) {
-      return;
-    }
-    pending.ended = true;
-    if (!this.pdfSaveHasAllChunks(pending)) {
-      return;
-    }
-    await this.finalizePendingPdfSave(surface, key, pending);
-  }
-
-  async finalizePendingPdfSave(surface, key, pending) {
-    if (!surface?.uri || !pending?.outputPath) {
-      this.pendingPdfSaves.delete(key);
-      this.clearPdfSaveTimer(key);
-      return;
-    }
-    if (!this.pdfSaveHasAllChunks(pending)) {
-      surface.webview.postMessage({
-        type: 'status',
-        message: 'PDF export failed: incomplete PDF payload',
-        persistent: true,
-      });
-      return;
-    }
-    this.pendingPdfSaves.delete(key);
-    this.clearPdfSaveTimer(key);
-    await this.writePdfOutputBytes(surface, pending.outputPath, Buffer.concat(pending.chunks));
-  }
-
-  async writePdfOutput(surface, outputPath, base64Data) {
-    if (!outputPath || !base64Data) {
-      return;
-    }
-    const bytes = this.base64ChunkToBytes(base64Data);
-    if (!bytes) {
-      surface.webview.postMessage({
-        type: 'status',
-        message: 'PDF export failed: empty PDF payload',
-        persistent: true,
-      });
-      return;
-    }
-    await this.writePdfOutputBytes(surface, outputPath, bytes);
   }
 
   async writePdfOutputBytes(surface, outputPath, bytes) {
@@ -750,6 +615,66 @@ class PreviewCoordinator {
         message: `PDF export failed: ${error?.message || error}`,
         persistent: true,
       });
+    }
+  }
+
+  async writeClipboard(surface, text, successMessage) {
+    try {
+      await vscode.env.clipboard.writeText(String(text ?? ''));
+      this.postSurfaceStatus(surface, successMessage);
+      return true;
+    } catch (error) {
+      this.postSurfaceStatus(surface, `Copy failed: ${error?.message || error}`, true);
+      return false;
+    }
+  }
+
+  async copyRenderedText(surface, selectedText) {
+    const text = String(selectedText || '');
+    if (!text.trim()) {
+      this.postSurfaceStatus(surface, 'No selected rendered text to copy', true);
+      return;
+    }
+    await this.writeClipboard(surface, text, 'Copied rendered text');
+  }
+
+  sourceLinesWithEndings(source) {
+    return String(source || '').match(/[^\n]*\n|[^\n]+$/g) || [];
+  }
+
+  async copySourceMarkdown(surface, selection) {
+    if (!surface?.uri) {
+      return;
+    }
+    try {
+      const document = await vscode.workspace.openTextDocument(surface.uri);
+      const source = document.getText();
+      if (!source) {
+        await this.writeClipboard(surface, '', 'Copied source markdown (empty file)');
+        return;
+      }
+      const lines = this.sourceLinesWithEndings(source);
+      const requestedStart = Number(selection?.startLine);
+      const requestedEnd = Number(selection?.endLine);
+      if (Number.isFinite(requestedStart) && Number.isFinite(requestedEnd) && requestedEnd > requestedStart && lines.length) {
+        const start = Math.max(0, Math.min(lines.length - 1, Math.floor(requestedStart)));
+        const end = Math.max(start + 1, Math.min(lines.length, Math.floor(requestedEnd)));
+        await this.writeClipboard(surface, lines.slice(start, end).join(''), `Copied source markdown lines ${start + 1}-${end}`);
+        return;
+      }
+
+      const selectedText = String(selection?.selectedText || '').trim();
+      const index = selectedText ? source.indexOf(selectedText) : -1;
+      if (index >= 0) {
+        const start = source.slice(0, index).split('\n').length - 1;
+        const endOffset = index + selectedText.length;
+        const end = Math.max(start + 1, source.slice(0, endOffset).split('\n').length);
+        await this.writeClipboard(surface, lines.slice(start, Math.min(lines.length, end)).join(''), `Copied source markdown lines ${start + 1}-${Math.min(lines.length, end)} (fallback)`);
+        return;
+      }
+      this.postSurfaceStatus(surface, 'Could not map the preview selection to source Markdown', true);
+    } catch (error) {
+      this.postSurfaceStatus(surface, `Could not read source markdown: ${error?.message || error}`, true);
     }
   }
 
@@ -818,11 +743,6 @@ class PreviewCoordinator {
       clearTimeout(timer);
     }
     this.debounceTimers.clear();
-    for (const timer of this.pdfSaveTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.pdfSaveTimers.clear();
-    this.pendingPdfSaves.clear();
   }
 
   matchingSurfaces(uri) {
