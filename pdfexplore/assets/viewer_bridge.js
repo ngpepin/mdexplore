@@ -42,6 +42,9 @@
     return typeof raw === "string" && raw.trim() ? raw.trim() : fallback;
   }
 
+  // pdf.js page borders remain fixed-size as content scales. A small amount
+  // above six is therefore required for six complete page boxes to fit.
+  const SIX_UP_DIVISOR = configNumber("six_up_divisor", 6.3, 1, 12);
   const THREE_UP_DIVISOR = configNumber("three_up_divisor", 3, 1, 12);
   const MIN_ZOOM_SCALE = configNumber("min_zoom_scale", 0.1, 0.01, 100);
   const MAX_ZOOM_SCALE = configNumber("max_zoom_scale", 10.0, MIN_ZOOM_SCALE, 100);
@@ -117,6 +120,7 @@
     refreshNeedsIndexInvalidation: false,
     observer: null,
     darkModeActive: false,
+    sixUpActive: false,
     threeUpActive: false,
     twoUpActive: false,
     threeUpBaselineViewState: null,
@@ -181,6 +185,10 @@
     return computeMultiUpScale(currentViewer, THREE_UP_DIVISOR);
   }
 
+  function computeSixUpScale(currentViewer) {
+    return computeMultiUpScale(currentViewer, SIX_UP_DIVISOR);
+  }
+
   function computeTwoUpScale(currentViewer) {
     // Native pdf.js spread mode already applies its own factor of two when it
     // calculates page-width. Dividing by two again makes facing pages occupy
@@ -196,6 +204,15 @@
     currentViewer.spreadMode = SpreadMode.NONE;
     currentViewer.scrollMode = ScrollMode.WRAPPED;
     currentViewer.currentScale = computeThreeUpScale(currentViewer);
+  }
+
+  function applySixUpLayout(currentViewer) {
+    if (!currentViewer) {
+      return;
+    }
+    currentViewer.spreadMode = SpreadMode.NONE;
+    currentViewer.scrollMode = ScrollMode.WRAPPED;
+    currentViewer.currentScale = computeSixUpScale(currentViewer);
   }
 
   function applyTwoUpLayout(currentViewer) {
@@ -322,6 +339,18 @@
     return best || document.scrollingElement || viewerContainer() || document.documentElement || document.body;
   }
 
+  function isSixUpToggleShortcutEvent(event) {
+    if (!event || typeof event !== "object") {
+      return false;
+    }
+    if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return false;
+    }
+    const key = String(event.key || "");
+    const code = String(event.code || "");
+    return key === "7" || code === "Digit7";
+  }
+
   function isThreeUpToggleShortcutEvent(event) {
     if (!event || typeof event !== "object") {
       return false;
@@ -428,7 +457,7 @@
   }
 
   function capturePersistedViewState() {
-    if (state.threeUpActive || state.twoUpActive) {
+    if (state.sixUpActive || state.threeUpActive || state.twoUpActive) {
       return threeUpViewState();
     }
     return captureViewState();
@@ -2228,6 +2257,12 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         }
       }, true);
       document.addEventListener("keydown", (event) => {
+        if (isSixUpToggleShortcutEvent(event)) {
+          toggleSixUpMode();
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         if (isThreeUpToggleShortcutEvent(event)) {
           toggleThreeUpMode();
           event.preventDefault();
@@ -2303,7 +2338,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
           syncSearchIndicatorRailBounds();
           syncHighlightIndicatorRailBounds();
         }
-        if (state.threeUpActive) {
+        if (state.sixUpActive || state.threeUpActive) {
           const currentAppForCenter = app();
           const currentViewerForCenter = viewer();
           const activeContainer = primaryScrollContainer();
@@ -2527,6 +2562,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
     }
+    if (state.sixUpActive) {
+      leaveSixUpMode({ restoreBaseline: false });
+    }
     const baseline = capturePersistedViewState();
     state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
       ? baseline
@@ -2570,6 +2608,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     return {
       active: Boolean(state.twoUpActive),
       twoUpActive: Boolean(state.twoUpActive),
+      sixUpActive: Boolean(state.sixUpActive),
       threeUpActive: Boolean(state.threeUpActive),
       onePageScale,
       percent: Math.round(onePageScale * 100),
@@ -2591,6 +2630,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     if (state.twoUpActive) {
       leaveTwoUpMode({ restoreBaseline: false });
+    }
+    if (state.sixUpActive) {
+      leaveSixUpMode({ restoreBaseline: false });
     }
     const pendingBaseline = (
       state.pendingRestoreViewState
@@ -2706,6 +2748,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     const onePageScale = clampZoomScale(state.threeUpOnePageScale);
     return {
       active: Boolean(state.threeUpActive),
+      sixUpActive: Boolean(state.sixUpActive),
       threeUpActive: Boolean(state.threeUpActive),
       onePageScale,
       percent: Math.round(onePageScale * 100),
@@ -2716,9 +2759,151 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     return Boolean(state.threeUpActive);
   }
 
+  function enterSixUpMode() {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    if (state.sixUpActive) {
+      return true;
+    }
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: false });
+    }
+    if (state.threeUpActive) {
+      leaveThreeUpMode({ restoreBaseline: false });
+    }
+    const pendingBaseline = (
+      state.pendingRestoreViewState
+      && Date.now() <= Number(state.pendingRestoreUntil || 0)
+    )
+      ? cloneStateObject(state.pendingRestoreViewState)
+      : null;
+    const baseline = pendingBaseline || capturePersistedViewState();
+    state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
+      ? baseline
+      : {
+          page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
+          pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+          scale: String(currentViewer.currentScaleValue || "page-width"),
+          scrollTop: 0,
+          scrollRatio: 0,
+        };
+    state.threeUpOnePageScale = onePageScaleFromViewer(currentViewer);
+    state.threeUpEntryOnePageScale = state.threeUpOnePageScale;
+    state.threeUpBaselineScaleValue = String(
+      currentViewer.currentScaleValue || state.threeUpOnePageScale
+    );
+    state.threeUpNormalScrollMode = Number.isInteger(currentViewer.scrollMode)
+      ? currentViewer.scrollMode
+      : ScrollMode.VERTICAL;
+    state.threeUpNormalSpreadMode = Number.isInteger(currentViewer.spreadMode)
+      ? currentViewer.spreadMode
+      : SpreadMode.NONE;
+    state.threeUpCenterPage = Number.parseInt(state.threeUpBaselineViewState.page, 10) || 1;
+    cancelPendingViewRestore();
+    state.sixUpActive = true;
+    applySixUpLayout(currentViewer);
+    applyPageState(
+      currentApp,
+      currentViewer,
+      Number.parseInt(state.threeUpBaselineViewState.page, 10)
+    );
+    state.lastViewState = threeUpViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function leaveSixUpMode(options) {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    const rawOptions = options && typeof options === "object" ? options : {};
+    const restoreBaseline = rawOptions.restoreBaseline !== false;
+    const preferViewportCenterPage = rawOptions.preferViewportCenterPage === true;
+    const container = viewerContainer();
+    const trackedCenterPage = Number.parseInt(state.threeUpCenterPage, 10);
+    const liveCenterPage = pageNearestViewportCenter(currentApp, currentViewer, container);
+    const centeredExitPage = preferViewportCenterPage
+      ? (
+        Number.isFinite(liveCenterPage) && liveCenterPage > 0
+          ? liveCenterPage
+          : (Number.isFinite(trackedCenterPage) && trackedCenterPage > 0 ? trackedCenterPage : null)
+      )
+      : null;
+    if (Number.isFinite(Number(rawOptions.onePageScale)) && Number(rawOptions.onePageScale) > 0) {
+      state.threeUpOnePageScale = clampZoomScale(Number(rawOptions.onePageScale));
+      state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
+    }
+    if (!state.sixUpActive) {
+      return true;
+    }
+    const restoreState = threeUpViewState();
+    state.sixUpActive = false;
+    currentViewer.spreadMode = Number.isInteger(state.threeUpNormalSpreadMode)
+      ? state.threeUpNormalSpreadMode
+      : SpreadMode.NONE;
+    currentViewer.scrollMode = Number.isInteger(state.threeUpNormalScrollMode)
+      ? state.threeUpNormalScrollMode
+      : ScrollMode.VERTICAL;
+    state.threeUpBaselineViewState = null;
+    state.threeUpCenterPage = 1;
+    state.pendingRestoreViewState = null;
+    state.pendingRestoreUntil = 0;
+    if (restoreBaseline) {
+      if (Number.isFinite(centeredExitPage) && centeredExitPage > 0) {
+        const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+        const centeredState = {
+          page: centeredExitPage,
+          pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+          scale: String(onePageScale),
+        };
+        const restored = applyViewState(centeredState);
+        if (restored) {
+          scheduleRefresh();
+        }
+        return restored;
+      }
+      const restored = applyViewState(restoreState);
+      if (restored) {
+        scheduleRefresh();
+      }
+      return restored;
+    }
+    currentViewer.currentScale = clampZoomScale(state.threeUpOnePageScale);
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function toggleSixUpMode() {
+    if (state.sixUpActive) {
+      leaveSixUpMode({ restoreBaseline: true, preferViewportCenterPage: true });
+    } else {
+      enterSixUpMode();
+    }
+    const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+    return {
+      active: Boolean(state.sixUpActive),
+      sixUpActive: Boolean(state.sixUpActive),
+      threeUpActive: Boolean(state.threeUpActive),
+      twoUpActive: Boolean(state.twoUpActive),
+      onePageScale,
+      percent: Math.round(onePageScale * 100),
+    };
+  }
+
+  function isSixUpActive() {
+    return Boolean(state.sixUpActive);
+  }
+
   function setOnePageZoom100() {
     const resultPayload = {
       active: false,
+      sixUpActive: false,
       threeUpActive: false,
       twoUpActive: false,
       onePageScale: 1,
@@ -2727,6 +2912,10 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     };
     if (state.threeUpActive) {
       resultPayload.ok = leaveThreeUpMode({ restoreBaseline: true, onePageScale: 1.0 });
+      return resultPayload;
+    }
+    if (state.sixUpActive) {
+      resultPayload.ok = leaveSixUpMode({ restoreBaseline: true, onePageScale: 1.0 });
       return resultPayload;
     }
     if (state.twoUpActive) {
@@ -2748,7 +2937,8 @@ html.pdfexplore-dark-mode .page .xfaLayer {
 
   function getViewState() {
     if (
-      !state.threeUpActive
+      !state.sixUpActive
+      && !state.threeUpActive
       &&
       state.pendingRestoreViewState
       && Date.now() <= Number(state.pendingRestoreUntil || 0)
@@ -2772,6 +2962,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   function restoreViewState(stateValue) {
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
+    }
+    if (state.sixUpActive) {
+      leaveSixUpMode({ restoreBaseline: false });
     }
     if (state.twoUpActive) {
       leaveTwoUpMode({ restoreBaseline: false });
@@ -2798,12 +2991,13 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!currentViewer) {
       return {};
     }
-    if (state.threeUpActive || state.twoUpActive) {
+    if (state.sixUpActive || state.threeUpActive || state.twoUpActive) {
       const onePageScale = clampZoomScale(state.threeUpOnePageScale);
       return {
         currentScale: onePageScale,
         currentScaleValue: String(onePageScale),
         percent: Math.round(onePageScale * 100),
+        sixUpActive: Boolean(state.sixUpActive),
         threeUpActive: Boolean(state.threeUpActive),
         twoUpActive: Boolean(state.twoUpActive),
       };
@@ -2814,6 +3008,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       currentScale,
       currentScaleValue,
       percent: Math.round(currentScale * 100),
+      sixUpActive: false,
       threeUpActive: false,
     };
   }
@@ -2828,12 +3023,14 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       return false;
     }
     cancelPendingViewRestore();
-    if (state.threeUpActive || state.twoUpActive) {
+    if (state.sixUpActive || state.threeUpActive || state.twoUpActive) {
       state.threeUpOnePageScale = clampZoomScale(nextScale);
       state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
       state.threeUpBaselineViewState = threeUpViewState();
       state.threeUpBaselineViewState.scale = String(state.threeUpOnePageScale);
-      if (state.threeUpActive) {
+      if (state.sixUpActive) {
+        applySixUpLayout(currentViewer);
+      } else if (state.threeUpActive) {
         applyThreeUpLayout(currentViewer);
       } else {
         applyTwoUpLayout(currentViewer);
@@ -2855,6 +3052,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
+    }
+    if (state.sixUpActive) {
+      leaveSixUpMode({ restoreBaseline: false });
     }
     if (state.twoUpActive) {
       leaveTwoUpMode({ restoreBaseline: false });
@@ -2878,6 +3078,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       start: null,
       end: null,
       multiPageSelection: false,
+      sixUpActive: Boolean(state.sixUpActive),
       threeUpActive: Boolean(state.threeUpActive),
       clickedHighlightId: locateClickedHighlightId(Number(clickX) || 0, Number(clickY) || 0) || state.lastClickedHighlightId || "",
     };
@@ -2895,6 +3096,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
           start: cached.start,
           end: cached.end,
           multiPageSelection: Boolean(cached.multiPageSelection),
+          sixUpActive: Boolean(state.sixUpActive),
           threeUpActive: Boolean(state.threeUpActive),
           clickedHighlightId: payload.clickedHighlightId,
         };
@@ -2998,6 +3200,8 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     isReady,
     isDarkModeActive,
     setDarkMode,
+    isSixUpActive,
+    toggleSixUpMode,
     isThreeUpActive,
     toggleThreeUpMode,
     isTwoUpActive,

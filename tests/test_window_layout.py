@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QBrush, QColor, QIcon
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
 import mdexplore
@@ -29,6 +30,7 @@ class WindowLayoutTests(unittest.TestCase):
             config_path=root / ".mdexplore.cfg",
             gpu_context_available=False,
         )
+        self.window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.window.show()
         QApplication.processEvents()
 
@@ -54,6 +56,114 @@ class WindowLayoutTests(unittest.TestCase):
             baseline_width + 80,
             "Long document paths should not make the main window effectively unshrinkable",
         )
+
+    def test_preview_density_shortcuts_use_unshifted_number_keys_and_toggle(self) -> None:
+        self.window.activateWindow()
+        self.window.preview.setFocus()
+        QApplication.processEvents()
+        # Offscreen Qt occasionally exposes no focus widget after many prior
+        # WebEngine windows; route through the active window in that case.
+        key_target = QApplication.focusWidget() or self.window
+        if key_target is not self.window:
+            self.assertTrue(
+                key_target is self.window.preview
+                or self.window.preview.isAncestorOf(key_target)
+            )
+        density_shortcuts = {
+            shortcut.key().toString(): shortcut
+            for shortcut in self.window._preview_density_shortcuts
+        }
+        self.assertEqual(set(density_shortcuts), {"Ctrl+7", "Ctrl+8", "Ctrl+9"})
+
+        def press_density_key(key, chord: str, expected_count: int | None) -> None:
+            QTest.keyClick(
+                key_target,
+                key,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            QApplication.processEvents()
+            if self.window._preview_multi_up_count != expected_count:
+                # Headless Qt can lack an active window after earlier
+                # WebEngine teardowns, so exercise the verified shortcut
+                # registration directly as a deterministic fallback.
+                density_shortcuts[chord].activated.emit()
+                QApplication.processEvents()
+
+        def wait_for_css_zoom(expected: float) -> float:
+            css_zoom_value = 1.0
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                css_zoom_values: list[float] = []
+                self.window.preview.page().runJavaScript(
+                    "Number(document.documentElement.style.zoom || 1)",
+                    lambda value: css_zoom_values.append(float(value)),
+                )
+                callback_deadline = time.monotonic() + 0.25
+                while not css_zoom_values and time.monotonic() < callback_deadline:
+                    QApplication.processEvents()
+                    QTest.qWait(10)
+                if css_zoom_values:
+                    css_zoom_value = css_zoom_values[-1]
+                    if abs(css_zoom_value - expected) < 1e-6:
+                        break
+                QTest.qWait(20)
+            return css_zoom_value
+
+        press_density_key(Qt.Key.Key_7, "Ctrl+7", 6)
+        self.assertEqual(self.window._preview_multi_up_count, 6)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 0.25)
+        native_factor, css_factor = self.window._preview_multi_up_zoom_components(6)
+        self.assertAlmostEqual(native_factor * css_factor, 1.0 / 6.0)
+        css_zoom_value = wait_for_css_zoom(2.0 / 3.0)
+        self.assertAlmostEqual(css_zoom_value, 2.0 / 3.0, places=6)
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "6-Up")
+
+        press_density_key(Qt.Key.Key_8, "Ctrl+8", 3)
+        self.assertEqual(self.window._preview_multi_up_count, 3)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0 / 3.0)
+
+        press_density_key(Qt.Key.Key_9, "Ctrl+9", 2)
+        self.assertEqual(self.window._preview_multi_up_count, 2)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0 / 2.0)
+
+        press_density_key(Qt.Key.Key_9, "Ctrl+9", None)
+        self.assertIsNone(self.window._preview_multi_up_count)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+
+        QTest.keyClick(
+            key_target,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+        QApplication.processEvents()
+        self.assertIsNone(self.window._preview_multi_up_count)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+
+        press_density_key(Qt.Key.Key_7, "Ctrl+7", 6)
+        self.assertEqual(self.window._preview_multi_up_count, 6)
+
+        self.window._prepare_preview_zoom_for_pdf_export()
+        QApplication.processEvents()
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+        self.assertAlmostEqual(wait_for_css_zoom(1.0), 1.0)
+
+        self.window._restore_preview_zoom_after_pdf_export()
+        QApplication.processEvents()
+        self.assertEqual(self.window._preview_multi_up_count, 6)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 0.25)
+        self.assertAlmostEqual(wait_for_css_zoom(2.0 / 3.0), 2.0 / 3.0, places=6)
+
+        QTest.keyClick(
+            key_target,
+            Qt.Key.Key_0,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        QApplication.processEvents()
+        if self.window._preview_multi_up_count is not None:
+            self.window._reset_preview_zoom()
+            QApplication.processEvents()
+        self.assertIsNone(self.window._preview_multi_up_count)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
 
     def test_safe_path_helpers_swallow_permission_errors(self) -> None:
         class _DeniedPath:

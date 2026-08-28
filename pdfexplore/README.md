@@ -46,6 +46,7 @@ It is designed for people who review many PDFs and need stable annotation/sessio
     button reads `Light` and restores normal PDF colors when clicked.
   - `Add View` to create another tabbed view of the same PDF at the current page/scroll location.
 - `F5` refresh shortcut (same behavior as `Refresh`).
+- `Ctrl+7` toggles a six-page-wide wrapped presentation.
 - `Ctrl+8` toggles a three-page-wide wrapped presentation.
 - `Ctrl+9` toggles conventional two-up facing pages (cover page alone, then
   pages 2–3, 4–5, and so on).
@@ -401,6 +402,7 @@ Each numeric value is validated with clamp bounds before use.
 
 | Key | Default | Clamp | Purpose |
 | --- | --- | --- | --- |
+| `six_up_divisor` | `6.3` | `1..12` | Divisor used to fit six page boxes, including fixed pdf.js borders, across six-up layout width (`Ctrl+7`). |
 | `three_up_divisor` | `3` | `1..12` | Divisor used to scale three-up layout width (`Ctrl+8`). |
 | `min_zoom_scale` | `0.1` | `0.01..100` | Minimum allowed zoom scale in bridge operations. |
 | `max_zoom_scale` | `10.0` | `min_zoom_scale..100` | Maximum allowed zoom scale in bridge operations. |
@@ -529,7 +531,7 @@ General conversion rule: `MiB * 1024 * 1024`.
   preventing highlight painting from scheduling itself indefinitely.
 - Ordinary scrolling updates navigation state without invalidating every page-text
   index, repainting all overlays, or scanning every page rectangle. Whole-document
-  geometry scans remain limited to modes such as three-up that require them.
+  geometry scans remain limited to modes such as three-up and six-up that require them.
 - The pdf.js `#viewerContainer` remains an absolute, viewport-bounded scroll host;
   letting it expand to document height defeats pdf.js navigation and virtualization.
 - Repeated identical persistent-highlight or search payloads are idempotent and do

@@ -821,6 +821,12 @@ class PdfExploreWindow(QMainWindow):
         preview_zoom_reset_action.triggered.connect(self._reset_preview_zoom)
         self.addAction(preview_zoom_reset_action)
 
+        self.preview_toggle_six_up_action = QAction("Preview Toggle 6-Up", self)
+        # Keep the layout QActions shortcut-free. Registering the same chord on
+        # both a QAction and QShortcut makes Qt treat it as ambiguous.
+        self.preview_toggle_six_up_action.triggered.connect(self._toggle_preview_six_up)
+        self.addAction(self.preview_toggle_six_up_action)
+
         self.preview_toggle_three_up_action = QAction("Preview Toggle 3-Up", self)
         # Keep the QAction shortcut-free. Registering the same key sequence on
         # both a QAction and a QShortcut makes Qt treat it as ambiguous, which
@@ -842,6 +848,10 @@ class PdfExploreWindow(QMainWindow):
         # Keep these bindings on the unshifted number row. The event-filter and
         # viewer-JS paths below mirror the same keys so they continue to work
         # while the embedded PDF viewer owns keyboard focus.
+        self._register_global_shortcut(
+            QKeySequence("Ctrl+7"),
+            self._toggle_preview_six_up,
+        )
         self._register_global_shortcut(
             QKeySequence("Ctrl+8"),
             self._toggle_preview_three_up,
@@ -2336,6 +2346,18 @@ class PdfExploreWindow(QMainWindow):
         return True
 
     @classmethod
+    def _is_ctrl_seven_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether this is the unshifted Ctrl+7 six-up shortcut."""
+        if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
+            return False
+        modifiers = event.modifiers()
+        if not cls._has_ctrl_without_alt_meta(modifiers):
+            return False
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return False
+        return event.key() == Qt.Key.Key_7 or str(event.text() or "") == "7"
+
+    @classmethod
     def _is_ctrl_nine_key_event(cls, event: QKeyEvent) -> bool:
         """Return whether this is the unshifted Ctrl+9 two-up shortcut."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
@@ -2380,14 +2402,18 @@ class PdfExploreWindow(QMainWindow):
 
     def _handle_custom_shortcut_key_event(self, event: QKeyEvent) -> bool:
         """Handle handle custom shortcut key event."""
+        is_six_up = self._is_ctrl_seven_key_event(event)
         is_three_up = self._is_ctrl_eight_key_event(event)
         is_two_up = self._is_ctrl_nine_key_event(event)
         is_zoom_100 = self._is_ctrl_right_paren_key_event(event)
-        if not (is_three_up or is_two_up or is_zoom_100):
+        if not (is_six_up or is_three_up or is_two_up or is_zoom_100):
             return False
         if event.type() == QEvent.Type.ShortcutOverride:
             return True
         if event.type() == QEvent.Type.KeyPress:
+            if is_six_up:
+                self.preview_toggle_six_up_action.trigger()
+                return True
             if is_three_up:
                 self.preview_toggle_three_up_action.trigger()
                 return True
@@ -4548,6 +4574,45 @@ class PdfExploreWindow(QMainWindow):
             _on_toggle,
         )
 
+    def _toggle_preview_six_up(self) -> None:
+        """Toggle six-page-wide wrapped rows in the PDF preview."""
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing layout", 2000)
+            return
+
+        def _on_toggle(payload: dict) -> None:
+            active = bool(payload.get("sixUpActive") or payload.get("active"))
+            try:
+                one_page_scale = float(
+                    payload.get("onePageScale", PREVIEW_ZOOM_RESET)
+                    or PREVIEW_ZOOM_RESET
+                )
+            except Exception:
+                one_page_scale = PREVIEW_ZOOM_RESET
+            percent_text = f"{int(round(one_page_scale * 100))}%"
+            if active:
+                self.statusBar().showMessage(
+                    f"Preview layout: 6-up rows (1-up zoom {percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay("6-Up")
+            else:
+                self.statusBar().showMessage(
+                    f"Preview layout: single page ({percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay(percent_text)
+
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.toggleSixUpMode && "
+            "window.__pdfexploreBridge.toggleSixUpMode()",
+            _on_toggle,
+        )
+
     def _toggle_preview_two_up(self) -> None:
         """Toggle conventional two-page facing spreads in the PDF preview."""
         preview = self._current_preview_widget()
@@ -6223,7 +6288,7 @@ class PdfExploreWindow(QMainWindow):
                 value = str(live.get(key, "") or "")
                 if value.strip():
                     merged[key] = value
-            for key in ("multiPageSelection", "threeUpActive"):
+            for key in ("multiPageSelection", "sixUpActive", "threeUpActive"):
                 if key in live and key not in merged:
                     merged[key] = bool(live.get(key))
 
@@ -6259,19 +6324,22 @@ class PdfExploreWindow(QMainWindow):
         clicked_highlight_id = str(
             selection_snapshot.get("clickedHighlightId", "") or ""
         ).strip()
-        three_up_active = bool(selection_snapshot.get("threeUpActive"))
+        multi_up_active = bool(
+            selection_snapshot.get("sixUpActive")
+            or selection_snapshot.get("threeUpActive")
+        )
         has_existing_persistent_highlights = bool(
             self._normalize_text_highlight_entries(self._current_text_highlights)
         )
 
         highlight_action = None
         highlight_important_action = None
-        if has_selection and not three_up_active:
+        if has_selection and not multi_up_active:
             highlight_action = menu.addAction("Highlight")
             highlight_important_action = menu.addAction("Highlight Important")
 
         remove_action = None
-        if (clicked_highlight_id or has_selection or has_existing_persistent_highlights) and not three_up_active:
+        if (clicked_highlight_id or has_selection or has_existing_persistent_highlights) and not multi_up_active:
             remove_action = menu.addAction("Remove Highlight")
 
         copy_action = None

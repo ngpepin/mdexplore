@@ -1256,14 +1256,73 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             260.0,
         )
 
-    def test_layout_shortcuts_route_ctrl_eight_to_three_up_and_ctrl_nine_to_two_up(self) -> None:
-        self._open_and_wait_for_viewer(self.first_pdf)
+    def test_layout_shortcuts_route_ctrl_seven_eight_and_nine(self) -> None:
+        six_page_pdf = self.root / "six-pages.pdf"
+        _create_pdf_with_lines(six_page_pdf, "Six", 220)
+        self._open_and_wait_for_viewer(six_page_pdf)
 
         initial_state = self.run_current_viewer_js_json(
-            "({ three: window.__pdfexploreBridge.isThreeUpActive(), two: window.__pdfexploreBridge.isTwoUpActive() })"
+            "({ six: window.__pdfexploreBridge.isSixUpActive(), three: window.__pdfexploreBridge.isThreeUpActive(), two: window.__pdfexploreBridge.isTwoUpActive() })"
         )
+        self.assertFalse(bool(initial_state.get("six")))
         self.assertFalse(bool(initial_state.get("three")))
         self.assertFalse(bool(initial_state.get("two")))
+
+        after_ctrl_seven = self.run_current_viewer_js_json(
+            """
+(() => {
+  const event = new KeyboardEvent('keydown', {
+    key: '7', code: 'Digit7', ctrlKey: true,
+    bubbles: true, cancelable: true,
+  });
+  document.dispatchEvent(event);
+  const container = document.getElementById('viewerContainer');
+  const firstPage = document.querySelector('#viewer .page');
+  const firstTop = firstPage?.getBoundingClientRect().top || 0;
+  const firstRowCount = Array.from(document.querySelectorAll('#viewer .page'))
+    .filter((page) => Math.abs(page.getBoundingClientRect().top - firstTop) < 3)
+    .length;
+  return {
+    sixUpActive: window.__pdfexploreBridge.isSixUpActive(),
+    threeUpActive: window.__pdfexploreBridge.isThreeUpActive(),
+    twoUpActive: window.__pdfexploreBridge.isTwoUpActive(),
+    scrollMode: window.PDFViewerApplication.pdfViewer.scrollMode,
+    spreadMode: window.PDFViewerApplication.pdfViewer.spreadMode,
+    containerWidth: container?.clientWidth || 0,
+    pageWidth: firstPage?.getBoundingClientRect().width || 0,
+    firstRowCount,
+  };
+})()
+"""
+        )
+        self.assertTrue(bool(after_ctrl_seven.get("sixUpActive")))
+        self.assertFalse(bool(after_ctrl_seven.get("threeUpActive")))
+        self.assertFalse(bool(after_ctrl_seven.get("twoUpActive")))
+        self.assertEqual(int(after_ctrl_seven.get("scrollMode", -1)), 2)
+        self.assertEqual(int(after_ctrl_seven.get("spreadMode", -1)), 0)
+        container_width = float(after_ctrl_seven.get("containerWidth", 0))
+        page_width = float(after_ctrl_seven.get("pageWidth", 0))
+        self.assertGreater(container_width, 0)
+        self.assertGreater(page_width, 0)
+        self.assertLess(page_width / container_width, 0.2)
+        self.assertGreaterEqual(
+            int(after_ctrl_seven.get("firstRowCount", 0)),
+            6,
+            f"Six-up must fit six pages in the first row: {after_ctrl_seven}",
+        )
+
+        after_ctrl_seven_again = self.run_current_viewer_js(
+            """
+(() => {
+  document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: '7', code: 'Digit7', ctrlKey: true,
+    bubbles: true, cancelable: true,
+  }));
+  return window.__pdfexploreBridge.isSixUpActive();
+})()
+"""
+        )
+        self.assertFalse(after_ctrl_seven_again)
 
         after_ctrl_eight = self.run_current_viewer_js_json(
             """
@@ -1364,6 +1423,26 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
 
         QTest.keyClick(
             preview,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isSixUpActive();"
+            )
+            is True,
+            timeout_ms=5000,
+        )
+        self.assertFalse(
+            bool(
+                self.run_current_viewer_js(
+                    "window.__pdfexploreBridge.isThreeUpActive();"
+                )
+            )
+        )
+
+        QTest.keyClick(
+            preview,
             Qt.Key.Key_8,
             Qt.KeyboardModifier.ControlModifier,
         )
@@ -1373,6 +1452,13 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             )
             is True,
             timeout_ms=5000,
+        )
+        self.assertFalse(
+            bool(
+                self.run_current_viewer_js(
+                    "window.__pdfexploreBridge.isSixUpActive();"
+                )
+            )
         )
         self.assertFalse(
             bool(

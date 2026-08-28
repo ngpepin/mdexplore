@@ -84,6 +84,7 @@
     ]
   },
   "viewer_bridge": {
+    "six_up_divisor": 6.3,
     "three_up_divisor": 3,
     "min_zoom_scale": 0.1,
     "max_zoom_scale": 10.0,

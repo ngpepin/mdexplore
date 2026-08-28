@@ -369,16 +369,17 @@ C4Component
 
 ### Current preview-layout bindings
 
+- `Ctrl+7` toggles six-up presentation.
 - `Ctrl+8` toggles three-up presentation.
 - `Ctrl+9` toggles conventional two-up/facing presentation: the cover is alone,
   followed by facing pairs 2–3, 4–5, and so on.
 - `Ctrl+0` restores fit-width zoom.
-- The `8`, `9`, and `0` bindings above are the literal, unshifted number keys.
+- The `7`, `8`, `9`, and `0` bindings above are the literal, unshifted number keys.
   Shift is not required and is not part of these chords.
 
 ### Required implementation paths
 
-- Keep the three-up and two-up `QAction` objects shortcut-free. Register each
+- Keep the six-up, three-up, and two-up `QAction` objects shortcut-free. Register each
   chord exactly once as an application-level `QShortcut`; assigning the same
   sequence to both a `QAction` and a `QShortcut` makes Qt report an ambiguous
   shortcut and can prevent either callback from firing.
@@ -400,6 +401,7 @@ C4Component
 ### Do not repeat the shifted-symbol failure
 
 - **Do not translate a requested number key into the symbol printed above it.**
+  `Ctrl+7` is not `Ctrl+&` or `Ctrl+Shift+7`;
   `Ctrl+8` is not `Ctrl+*`, `Ctrl+Shift+8`, or `Ctrl+Key_Asterisk`;
   `Ctrl+9` is not `Ctrl+(`, `Ctrl+Shift+9`, or `Ctrl+Key_ParenLeft`.
 - **Do not infer a physical key from punctuation using one keyboard layout.**
@@ -415,13 +417,13 @@ C4Component
   layout logic but not keyboard delivery, which was the source of the earlier
   failure.
 - **Do not test a number-key requirement with a symbolic or shifted synthetic
-  event.** For `Ctrl+8`, tests must use `Qt.Key_8` plus `ControlModifier` and a
-  JavaScript event with `key: "8"`, `code: "Digit8"`, `ctrlKey: true`, and no
-  Shift. Apply the corresponding rule to `Ctrl+9`.
+  event.** For `Ctrl+7`, tests must use `Qt.Key_7` plus `ControlModifier` and a
+  JavaScript event with `key: "7"`, `code: "Digit7"`, `ctrlKey: true`, and no
+  Shift. Apply the corresponding rule to `Ctrl+8` and `Ctrl+9`.
 
 ### Required shortcut regression coverage
 
-- Assert the portable Qt sequences are exactly `Ctrl+8` and `Ctrl+9`, not their
+- Assert the portable Qt sequences are exactly `Ctrl+7`, `Ctrl+8`, and `Ctrl+9`, not their
   `Ctrl+Shift` variants.
 - Exercise host `KeyPress` and `ShortcutOverride` routing with unshifted number
   events.
@@ -454,7 +456,7 @@ Recommended validation sequence:
     - expand/collapse multiple folders,
     - run search and clear search,
     - add/remove highlight, switch files, return,
-    - with focus inside the PDF preview, verify `Ctrl+8`, `Ctrl+9`, and `Ctrl+0`
+    - with focus inside the PDF preview, verify `Ctrl+7`, `Ctrl+8`, `Ctrl+9`, and `Ctrl+0`
       without Shift,
     - verify cache and marker badges remain coherent.
 
@@ -511,8 +513,9 @@ Recommended validation sequence:
     color mode across cached and newly loaded preview widgets,
   - preview navigation keeps persistent highlights on the left rail and active
     search hits on the right rail, with both marker types remaining clickable.
-  - preview keyboard layout controls remain `Ctrl+8` for three-up, `Ctrl+9` for
-    two-up/facing, and `Ctrl+0` for fit width, all without Shift.
+  - preview keyboard layout controls remain `Ctrl+7` for six-up, `Ctrl+8` for
+    three-up, `Ctrl+9` for two-up/facing, and `Ctrl+0` for fit width, all
+    without Shift.
 
 ## Documentation Contract
 

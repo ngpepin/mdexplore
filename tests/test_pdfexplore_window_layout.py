@@ -1098,6 +1098,27 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertIn("toggleThreeUpMode", captured_expressions[-1])
         self.assertEqual(self.window._preview_zoom_overlay.text(), "3-Up")
 
+    def test_toggle_preview_six_up_uses_bridge_and_updates_overlay(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "six-up.pdf"
+        _create_pdf_with_text(pdf_path, "six up")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        path_key = self.window._path_key(pdf_path)
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        captured_expressions: list[str] = []
+
+        def fake_run_viewer_js_json(expression, callback):
+            captured_expressions.append(expression)
+            callback({"sixUpActive": True, "onePageScale": 1.25, "percent": 125})
+
+        self.window._run_viewer_js_json = fake_run_viewer_js_json  # type: ignore[method-assign]
+        self.window._toggle_preview_six_up()
+
+        self.assertTrue(captured_expressions)
+        self.assertIn("toggleSixUpMode", captured_expressions[-1])
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "6-Up")
+
     def test_toggle_preview_two_up_uses_bridge_and_updates_overlay(self) -> None:
         pdf_path = Path(self._tempdir.name) / "two-up.pdf"
         _create_pdf_with_text(pdf_path, "two up")
@@ -1246,6 +1267,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
     def test_application_shortcuts_route_number_keys_to_multi_page_layouts(self) -> None:
         calls: list[str] = []
+        self.window._toggle_preview_six_up = lambda: calls.append("six")  # type: ignore[method-assign]
         self.window._toggle_preview_three_up = lambda: calls.append("three")  # type: ignore[method-assign]
         self.window._toggle_preview_two_up = lambda: calls.append("two")  # type: ignore[method-assign]
         for shortcut in self.window._global_shortcuts:
@@ -1254,7 +1276,9 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             except (RuntimeError, TypeError):
                 pass
             portable = shortcut.key().toString(QKeySequence.SequenceFormat.PortableText)
-            if portable == "Ctrl+8":
+            if portable == "Ctrl+7":
+                shortcut.activated.connect(self.window._toggle_preview_six_up)
+            elif portable == "Ctrl+8":
                 shortcut.activated.connect(self.window._toggle_preview_three_up)
             elif portable == "Ctrl+9":
                 shortcut.activated.connect(self.window._toggle_preview_two_up)
@@ -1264,6 +1288,12 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.window.setFocus()
         QApplication.processEvents()
 
+        QTest.keyClick(
+            self.window,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        QApplication.processEvents()
         QTest.keyClick(
             self.window,
             Qt.Key.Key_8,
@@ -1277,15 +1307,29 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         )
         QApplication.processEvents()
 
-        self.assertEqual(calls, ["three", "two"])
+        self.assertEqual(calls, ["six", "three", "two"])
 
-    def test_event_filter_routes_ctrl_eight_to_three_up_and_ctrl_nine_to_two_up(self) -> None:
+    def test_event_filter_routes_unshifted_number_keys_to_multi_up_layouts(self) -> None:
         calls: list[str] = []
+        self.window.preview_toggle_six_up_action.triggered.disconnect()
         self.window.preview_toggle_three_up_action.triggered.disconnect()
         self.window.preview_toggle_two_up_action.triggered.disconnect()
+        self.window.preview_toggle_six_up_action.triggered.connect(lambda: calls.append("six"))
         self.window.preview_toggle_three_up_action.triggered.connect(lambda: calls.append("three"))
         self.window.preview_toggle_two_up_action.triggered.connect(lambda: calls.append("two"))
 
+        ctrl_seven = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier,
+            "7",
+        )
+        ctrl_seven_override = QKeyEvent(
+            QEvent.Type.ShortcutOverride,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier,
+            "7",
+        )
         ctrl_eight = QKeyEvent(
             QEvent.Type.KeyPress,
             Qt.Key.Key_8,
@@ -1304,6 +1348,12 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             Qt.KeyboardModifier.ControlModifier,
             "9",
         )
+        shifted_ctrl_seven = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_7,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+            "&",
+        )
         shifted_ctrl_nine = QKeyEvent(
             QEvent.Type.KeyPress,
             Qt.Key.Key_9,
@@ -1311,11 +1361,14 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             "(",
         )
 
+        self.assertTrue(self.window.eventFilter(self.window, ctrl_seven))
+        self.assertTrue(self.window.eventFilter(self.window, ctrl_seven_override))
         self.assertTrue(self.window.eventFilter(self.window, ctrl_eight))
         self.assertTrue(self.window.eventFilter(self.window, ctrl_eight_override))
         self.assertTrue(self.window.eventFilter(self.window, ctrl_nine))
+        self.assertFalse(self.window.eventFilter(self.window, shifted_ctrl_seven))
         self.assertFalse(self.window.eventFilter(self.window, shifted_ctrl_nine))
-        self.assertEqual(calls, ["three", "two"])
+        self.assertEqual(calls, ["six", "three", "two"])
 
 
 if __name__ == "__main__":

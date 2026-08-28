@@ -162,6 +162,8 @@ gradually decomposed.
   These are regenerated automatically when source asset identity (path/mtime/size) or render parameters change.
 - `F5` refresh shortcut for directory view rescan (same behavior as `Refresh` button).
 - `Ctrl++` / `Ctrl+-` / `Ctrl+0` zoom only the preview pane content in/out/reset.
+- `Ctrl+7` / `Ctrl+8` / `Ctrl+9` toggle Markdown preview density presets at
+  `1/6` (6-up), `1/3` (3-up), and `1/2` (2-up) scale, respectively.
 - Preview-only zoom changes briefly show a percentage badge at the top of the preview pane.
 - If the currently previewed markdown file changes on disk, preview auto-refreshes and shows a status bar message.
 - Status bar reports active long-running work (preview load/render, PlantUML progress, PDF export) and returns to `Ready` instead of staying blank.
@@ -294,7 +296,7 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 | `PREVIEW_HIGHLIGHT_KIND_NORMAL` | `normal` | Internal key name for normal highlight kind. |
 | `PREVIEW_HIGHLIGHT_KIND_IMPORTANT` | `important` | Internal key name for important highlight kind. |
 | `PREVIEW_ZOOM_STEP` | `0.1` | Zoom increment/decrement step per action. |
-| `PREVIEW_ZOOM_MIN` | `0.35` | Minimum preview zoom factor. |
+| `PREVIEW_ZOOM_MIN` | `0.35` | Minimum ordinary incremental zoom factor; fixed density presets may use lower composed scales. |
 | `PREVIEW_ZOOM_MAX` | `3.0` | Maximum preview zoom factor. |
 | `PREVIEW_ZOOM_RESET` | `1.0` | Zoom factor used for reset action. |
 | `PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS` | `850` | Duration of transient zoom-percent overlay. |
@@ -750,6 +752,10 @@ mdexplore fails quietly rather than interrupting preview use.
 - `Ctrl++` zooms the preview pane in.
 - `Ctrl+-` zooms the preview pane out.
 - `Ctrl+0` resets preview zoom to `100%`.
+- `Ctrl+7`, `Ctrl+8`, and `Ctrl+9` toggle 6-up, 3-up, and 2-up density presets.
+  They use `1/6`, `1/3`, and `1/2` preview scale and toggle back to the zoom
+  that was active before the first preset was selected.
+- The density bindings use literal unshifted number keys; Shift is not required.
 - These shortcuts affect only the preview content, not the tree pane, toolbar,  
 or overall window layout.
 - Each zoom change briefly shows a percentage badge at the top-center of the  

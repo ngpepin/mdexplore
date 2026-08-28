@@ -57,11 +57,13 @@ from PySide6.QtGui import (
     QFontMetrics,
     QIcon,
     QImage,
+    QKeySequence,
     QPainter,
     QPalette,
     QPen,
     QPixmap,
     QPolygon,
+    QShortcut,
 )
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -1848,6 +1850,11 @@ class MdExploreWindow(QMainWindow):
         # current QWebEngine zoom factor so export can temporarily reset to
         # 100% and then restore the original interactive scale afterward.
         self._pdf_export_saved_preview_zoom: float | None = None
+        # Markdown has no page model, so the 6/3/2-up controls are preview-wide
+        # density presets (1/N zoom). Keep the prior zoom for toggle-back.
+        self._preview_multi_up_count: int | None = None
+        self._preview_multi_up_baseline_zoom: float | None = None
+        self._preview_density_shortcuts: list[QShortcut] = []
         self._pending_pdf_layout_hints: dict[str, object] = {}
         # Global, in-process result cache for PlantUML blocks keyed by hash of
         # normalized source. This survives file navigation during this run.
@@ -2479,8 +2486,26 @@ class MdExploreWindow(QMainWindow):
         preview_zoom_reset_action.triggered.connect(self._reset_preview_zoom)
         self.addAction(preview_zoom_reset_action)
 
+        for page_count, key_text in ((6, "7"), (3, "8"), (2, "9")):
+            action = QAction(f"Preview Toggle {page_count}-Up", self)
+            # These are literal unshifted number chords. Do not translate them
+            # to the symbols printed above the keys on any keyboard layout.
+            action.triggered.connect(
+                lambda _checked=False, count=page_count: self._toggle_preview_multi_up_zoom(
+                    count
+                )
+            )
+            self.addAction(action)
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{key_text}"), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(action.trigger)
+            self._preview_density_shortcuts.append(shortcut)
+
     def _set_preview_zoom_factor(self, factor: float) -> None:
         """Set preview-only QWebEngine zoom factor with clamped bounds."""
+        self._preview_multi_up_count = None
+        self._preview_multi_up_baseline_zoom = None
+        self._set_preview_page_css_zoom(1.0)
         clamped = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(factor)))
         self.preview.setZoomFactor(clamped)
         percent_text = f"{int(round(clamped * 100))}%"
@@ -2500,6 +2525,68 @@ class MdExploreWindow(QMainWindow):
     def _reset_preview_zoom(self) -> None:
         """Reset preview pane zoom level to default scale."""
         self._set_preview_zoom_factor(PREVIEW_ZOOM_RESET)
+
+    def _toggle_preview_multi_up_zoom(self, page_count: int) -> None:
+        """Toggle a whole-preview density preset analogous to PDF multi-up."""
+        count = int(page_count)
+        if count not in {2, 3, 6}:
+            return
+
+        if self._preview_multi_up_count == count:
+            restored = self._preview_multi_up_baseline_zoom
+            if restored is None:
+                restored = PREVIEW_ZOOM_RESET
+            self._preview_multi_up_count = None
+            self._preview_multi_up_baseline_zoom = None
+            self._set_preview_page_css_zoom(1.0)
+            self.preview.setZoomFactor(float(restored))
+            percent_text = f"{int(round(float(restored) * 100))}%"
+            self.statusBar().showMessage(f"Preview zoom: {percent_text}", 1500)
+            self._show_preview_zoom_overlay(percent_text)
+            return
+
+        if self._preview_multi_up_count is None:
+            self._preview_multi_up_baseline_zoom = float(self.preview.zoomFactor())
+        self._preview_multi_up_count = count
+        factor = 1.0 / float(count)
+        native_factor, css_factor = self._preview_multi_up_zoom_components(count)
+        self.preview.setZoomFactor(native_factor)
+        self._set_preview_page_css_zoom(css_factor)
+        self.statusBar().showMessage(
+            f"Preview density: {count}-up ({int(round(factor * 100))}%)",
+            1800,
+        )
+        self._show_preview_zoom_overlay(f"{count}-Up")
+
+    @staticmethod
+    def _preview_multi_up_zoom_components(page_count: int) -> tuple[float, float]:
+        """Return native and CSS factors whose product is the 1/N preset."""
+        count = max(1, int(page_count))
+        effective_factor = 1.0 / float(count)
+        # The custom-profile WebEngine view rejects native factors below 0.25.
+        native_factor = max(0.25, effective_factor)
+        return native_factor, effective_factor / native_factor
+
+    def _set_preview_page_css_zoom(self, factor: float) -> None:
+        """Apply the sub-0.25 remainder needed by the six-up density preset."""
+        css_factor = max(0.01, float(factor))
+        js = (
+            "(() => { const root = document.documentElement; if (!root) return false; "
+            f"const factor = {json.dumps(css_factor)}; "
+            "root.style.zoom = Math.abs(factor - 1) < 1e-9 ? '' : String(factor); "
+            "return true; })();"
+        )
+        self.preview.page().runJavaScript(js)
+
+    def _reapply_preview_multi_up_zoom(self) -> None:
+        """Restore the active density scale after a preview document load."""
+        count = self._preview_multi_up_count
+        if count not in {2, 3, 6}:
+            self._set_preview_page_css_zoom(1.0)
+            return
+        native_factor, css_factor = self._preview_multi_up_zoom_components(count)
+        self.preview.setZoomFactor(native_factor)
+        self._set_preview_page_css_zoom(css_factor)
 
     def _show_preview_zoom_overlay(self, percent_text: str) -> None:
         """Show a short-lived zoom percentage label at top of preview pane."""
@@ -6941,6 +7028,7 @@ class MdExploreWindow(QMainWindow):
             self.statusBar().showMessage("Preview load failed", 5000)
             self._update_pdf_button_state()
             return
+        self._reapply_preview_multi_up_zoom()
         current_key = self._current_preview_path_key()
         if current_key is None:
             self._stop_restore_overlay_monitor()
@@ -12049,6 +12137,7 @@ class MdExploreWindow(QMainWindow):
             return
         current_zoom = float(self.preview.zoomFactor())
         self._pdf_export_saved_preview_zoom = current_zoom
+        self._set_preview_page_css_zoom(1.0)
         if abs(current_zoom - PREVIEW_ZOOM_RESET) > 1e-6:
             # Use the raw setter so export does not show the user-facing zoom
             # overlay or status message while preparing the PDF snapshot.
@@ -12060,10 +12149,12 @@ class MdExploreWindow(QMainWindow):
         self._pdf_export_saved_preview_zoom = None
         if saved_zoom is None:
             return
-        if abs(float(self.preview.zoomFactor()) - float(saved_zoom)) <= 1e-6:
-            return
-        # Restore silently so PDF completion does not look like a user zoom action.
-        self.preview.setZoomFactor(float(saved_zoom))
+        if self._preview_multi_up_count in {2, 3, 6}:
+            # Restore both native and CSS components silently.
+            self._reapply_preview_multi_up_zoom()
+        elif abs(float(self.preview.zoomFactor()) - float(saved_zoom)) > 1e-6:
+            # Restore silently so PDF completion does not look like a user zoom action.
+            self.preview.setZoomFactor(float(saved_zoom))
 
     def _export_current_preview_pdf(self) -> None:
         """Export the currently previewed markdown rendering to a numbered PDF."""
