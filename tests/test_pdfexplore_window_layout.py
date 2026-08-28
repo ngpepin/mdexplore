@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QIcon,
     QImage,
     QKeyEvent,
+    QKeySequence,
     QPainter,
 )
 from PySide6.QtTest import QTest
@@ -1097,6 +1098,27 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertIn("toggleThreeUpMode", captured_expressions[-1])
         self.assertEqual(self.window._preview_zoom_overlay.text(), "3-Up")
 
+    def test_toggle_preview_two_up_uses_bridge_and_updates_overlay(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "two-up.pdf"
+        _create_pdf_with_text(pdf_path, "two up")
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        path_key = self.window._path_key(pdf_path)
+        self.window._viewer_bridge_ready_by_path[path_key] = True
+        captured_expressions: list[str] = []
+
+        def fake_run_viewer_js_json(expression, callback):
+            captured_expressions.append(expression)
+            callback({"twoUpActive": True, "onePageScale": 1.25, "percent": 125})
+
+        self.window._run_viewer_js_json = fake_run_viewer_js_json  # type: ignore[method-assign]
+        self.window._toggle_preview_two_up()
+
+        self.assertTrue(captured_expressions)
+        self.assertIn("toggleTwoUpMode", captured_expressions[-1])
+        self.assertEqual(self.window._preview_zoom_overlay.text(), "2-Up")
+
     def test_set_preview_zoom_one_hundred_uses_bridge_and_updates_overlay(self) -> None:
         pdf_path = Path(self._tempdir.name) / "zoom-100.pdf"
         _create_pdf_with_text(pdf_path, "zoom 100")
@@ -1222,45 +1244,78 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         self.assertEqual(len(apply_highlights_calls), 2)
         self.assertEqual(len(apply_search_calls), 2)
 
-    def test_event_filter_handles_ctrl_bar_toggle_shortcut(self) -> None:
+    def test_application_shortcuts_route_number_keys_to_multi_page_layouts(self) -> None:
         calls: list[str] = []
-        self.window._toggle_preview_three_up = lambda: calls.append("toggle")  # type: ignore[method-assign]
+        self.window._toggle_preview_three_up = lambda: calls.append("three")  # type: ignore[method-assign]
+        self.window._toggle_preview_two_up = lambda: calls.append("two")  # type: ignore[method-assign]
+        for shortcut in self.window._global_shortcuts:
+            try:
+                shortcut.activated.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            portable = shortcut.key().toString(QKeySequence.SequenceFormat.PortableText)
+            if portable == "Ctrl+8":
+                shortcut.activated.connect(self.window._toggle_preview_three_up)
+            elif portable == "Ctrl+9":
+                shortcut.activated.connect(self.window._toggle_preview_two_up)
 
-        shifted_event = QKeyEvent(
-            QEvent.Type.KeyPress,
-            Qt.Key.Key_Backslash,
-            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
-            "|",
-        )
-        plain_event = QKeyEvent(
-            QEvent.Type.KeyPress,
-            Qt.Key.Key_Backslash,
+        self.window.show()
+        self.window.activateWindow()
+        self.window.setFocus()
+        QApplication.processEvents()
+
+        QTest.keyClick(
+            self.window,
+            Qt.Key.Key_8,
             Qt.KeyboardModifier.ControlModifier,
-            "\\",
         )
-        override_event = QKeyEvent(
+        QApplication.processEvents()
+        QTest.keyClick(
+            self.window,
+            Qt.Key.Key_9,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        QApplication.processEvents()
+
+        self.assertEqual(calls, ["three", "two"])
+
+    def test_event_filter_routes_ctrl_eight_to_three_up_and_ctrl_nine_to_two_up(self) -> None:
+        calls: list[str] = []
+        self.window.preview_toggle_three_up_action.triggered.disconnect()
+        self.window.preview_toggle_two_up_action.triggered.disconnect()
+        self.window.preview_toggle_three_up_action.triggered.connect(lambda: calls.append("three"))
+        self.window.preview_toggle_two_up_action.triggered.connect(lambda: calls.append("two"))
+
+        ctrl_eight = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_8,
+            Qt.KeyboardModifier.ControlModifier,
+            "8",
+        )
+        ctrl_eight_override = QKeyEvent(
             QEvent.Type.ShortcutOverride,
-            Qt.Key.Key_Backslash,
+            Qt.Key.Key_8,
             Qt.KeyboardModifier.ControlModifier,
-            "\\",
+            "8",
         )
-        ctrl_nine_event = QKeyEvent(
+        ctrl_nine = QKeyEvent(
             QEvent.Type.KeyPress,
             Qt.Key.Key_9,
             Qt.KeyboardModifier.ControlModifier,
             "9",
         )
+        shifted_ctrl_nine = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_9,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+            "(",
+        )
 
-        handled_shifted = self.window.eventFilter(self.window, shifted_event)
-        handled_plain = self.window.eventFilter(self.window, plain_event)
-        handled_override = self.window.eventFilter(self.window, override_event)
-        handled_ctrl_nine = self.window.eventFilter(self.window, ctrl_nine_event)
-
-        self.assertTrue(handled_shifted)
-        self.assertTrue(handled_plain)
-        self.assertTrue(handled_override)
-        self.assertTrue(handled_ctrl_nine)
-        self.assertEqual(calls, ["toggle", "toggle", "toggle"])
+        self.assertTrue(self.window.eventFilter(self.window, ctrl_eight))
+        self.assertTrue(self.window.eventFilter(self.window, ctrl_eight_override))
+        self.assertTrue(self.window.eventFilter(self.window, ctrl_nine))
+        self.assertFalse(self.window.eventFilter(self.window, shifted_ctrl_nine))
+        self.assertEqual(calls, ["three", "two"])
 
 
 if __name__ == "__main__":

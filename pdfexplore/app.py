@@ -822,18 +822,15 @@ class PdfExploreWindow(QMainWindow):
         self.addAction(preview_zoom_reset_action)
 
         self.preview_toggle_three_up_action = QAction("Preview Toggle 3-Up", self)
-        self.preview_toggle_three_up_action.setShortcuts(
-            [
-                "Ctrl+\\",
-                "Ctrl+|",
-                "Ctrl+Shift+\\",
-                "Ctrl+(",
-                "Ctrl+Shift+9",
-                "Ctrl+9",
-            ]
-        )
+        # Keep the QAction shortcut-free. Registering the same key sequence on
+        # both a QAction and a QShortcut makes Qt treat it as ambiguous, which
+        # prevents either handler from firing.
         self.preview_toggle_three_up_action.triggered.connect(self._toggle_preview_three_up)
         self.addAction(self.preview_toggle_three_up_action)
+
+        self.preview_toggle_two_up_action = QAction("Preview Toggle 2-Up Facing", self)
+        self.preview_toggle_two_up_action.triggered.connect(self._toggle_preview_two_up)
+        self.addAction(self.preview_toggle_two_up_action)
 
         self.preview_zoom_one_hundred_action = QAction("Preview Zoom 100%", self)
         self.preview_zoom_one_hundred_action.setShortcuts(["Ctrl+)", "Ctrl+Shift+0"])
@@ -842,47 +839,16 @@ class PdfExploreWindow(QMainWindow):
         )
         self.addAction(self.preview_zoom_one_hundred_action)
 
+        # Keep these bindings on the unshifted number row. The event-filter and
+        # viewer-JS paths below mirror the same keys so they continue to work
+        # while the embedded PDF viewer owns keyboard focus.
         self._register_global_shortcut(
-            QKeySequence("Ctrl+\\"),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence("Ctrl+|"),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence("Ctrl+Shift+\\"),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence(
-                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Backslash
-            ),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence(
-                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Bar
-            ),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence("Ctrl+Shift+9"),
+            QKeySequence("Ctrl+8"),
             self._toggle_preview_three_up,
         )
         self._register_global_shortcut(
             QKeySequence("Ctrl+9"),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence("Ctrl+("),
-            self._toggle_preview_three_up,
-        )
-        self._register_global_shortcut(
-            QKeySequence(
-                Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_ParenLeft
-            ),
-            self._toggle_preview_three_up,
+            self._toggle_preview_two_up,
         )
         self._register_global_shortcut(
             QKeySequence("Ctrl+Shift+0"),
@@ -2370,41 +2336,28 @@ class PdfExploreWindow(QMainWindow):
         return True
 
     @classmethod
-    def _is_ctrl_left_paren_key_event(cls, event: QKeyEvent) -> bool:
-        """Return whether ctrl left paren key event."""
+    def _is_ctrl_nine_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether this is the unshifted Ctrl+9 two-up shortcut."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
             return False
         modifiers = event.modifiers()
         if not cls._has_ctrl_without_alt_meta(modifiers):
             return False
-        key = event.key()
-        has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        if key == Qt.Key.Key_ParenLeft:
-            return True
-        if key == Qt.Key.Key_9:
-            return True
-        if has_shift and key in {Qt.Key.Key_9, Qt.Key.Key_ParenLeft}:
-            return True
-        key_text = str(event.text() or "")
-        if key_text in {"(", "9"}:
-            return True
-        return False
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return False
+        return event.key() == Qt.Key.Key_9 or str(event.text() or "") == "9"
 
     @classmethod
-    def _is_ctrl_bar_key_event(cls, event: QKeyEvent) -> bool:
-        """Return whether ctrl bar key event."""
+    def _is_ctrl_eight_key_event(cls, event: QKeyEvent) -> bool:
+        """Return whether this is the unshifted Ctrl+8 three-up shortcut."""
         if event.type() not in {QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride}:
             return False
         modifiers = event.modifiers()
         if not cls._has_ctrl_without_alt_meta(modifiers):
             return False
-        key = event.key()
-        if key in {Qt.Key.Key_Bar, Qt.Key.Key_Backslash}:
-            return True
-        key_text = str(event.text() or "")
-        if key_text in {"|", "\\", "¦"}:
-            return True
-        return False
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return False
+        return event.key() == Qt.Key.Key_8 or str(event.text() or "") == "8"
 
     @classmethod
     def _is_ctrl_right_paren_key_event(cls, event: QKeyEvent) -> bool:
@@ -2427,15 +2380,19 @@ class PdfExploreWindow(QMainWindow):
 
     def _handle_custom_shortcut_key_event(self, event: QKeyEvent) -> bool:
         """Handle handle custom shortcut key event."""
-        is_toggle = self._is_ctrl_bar_key_event(event) or self._is_ctrl_left_paren_key_event(event)
+        is_three_up = self._is_ctrl_eight_key_event(event)
+        is_two_up = self._is_ctrl_nine_key_event(event)
         is_zoom_100 = self._is_ctrl_right_paren_key_event(event)
-        if not (is_toggle or is_zoom_100):
+        if not (is_three_up or is_two_up or is_zoom_100):
             return False
         if event.type() == QEvent.Type.ShortcutOverride:
             return True
         if event.type() == QEvent.Type.KeyPress:
-            if is_toggle:
+            if is_three_up:
                 self.preview_toggle_three_up_action.trigger()
+                return True
+            if is_two_up:
+                self.preview_toggle_two_up_action.trigger()
                 return True
             if is_zoom_100:
                 self.preview_zoom_one_hundred_action.trigger()
@@ -4588,6 +4545,42 @@ class PdfExploreWindow(QMainWindow):
         self._run_viewer_js_json(
             "window.__pdfexploreBridge && window.__pdfexploreBridge.toggleThreeUpMode && "
             "window.__pdfexploreBridge.toggleThreeUpMode()",
+            _on_toggle,
+        )
+
+    def _toggle_preview_two_up(self) -> None:
+        """Toggle conventional two-page facing spreads in the PDF preview."""
+        preview = self._current_preview_widget()
+        path_key = self._current_preview_path_key()
+        if preview is None or not path_key or not self._viewer_bridge_ready_by_path.get(
+            path_key, False
+        ):
+            self.statusBar().showMessage("Open a PDF before changing layout", 2000)
+            return
+
+        def _on_toggle(payload: dict) -> None:
+            active = bool(payload.get("twoUpActive") or payload.get("active"))
+            try:
+                one_page_scale = float(payload.get("onePageScale", PREVIEW_ZOOM_RESET) or PREVIEW_ZOOM_RESET)
+            except Exception:
+                one_page_scale = PREVIEW_ZOOM_RESET
+            percent_text = f"{int(round(one_page_scale * 100))}%"
+            if active:
+                self.statusBar().showMessage(
+                    f"Preview layout: 2-up facing pages (1-up zoom {percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay("2-Up")
+            else:
+                self.statusBar().showMessage(
+                    f"Preview layout: single page ({percent_text})",
+                    2200,
+                )
+                self._show_preview_zoom_overlay(percent_text)
+
+        self._run_viewer_js_json(
+            "window.__pdfexploreBridge && window.__pdfexploreBridge.toggleTwoUpMode && "
+            "window.__pdfexploreBridge.toggleTwoUpMode()",
             _on_toggle,
         )
 

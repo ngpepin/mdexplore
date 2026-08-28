@@ -118,6 +118,7 @@
     observer: null,
     darkModeActive: false,
     threeUpActive: false,
+    twoUpActive: false,
     threeUpBaselineViewState: null,
     threeUpOnePageScale: 1,
     threeUpEntryOnePageScale: 1,
@@ -158,7 +159,7 @@
     }
   }
 
-  function computeThreeUpScale(currentViewer) {
+  function computeMultiUpScale(currentViewer, additionalDivisor) {
     if (!currentViewer) {
       return 1;
     }
@@ -173,7 +174,19 @@
     const fitWidthScale = clampZoomScale(currentViewer.currentScale || 1);
     currentViewer.currentScaleValue = originalScaleValue || "page-width";
 
-    return clampZoomScale((fitWidthScale / THREE_UP_DIVISOR) * factor);
+    return clampZoomScale((fitWidthScale / additionalDivisor) * factor);
+  }
+
+  function computeThreeUpScale(currentViewer) {
+    return computeMultiUpScale(currentViewer, THREE_UP_DIVISOR);
+  }
+
+  function computeTwoUpScale(currentViewer) {
+    // Native pdf.js spread mode already applies its own factor of two when it
+    // calculates page-width. Dividing by two again makes facing pages occupy
+    // only half of the available row and was the reason the first 2-up
+    // implementation appeared not to work.
+    return computeMultiUpScale(currentViewer, 1);
   }
 
   function applyThreeUpLayout(currentViewer) {
@@ -183,6 +196,17 @@
     currentViewer.spreadMode = SpreadMode.NONE;
     currentViewer.scrollMode = ScrollMode.WRAPPED;
     currentViewer.currentScale = computeThreeUpScale(currentViewer);
+  }
+
+  function applyTwoUpLayout(currentViewer) {
+    if (!currentViewer) {
+      return;
+    }
+    // EVEN produces conventional facing-page spreads: page 1 stands alone,
+    // followed by 2-3, 4-5, and so on.
+    currentViewer.spreadMode = SpreadMode.EVEN;
+    currentViewer.scrollMode = ScrollMode.VERTICAL;
+    currentViewer.currentScale = computeTwoUpScale(currentViewer);
   }
 
   function app() {
@@ -302,24 +326,24 @@
     if (!event || typeof event !== "object") {
       return false;
     }
-    if (!event.ctrlKey || event.altKey || event.metaKey) {
+    if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
       return false;
     }
     const key = String(event.key || "");
     const code = String(event.code || "");
-    if (key === "\\" || key === "|") {
-      return true;
+    return key === "8" || code === "Digit8";
+  }
+
+  function isTwoUpToggleShortcutEvent(event) {
+    if (!event || typeof event !== "object") {
+      return false;
     }
-    if (code === "Backslash") {
-      return true;
+    if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return false;
     }
-    if (key === "(" || key === "9") {
-      return true;
-    }
-    if (code === "Digit9") {
-      return true;
-    }
-    return false;
+    const key = String(event.key || "");
+    const code = String(event.code || "");
+    return key === "9" || code === "Digit9";
   }
 
   function pageNearestViewportCenter(currentApp, currentViewer, container) {
@@ -404,7 +428,7 @@
   }
 
   function capturePersistedViewState() {
-    if (state.threeUpActive) {
+    if (state.threeUpActive || state.twoUpActive) {
       return threeUpViewState();
     }
     return captureViewState();
@@ -2204,12 +2228,17 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         }
       }, true);
       document.addEventListener("keydown", (event) => {
-        if (!isThreeUpToggleShortcutEvent(event)) {
+        if (isThreeUpToggleShortcutEvent(event)) {
+          toggleThreeUpMode();
+          event.preventDefault();
+          event.stopPropagation();
           return;
         }
-        toggleThreeUpMode();
-        event.preventDefault();
-        event.stopPropagation();
+        if (isTwoUpToggleShortcutEvent(event)) {
+          toggleTwoUpMode();
+          event.preventDefault();
+          event.stopPropagation();
+        }
       }, true);
       document.addEventListener("contextmenu", (event) => {
         state.lastClickedHighlightId = locateClickedHighlightId(event.clientX, event.clientY);
@@ -2456,6 +2485,101 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     return true;
   }
 
+  function leaveTwoUpMode(options) {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    if (!state.twoUpActive) {
+      return true;
+    }
+    state.twoUpActive = false;
+    currentViewer.spreadMode = Number.isInteger(state.threeUpNormalSpreadMode)
+      ? state.threeUpNormalSpreadMode
+      : SpreadMode.NONE;
+    currentViewer.scrollMode = Number.isInteger(state.threeUpNormalScrollMode)
+      ? state.threeUpNormalScrollMode
+      : ScrollMode.VERTICAL;
+    const rawOptions = options && typeof options === "object" ? options : {};
+    if (rawOptions.restoreBaseline !== false && state.threeUpBaselineViewState) {
+      const restored = applyViewState(cloneStateObject(state.threeUpBaselineViewState));
+      state.threeUpBaselineViewState = null;
+      scheduleRefresh();
+      return restored;
+    }
+    state.threeUpBaselineViewState = null;
+    currentViewer.currentScale = clampZoomScale(state.threeUpOnePageScale);
+    state.lastViewState = captureViewState();
+    scheduleRefresh();
+    return true;
+  }
+
+  function enterTwoUpMode() {
+    const currentApp = app();
+    const currentViewer = viewer();
+    if (!currentApp || !currentViewer) {
+      return false;
+    }
+    if (state.twoUpActive) {
+      return true;
+    }
+    if (state.threeUpActive) {
+      leaveThreeUpMode({ restoreBaseline: false });
+    }
+    const baseline = capturePersistedViewState();
+    state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
+      ? baseline
+      : {
+          page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
+          pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
+          scale: String(currentViewer.currentScaleValue || "page-width"),
+          scrollTop: 0,
+          scrollRatio: 0,
+        };
+    state.threeUpOnePageScale = onePageScaleFromViewer(currentViewer);
+    state.threeUpEntryOnePageScale = state.threeUpOnePageScale;
+    state.threeUpBaselineScaleValue = String(
+      currentViewer.currentScaleValue || state.threeUpOnePageScale
+    );
+    state.threeUpNormalScrollMode = Number.isInteger(currentViewer.scrollMode)
+      ? currentViewer.scrollMode
+      : ScrollMode.VERTICAL;
+    state.threeUpNormalSpreadMode = Number.isInteger(currentViewer.spreadMode)
+      ? currentViewer.spreadMode
+      : SpreadMode.NONE;
+    cancelPendingViewRestore();
+    state.twoUpActive = true;
+    applyTwoUpLayout(currentViewer);
+    applyPageState(
+      currentApp,
+      currentViewer,
+      Number.parseInt(state.threeUpBaselineViewState.page, 10)
+    );
+    scheduleRefresh();
+    return true;
+  }
+
+  function toggleTwoUpMode() {
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: true });
+    } else {
+      enterTwoUpMode();
+    }
+    const onePageScale = clampZoomScale(state.threeUpOnePageScale);
+    return {
+      active: Boolean(state.twoUpActive),
+      twoUpActive: Boolean(state.twoUpActive),
+      threeUpActive: Boolean(state.threeUpActive),
+      onePageScale,
+      percent: Math.round(onePageScale * 100),
+    };
+  }
+
+  function isTwoUpActive() {
+    return Boolean(state.twoUpActive);
+  }
+
   function enterThreeUpMode() {
     const currentApp = app();
     const currentViewer = viewer();
@@ -2464,6 +2588,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     if (state.threeUpActive) {
       return true;
+    }
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: false });
     }
     const pendingBaseline = (
       state.pendingRestoreViewState
@@ -2593,6 +2720,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     const resultPayload = {
       active: false,
       threeUpActive: false,
+      twoUpActive: false,
       onePageScale: 1,
       percent: 100,
       ok: true,
@@ -2600,6 +2728,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.threeUpActive) {
       resultPayload.ok = leaveThreeUpMode({ restoreBaseline: true, onePageScale: 1.0 });
       return resultPayload;
+    }
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: false });
     }
     cancelPendingViewRestore();
     const currentViewer = viewer();
@@ -2642,6 +2773,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
     }
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: false });
+    }
     return applyViewState(stateValue);
   }
 
@@ -2664,13 +2798,14 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (!currentViewer) {
       return {};
     }
-    if (state.threeUpActive) {
+    if (state.threeUpActive || state.twoUpActive) {
       const onePageScale = clampZoomScale(state.threeUpOnePageScale);
       return {
         currentScale: onePageScale,
         currentScaleValue: String(onePageScale),
         percent: Math.round(onePageScale * 100),
-        threeUpActive: true,
+        threeUpActive: Boolean(state.threeUpActive),
+        twoUpActive: Boolean(state.twoUpActive),
       };
     }
     const currentScale = Number(currentViewer.currentScale || 1);
@@ -2693,12 +2828,16 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       return false;
     }
     cancelPendingViewRestore();
-    if (state.threeUpActive) {
+    if (state.threeUpActive || state.twoUpActive) {
       state.threeUpOnePageScale = clampZoomScale(nextScale);
       state.threeUpBaselineScaleValue = String(state.threeUpOnePageScale);
       state.threeUpBaselineViewState = threeUpViewState();
       state.threeUpBaselineViewState.scale = String(state.threeUpOnePageScale);
-      applyThreeUpLayout(currentViewer);
+      if (state.threeUpActive) {
+        applyThreeUpLayout(currentViewer);
+      } else {
+        applyTwoUpLayout(currentViewer);
+      }
       state.lastViewState = threeUpViewState();
       scheduleRefresh();
       return true;
@@ -2716,6 +2855,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     }
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
+    }
+    if (state.twoUpActive) {
+      leaveTwoUpMode({ restoreBaseline: false });
     }
     cancelPendingViewRestore();
     currentViewer.currentScaleValue = "page-width";
@@ -2858,6 +3000,8 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     setDarkMode,
     isThreeUpActive,
     toggleThreeUpMode,
+    isTwoUpActive,
+    toggleTwoUpMode,
     setOnePageZoom100,
     getViewState,
     restoreViewState,

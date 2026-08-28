@@ -46,6 +46,9 @@ It is designed for people who review many PDFs and need stable annotation/sessio
     button reads `Light` and restores normal PDF colors when clicked.
   - `Add View` to create another tabbed view of the same PDF at the current page/scroll location.
 - `F5` refresh shortcut (same behavior as `Refresh`).
+- `Ctrl+8` toggles a three-page-wide wrapped presentation.
+- `Ctrl+9` toggles conventional two-up facing pages (cover page alone, then
+  pages 2–3, 4–5, and so on).
 - Search box and color-apply controls matching `mdexplore` search syntax:
   - supports tokenized/quoted boolean queries via shared parser helpers,
   - searches PDFs currently visible in the tree (root files plus expanded branches),
@@ -398,7 +401,7 @@ Each numeric value is validated with clamp bounds before use.
 
 | Key | Default | Clamp | Purpose |
 | --- | --- | --- | --- |
-| `three_up_divisor` | `3` | `1..12` | Divisor used to scale three-up layout width. |
+| `three_up_divisor` | `3` | `1..12` | Divisor used to scale three-up layout width (`Ctrl+8`). |
 | `min_zoom_scale` | `0.1` | `0.01..100` | Minimum allowed zoom scale in bridge operations. |
 | `max_zoom_scale` | `10.0` | `min_zoom_scale..100` | Maximum allowed zoom scale in bridge operations. |
 | `restore_stabilize_ms` | `2800` | `50..30000` | Stabilization window after restore actions. |

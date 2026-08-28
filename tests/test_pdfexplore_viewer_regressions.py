@@ -13,7 +13,7 @@ os.environ.setdefault(
     "--disable-gpu --disable-software-rasterizer",
 )
 
-from PySide6.QtCore import QEventLoop, QPoint, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -1256,52 +1256,151 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             260.0,
         )
 
-    def test_three_up_toggle_responds_to_ctrl_backslash_keys_in_viewer(self) -> None:
+    def test_layout_shortcuts_route_ctrl_eight_to_three_up_and_ctrl_nine_to_two_up(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
 
-        initial_state = self.run_current_viewer_js(
-            "window.__pdfexploreBridge.isThreeUpActive();"
+        initial_state = self.run_current_viewer_js_json(
+            "({ three: window.__pdfexploreBridge.isThreeUpActive(), two: window.__pdfexploreBridge.isTwoUpActive() })"
         )
-        self.assertEqual(initial_state, False)
+        self.assertFalse(bool(initial_state.get("three")))
+        self.assertFalse(bool(initial_state.get("two")))
 
-        after_ctrl_backslash = self.run_current_viewer_js_json(
-            """
-(() => {
-    const event = new KeyboardEvent('keydown', {
-        key: String.fromCharCode(92),
-        code: 'Backslash',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-    });
-    document.dispatchEvent(event);
-    return {
-        threeUpActive: window.__pdfexploreBridge.isThreeUpActive(),
-        scrollMode: window.PDFViewerApplication.pdfViewer.scrollMode,
-    };
-})()
-"""
-        )
-        self.assertEqual(bool(after_ctrl_backslash.get("threeUpActive")), True)
-        self.assertEqual(int(after_ctrl_backslash.get("scrollMode", -1)), 2)
-
-        after_ctrl_shift_bar = self.run_current_viewer_js(
+        after_ctrl_eight = self.run_current_viewer_js_json(
             """
 (() => {
   const event = new KeyboardEvent('keydown', {
-    key: '|',
-    code: 'Backslash',
+    key: '8',
+    code: 'Digit8',
     ctrlKey: true,
-    shiftKey: true,
     bubbles: true,
     cancelable: true,
   });
   document.dispatchEvent(event);
-  return window.__pdfexploreBridge.isThreeUpActive();
-})();
+  return {
+    threeUpActive: window.__pdfexploreBridge.isThreeUpActive(),
+    twoUpActive: window.__pdfexploreBridge.isTwoUpActive(),
+    scrollMode: window.PDFViewerApplication.pdfViewer.scrollMode,
+    spreadMode: window.PDFViewerApplication.pdfViewer.spreadMode,
+  };
+})()
 """
         )
-        self.assertEqual(after_ctrl_shift_bar, False)
+        self.assertTrue(bool(after_ctrl_eight.get("threeUpActive")))
+        self.assertFalse(bool(after_ctrl_eight.get("twoUpActive")))
+        self.assertEqual(int(after_ctrl_eight.get("scrollMode", -1)), 2)
+        self.assertEqual(int(after_ctrl_eight.get("spreadMode", -1)), 0)
+
+        after_ctrl_eight_again = self.run_current_viewer_js(
+            """
+(() => {
+  const event = new KeyboardEvent('keydown', {
+    key: '8', code: 'Digit8', ctrlKey: true,
+    bubbles: true, cancelable: true,
+  });
+  document.dispatchEvent(event);
+  return window.__pdfexploreBridge.isThreeUpActive();
+})()
+"""
+        )
+        self.assertFalse(after_ctrl_eight_again)
+
+        after_ctrl_nine = self.run_current_viewer_js_json(
+            """
+(() => {
+  const event = new KeyboardEvent('keydown', {
+    key: '9',
+    code: 'Digit9',
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  document.dispatchEvent(event);
+  return {
+    threeUpActive: window.__pdfexploreBridge.isThreeUpActive(),
+    twoUpActive: window.__pdfexploreBridge.isTwoUpActive(),
+    scrollMode: window.PDFViewerApplication.pdfViewer.scrollMode,
+    spreadMode: window.PDFViewerApplication.pdfViewer.spreadMode,
+    containerWidth: document.getElementById('viewerContainer')?.clientWidth || 0,
+    spreads: Array.from(document.querySelectorAll('#viewer .spread')).map(
+      (spread) => ({
+        pageCount: spread.querySelectorAll('.page').length,
+        pageWidths: Array.from(spread.querySelectorAll('.page')).map(
+          (page) => page.getBoundingClientRect().width
+        ),
+      })
+    ),
+  };
+})()
+"""
+        )
+        self.assertFalse(bool(after_ctrl_nine.get("threeUpActive")))
+        self.assertTrue(bool(after_ctrl_nine.get("twoUpActive")))
+        self.assertEqual(int(after_ctrl_nine.get("scrollMode", -1)), 0)
+        self.assertEqual(int(after_ctrl_nine.get("spreadMode", -1)), 2)
+        spreads = list(after_ctrl_nine.get("spreads") or [])
+        self.assertTrue(spreads)
+        self.assertEqual(int(spreads[0].get("pageCount", 0)), 1)
+        facing_spread = next(
+            (spread for spread in spreads if int(spread.get("pageCount", 0)) == 2),
+            None,
+        )
+        self.assertIsNotNone(facing_spread)
+        facing_width = sum(float(value) for value in facing_spread.get("pageWidths", []))
+        container_width = float(after_ctrl_nine.get("containerWidth", 0))
+        self.assertGreater(container_width, 0)
+        self.assertGreater(
+            facing_width / container_width,
+            0.85,
+            "Facing pages should fill the preview width, not be divided twice.",
+        )
+
+    def test_host_key_events_reach_the_requested_multi_page_layouts(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        preview = self.window._current_preview_widget()
+        self.assertIsNotNone(preview)
+        assert preview is not None
+        preview.setFocus()
+        self._app.processEvents()
+
+        QTest.keyClick(
+            preview,
+            Qt.Key.Key_8,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isThreeUpActive();"
+            )
+            is True,
+            timeout_ms=5000,
+        )
+        self.assertFalse(
+            bool(
+                self.run_current_viewer_js(
+                    "window.__pdfexploreBridge.isTwoUpActive();"
+                )
+            )
+        )
+
+        QTest.keyClick(
+            preview,
+            Qt.Key.Key_9,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js(
+                "window.__pdfexploreBridge.isTwoUpActive();"
+            )
+            is True,
+            timeout_ms=5000,
+        )
+        self.assertFalse(
+            bool(
+                self.run_current_viewer_js(
+                    "window.__pdfexploreBridge.isThreeUpActive();"
+                )
+            )
+        )
 
     def test_three_up_exit_page_selection_depends_on_exit_action(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)

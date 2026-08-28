@@ -365,6 +365,75 @@ C4Component
   returning to an evicted PDF may reload it rather than retaining unbounded
   WebEngine processes/pages.
 
+## Keyboard Shortcut Contract
+
+### Current preview-layout bindings
+
+- `Ctrl+8` toggles three-up presentation.
+- `Ctrl+9` toggles conventional two-up/facing presentation: the cover is alone,
+  followed by facing pairs 2–3, 4–5, and so on.
+- `Ctrl+0` restores fit-width zoom.
+- The `8`, `9`, and `0` bindings above are the literal, unshifted number keys.
+  Shift is not required and is not part of these chords.
+
+### Required implementation paths
+
+- Keep the three-up and two-up `QAction` objects shortcut-free. Register each
+  chord exactly once as an application-level `QShortcut`; assigning the same
+  sequence to both a `QAction` and a `QShortcut` makes Qt report an ambiguous
+  shortcut and can prevent either callback from firing.
+- Mirror preview-layout shortcuts in the `PdfExploreWindow` key-event filter so
+  both `QEvent.KeyPress` and `QEvent.ShortcutOverride` route correctly when a
+  native child widget owns focus.
+- Mirror the same literal chord in
+  `pdfexplore/assets/viewer_bridge.js` because Chromium/pdf.js may own keyboard
+  delivery while the preview is focused. The bridge handler must prevent the
+  browser/pdf.js default and stop propagation only when it handles the exact
+  chord.
+- Keep modifier interpretation consistent across Qt and JavaScript: require
+  Control, reject Alt and Meta, and reject Shift for an unshifted binding.
+- A change is incomplete until the Qt registration, host event predicate,
+  viewer-bridge predicate, `pdfexplore/README.md`, and their regression tests
+  all describe the same key and modifier set. Remove superseded aliases from
+  every path unless backward compatibility was explicitly requested.
+
+### Do not repeat the shifted-symbol failure
+
+- **Do not translate a requested number key into the symbol printed above it.**
+  `Ctrl+8` is not `Ctrl+*`, `Ctrl+Shift+8`, or `Ctrl+Key_Asterisk`;
+  `Ctrl+9` is not `Ctrl+(`, `Ctrl+Shift+9`, or `Ctrl+Key_ParenLeft`.
+- **Do not infer a physical key from punctuation using one keyboard layout.**
+  `*` and `(` require Shift on a common US layout but may be elsewhere on other
+  layouts. A symbol chord should be implemented as a symbol only when the
+  requirement explicitly names that symbol; a number chord should remain the
+  unshifted number.
+- **Do not make Shift an undocumented requirement or permissive alias.** A
+  shortcut that only works when Shift is held does not satisfy an unshifted
+  binding, and accepting stale shifted variants can hide an incomplete update
+  or collide with a future command.
+- **Do not validate only by calling the toggle method directly.** That proves
+  layout logic but not keyboard delivery, which was the source of the earlier
+  failure.
+- **Do not test a number-key requirement with a symbolic or shifted synthetic
+  event.** For `Ctrl+8`, tests must use `Qt.Key_8` plus `ControlModifier` and a
+  JavaScript event with `key: "8"`, `code: "Digit8"`, `ctrlKey: true`, and no
+  Shift. Apply the corresponding rule to `Ctrl+9`.
+
+### Required shortcut regression coverage
+
+- Assert the portable Qt sequences are exactly `Ctrl+8` and `Ctrl+9`, not their
+  `Ctrl+Shift` variants.
+- Exercise host `KeyPress` and `ShortcutOverride` routing with unshifted number
+  events.
+- Send real unshifted `QTest.keyClick` events to the focused WebEngine preview
+  and verify the requested layout becomes active.
+- Dispatch unshifted browser `KeyboardEvent` objects and verify mode toggling,
+  three-up/two-up mutual exclusion, and facing-page geometry.
+- Include a negative assertion that the obsolete shifted-symbol chord does not
+  satisfy an unshifted-number predicate.
+- Retain regression coverage for `Ctrl+0` fit-width behavior whenever adjacent
+  preview shortcuts are changed.
+
 ## Contributor Playbook
 
 When changing any of the following, update both behavior and docs in the same change:
@@ -374,6 +443,7 @@ When changing any of the following, update both behavior and docs in the same ch
 - Sidecar format interpretation.
 - Tree badge rendering/priority rules.
 - Viewer bridge highlight/search interactions.
+- Keyboard shortcuts or their Qt/WebEngine routing.
 
 Recommended validation sequence:
 
@@ -384,6 +454,8 @@ Recommended validation sequence:
     - expand/collapse multiple folders,
     - run search and clear search,
     - add/remove highlight, switch files, return,
+    - with focus inside the PDF preview, verify `Ctrl+8`, `Ctrl+9`, and `Ctrl+0`
+      without Shift,
     - verify cache and marker badges remain coherent.
 
 ## Failure Modes to Watch
@@ -401,6 +473,9 @@ Recommended validation sequence:
 - Idle prefetch/GC continuing after a sibling instance touches the activity heartbeat.
 - Launcher bootstrap locking accidentally extending across the Qt process lifetime.
 - Introducing a persistent shared WebEngine profile and Chromium profile-lock contention.
+- A requested number-key shortcut being registered or tested as its shifted
+  punctuation symbol, or Qt and viewer-bridge handlers drifting to different
+  chords.
 
 ## Change Boundaries
 
@@ -436,6 +511,8 @@ Recommended validation sequence:
     color mode across cached and newly loaded preview widgets,
   - preview navigation keeps persistent highlights on the left rail and active
     search hits on the right rail, with both marker types remaining clickable.
+  - preview keyboard layout controls remain `Ctrl+8` for three-up, `Ctrl+9` for
+    two-up/facing, and `Ctrl+0` for fit width, all without Shift.
 
 ## Documentation Contract
 
@@ -445,3 +522,4 @@ Any change to runtime behavior in these areas must be reflected in `pdfexplore/R
 - Search/prefetch throttling semantics.
 - Marker badge derivation/merge behavior.
 - User-visible workflow changes in top controls or preview context menu.
+- Keyboard shortcuts or modifier requirements.
