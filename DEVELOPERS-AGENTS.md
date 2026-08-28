@@ -203,11 +203,11 @@ current application run.
 an approximate `current line / total lines` indicator beside the scrollbar handle.
 - `Ctrl++`, `Ctrl+-`, and `Ctrl+0` should adjust only the preview pane zoom  
   factor, not the tree pane or overall UI scale. `Ctrl+7`, `Ctrl+8`, and
-  `Ctrl+9` are literal unshifted number-key density toggles for `1/6`, `1/3`,
-  and `1/2` preview scale; never translate them to shifted punctuation chords.
-  Because WebEngine rejects native zoom below `0.25`, 6-up composes native
-  `0.25` zoom with page CSS zoom of `2/3`. Preview loads must reapply that CSS,
-  and PDF export must remove and restore it with the native zoom component.
+  `Ctrl+9` are literal unshifted number-key layout toggles for 6-up, 3-up, and
+  2-up paginated Markdown cards; never translate them to shifted punctuation
+  chords and never implement them by shrinking one continuous page. Entering a
+  layout or changing its column count must retain the content page at the
+  viewport centre across repagination rather than resetting the scroll position.
 - Preview zoom changes should briefly show a top-center percentage overlay inside  
 the preview area.
 - `^` navigates one directory level up and re-roots the tree.
@@ -1174,12 +1174,13 @@ window.
 When tracing a render bug, start in `mdexplore.py` for control flow and then  
 drop into `mdexplore_app/*` only for leaf helpers.
 
-Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`, plus the `Ctrl+7`/`8`/`9`
-density presets) is intentionally outside the
-diagram render/cache forks described below. It is implemented as a  
-`QWebEngineView.setZoomFactor()` adjustment in `mdexplore.py`, so it scales the  
-entire preview surface after HTML/diagram rendering rather than creating a  
-separate render branch or cache namespace.
+Preview-only zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`) and the `Ctrl+7`/`8`/`9`
+page-card layouts are intentionally outside the
+diagram render/cache forks described below. Ordinary zoom uses
+`QWebEngineView.setZoomFactor()` in `mdexplore.py`. Page-card layout uses
+`assets/js/preview/page_layout.js` to move the existing rendered nodes into
+fixed virtual page surfaces and arrange those surfaces in a responsive grid;
+it must not create a separate render branch or cache namespace.
 
 Preview overlay markers are also intentionally outside the diagram render/cache  
 forks. Search-hit markers, persistent-highlight markers, and named-view home  

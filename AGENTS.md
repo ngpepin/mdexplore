@@ -83,15 +83,32 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
   and other `data:` URI consumers do not break.
 - `MDEXPLORE_BASE64_IMAGE_THREADS` controls worker-pool size used for both preview inline data-image materialization and copy-time image-link prefetch.
 
-## Preview Density Hotkeys
+## Preview Page-Layout Hotkeys
 
-- Markdown preview density presets are `Ctrl+7` for 6-up (`1/6` zoom),
-  `Ctrl+8` for 3-up (`1/3` zoom), and `Ctrl+9` for 2-up (`1/2` zoom).
-- Each preset toggles back to the preview zoom that was active before entering
-  the first density preset; switching between presets retains that baseline.
+- Markdown preview page layouts are `Ctrl+7` for 6-up, `Ctrl+8` for 3-up, and
+  `Ctrl+9` for 2-up. These must paginate rendered Markdown into distinct page
+  cards and arrange that many cards side-by-side per row; shrinking one
+  continuous page is not an acceptable implementation.
+- Each layout toggles back to continuous preview and the preview zoom that was
+  active before entering the first page layout; switching layouts retains that
+  baseline.
+- When leaving a scrolled multipage layout, retain the page at the viewport's
+  vertical centre. For odd-column layouts select the horizontally centred page;
+  for 2-up facing pages select the left page. Anchor that page after unwrapping
+  the grid instead of returning to the beginning or retaining an unrelated raw
+  scroll offset.
+- Entering a page layout from a scrolled continuous preview, or changing the
+  number of pages displayed horizontally, must keep the same current content
+  page centred after repagination. Never reset to the document beginning merely
+  because the grid column count changed.
+- Pagination must move the existing rendered DOM so links, selections,
+  highlights, Mermaid/PlantUML interaction state, and source-line metadata are
+  preserved. Do not clone or rerender the Markdown merely to change layout.
+- PDF export must temporarily unwrap page cards into continuous source DOM and
+  restore the active page layout afterward.
 - These are literal unshifted number chords. Never implement them as `Ctrl+&`,
   `Ctrl+*`, `Ctrl+(`, or any `Ctrl+Shift+number` translation inferred from a
   particular keyboard layout.
 - Keep each chord registered exactly once and regression-test delivery while
   the `QWebEngineView` preview has focus. `Ctrl+0` must continue to reset the
-  preview to `100%` and leave any density preset.
+  preview to `100%` and leave any page layout.

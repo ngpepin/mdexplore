@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect, Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QIcon
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy
@@ -57,7 +58,53 @@ class WindowLayoutTests(unittest.TestCase):
             "Long document paths should not make the main window effectively unshrinkable",
         )
 
-    def test_preview_density_shortcuts_use_unshifted_number_keys_and_toggle(self) -> None:
+    def test_preview_layout_shortcuts_paginate_pages_side_by_side_and_toggle(self) -> None:
+        root = Path(self._tempdir.name)
+        preview_path = root / "paged-preview.md"
+        markdown_text = "\n\n".join(
+            f"## Section {index}\n\n"
+            f"Paragraph {index} contains enough rendered text to exercise page flow. "
+            "The quick brown fox jumps over the lazy dog."
+            for index in range(1, 141)
+        )
+        preview_path.write_text(markdown_text, encoding="utf-8")
+        rendered = self.window.renderer.render_document(
+            markdown_text,
+            preview_path.name,
+        )
+        self.window.preview.setHtml(
+            rendered,
+            QUrl.fromLocalFile(f"{root}/"),
+        )
+
+        def run_js_json(expression: str) -> dict:
+            results: list[str] = []
+            self.window.preview.page().runJavaScript(
+                f"JSON.stringify({expression})",
+                lambda value: results.append(str(value)),
+            )
+            deadline = time.monotonic() + 3.0
+            while not results and time.monotonic() < deadline:
+                QApplication.processEvents()
+                QTest.qWait(10)
+            self.assertTrue(results)
+            payload = json.loads(results[-1])
+            self.assertIsInstance(payload, dict)
+            return payload
+
+        load_deadline = time.monotonic() + 5.0
+        while time.monotonic() < load_deadline:
+            ready = run_js_json(
+                "({ ready: document.readyState === 'complete', "
+                "hasContent: (document.querySelector('main')?.textContent || '')"
+                ".includes('Section 140') })"
+            )
+            if ready.get("ready") and ready.get("hasContent"):
+                break
+            QTest.qWait(20)
+        else:
+            self.fail("Timed out loading paginated Markdown fixture")
+
         self.window.activateWindow()
         self.window.preview.setFocus()
         QApplication.processEvents()
@@ -69,13 +116,13 @@ class WindowLayoutTests(unittest.TestCase):
                 key_target is self.window.preview
                 or self.window.preview.isAncestorOf(key_target)
             )
-        density_shortcuts = {
+        layout_shortcuts = {
             shortcut.key().toString(): shortcut
-            for shortcut in self.window._preview_density_shortcuts
+            for shortcut in self.window._preview_layout_shortcuts
         }
-        self.assertEqual(set(density_shortcuts), {"Ctrl+7", "Ctrl+8", "Ctrl+9"})
+        self.assertEqual(set(layout_shortcuts), {"Ctrl+7", "Ctrl+8", "Ctrl+9"})
 
-        def press_density_key(key, chord: str, expected_count: int | None) -> None:
+        def press_layout_key(key, chord: str, expected_count: int | None) -> None:
             QTest.keyClick(
                 key_target,
                 key,
@@ -86,49 +133,179 @@ class WindowLayoutTests(unittest.TestCase):
                 # Headless Qt can lack an active window after earlier
                 # WebEngine teardowns, so exercise the verified shortcut
                 # registration directly as a deterministic fallback.
-                density_shortcuts[chord].activated.emit()
+                layout_shortcuts[chord].activated.emit()
                 QApplication.processEvents()
 
-        def wait_for_css_zoom(expected: float) -> float:
-            css_zoom_value = 1.0
+        def wait_for_layout(expected_count: int) -> dict:
+            payload: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                payload = run_js_json(
+                    "(() => {"
+                    " const main = document.querySelector('main');"
+                    " const pages = Array.from(document.querySelectorAll("
+                    "   'main > .mdexplore-layout-page'"
+                    " ));"
+                    " const firstTop = pages[0]?.getBoundingClientRect().top || 0;"
+                    " const firstRowCount = pages.filter((page) =>"
+                    "   Math.abs(page.getBoundingClientRect().top - firstTop) < 3"
+                    " ).length;"
+                    " const state = window.__mdexplorePageLayout?.getState?.() || {};"
+                    " return {"
+                    "   active: main?.classList.contains('mdexplore-page-layout') || false,"
+                    "   count: Number(state.count || 0),"
+                    "   pageCount: pages.length,"
+                    "   firstRowCount,"
+                    "   hasLastSection: (main?.textContent || '').includes('Section 140')"
+                    " };"
+                    "})()"
+                )
+                if expected_count:
+                    if (
+                        payload.get("active")
+                        and int(payload.get("count", 0)) == expected_count
+                        and int(payload.get("firstRowCount", 0)) == expected_count
+                    ):
+                        return payload
+                elif not payload.get("active") and int(payload.get("pageCount", 0)) == 0:
+                    return payload
+                QTest.qWait(20)
+            self.fail(
+                f"Timed out waiting for {expected_count}-up Markdown layout: {payload}"
+            )
+
+        def centre_layout_page(page_number: int, marker: str) -> None:
+            # Let the layout-change anchor complete before simulating a later
+            # user scroll to a different row.
+            QTest.qWait(220)
+            positioned = run_js_json(
+                "(() => {"
+                " const page = Array.from(document.querySelectorAll("
+                "   'main > .mdexplore-layout-page'"
+                " )).find((candidate) =>"
+                f"   Number(candidate.dataset.pageNumber || 0) === {page_number}"
+                " );"
+                " const content = page?.querySelector("
+                "   '.mdexplore-layout-page-content'"
+                " );"
+                " const anchor = content?.firstElementChild;"
+                " if (!page || !anchor) return { positioned: false };"
+                f" anchor.dataset.exitAnchorTest = {json.dumps(marker)};"
+                " page.scrollIntoView({ block: 'center', inline: 'center' });"
+                " return { positioned: true };"
+                "})()"
+            )
+            self.assertTrue(positioned.get("positioned"))
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
-                css_zoom_values: list[float] = []
-                self.window.preview.page().runJavaScript(
-                    "Number(document.documentElement.style.zoom || 1)",
-                    lambda value: css_zoom_values.append(float(value)),
+                location = run_js_json(
+                    "(() => {"
+                    " const page = Array.from(document.querySelectorAll("
+                    "   'main > .mdexplore-layout-page'"
+                    " )).find((candidate) =>"
+                    f"   Number(candidate.dataset.pageNumber || 0) === {page_number}"
+                    " );"
+                    " const rect = page?.getBoundingClientRect();"
+                    " return {"
+                    "   centred: Boolean(rect) && rect.top <= innerHeight / 2"
+                    "     && rect.bottom >= innerHeight / 2"
+                    " };"
+                    "})()"
                 )
-                callback_deadline = time.monotonic() + 0.25
-                while not css_zoom_values and time.monotonic() < callback_deadline:
-                    QApplication.processEvents()
-                    QTest.qWait(10)
-                if css_zoom_values:
-                    css_zoom_value = css_zoom_values[-1]
-                    if abs(css_zoom_value - expected) < 1e-6:
-                        break
+                if location.get("centred"):
+                    return
                 QTest.qWait(20)
-            return css_zoom_value
+            self.fail(f"Page {page_number} did not reach the viewport centre")
 
-        press_density_key(Qt.Key.Key_7, "Ctrl+7", 6)
+        def assert_exit_page(page_number: int, marker: str) -> None:
+            QTest.qWait(240)
+            selector = json.dumps(f'[data-exit-anchor-test="{marker}"]')
+            exit_state = run_js_json(
+                "(() => {"
+                " const state = window.__mdexplorePageLayout?.getState?.() || {};"
+                f" const anchor = document.querySelector({selector});"
+                " const rect = anchor?.getBoundingClientRect();"
+                " return {"
+                "   lastExitPageNumber: Number(state.lastExitPageNumber || 0),"
+                "   anchorVisible: Boolean(rect) && rect.bottom >= 0"
+                "     && rect.top < innerHeight,"
+                "   anchorTop: rect?.top ?? null"
+                " };"
+                "})()"
+            )
+            self.assertEqual(exit_state.get("lastExitPageNumber"), page_number)
+            self.assertTrue(exit_state.get("anchorVisible"))
+            self.assertLess(abs(float(exit_state.get("anchorTop") or 0)), 160)
+
+        def assert_marker_page_centred(page_number: int, marker: str) -> None:
+            QTest.qWait(180)
+            selector = json.dumps(f'[data-exit-anchor-test="{marker}"]')
+            layout_state = run_js_json(
+                "(() => {"
+                " const state = window.__mdexplorePageLayout?.getState?.() || {};"
+                f" const anchor = document.querySelector({selector});"
+                " const page = anchor?.closest('.mdexplore-layout-page');"
+                " const rect = page?.getBoundingClientRect();"
+                " return {"
+                "   pageNumber: Number(page?.dataset.pageNumber || 0),"
+                "   lastLayoutAnchorPageNumber: Number("
+                "     state.lastLayoutAnchorPageNumber || 0"
+                "   ),"
+                "   centred: Boolean(rect) && rect.top <= innerHeight / 2"
+                "     && rect.bottom >= innerHeight / 2,"
+                "   pageTop: rect?.top ?? null,"
+                "   pageBottom: rect?.bottom ?? null,"
+                "   viewportHeight: innerHeight,"
+                "   scrollY: window.scrollY"
+                " };"
+                "})()"
+            )
+            self.assertEqual(layout_state.get("pageNumber"), page_number)
+            self.assertEqual(
+                layout_state.get("lastLayoutAnchorPageNumber"),
+                page_number,
+            )
+            self.assertTrue(layout_state.get("centred"), layout_state)
+
+        self.window._set_preview_zoom_factor(1.2)
+        press_layout_key(Qt.Key.Key_7, "Ctrl+7", 6)
         self.assertEqual(self.window._preview_multi_up_count, 6)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 0.25)
-        native_factor, css_factor = self.window._preview_multi_up_zoom_components(6)
-        self.assertAlmostEqual(native_factor * css_factor, 1.0 / 6.0)
-        css_zoom_value = wait_for_css_zoom(2.0 / 3.0)
-        self.assertAlmostEqual(css_zoom_value, 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+        six_up = wait_for_layout(6)
+        self.assertGreaterEqual(int(six_up.get("pageCount", 0)), 7)
+        self.assertTrue(six_up.get("hasLastSection"))
         self.assertEqual(self.window._preview_zoom_overlay.text(), "6-Up")
 
-        press_density_key(Qt.Key.Key_8, "Ctrl+8", 3)
+        press_layout_key(Qt.Key.Key_8, "Ctrl+8", 3)
         self.assertEqual(self.window._preview_multi_up_count, 3)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0 / 3.0)
+        three_up = wait_for_layout(3)
+        self.assertEqual(int(three_up.get("firstRowCount", 0)), 3)
 
-        press_density_key(Qt.Key.Key_9, "Ctrl+9", 2)
+        centre_layout_page(5, "three-up-centre")
+        press_layout_key(Qt.Key.Key_8, "Ctrl+8", None)
+        wait_for_layout(0)
+        assert_exit_page(5, "three-up-centre")
+
+        # Re-entering a grid from a scrolled continuous preview keeps the same
+        # content page, as does changing the number of columns afterward.
+        press_layout_key(Qt.Key.Key_8, "Ctrl+8", 3)
+        wait_for_layout(3)
+        assert_marker_page_centred(5, "three-up-centre")
+
+        press_layout_key(Qt.Key.Key_9, "Ctrl+9", 2)
         self.assertEqual(self.window._preview_multi_up_count, 2)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0 / 2.0)
+        two_up = wait_for_layout(2)
+        self.assertEqual(int(two_up.get("firstRowCount", 0)), 2)
+        assert_marker_page_centred(5, "three-up-centre")
 
-        press_density_key(Qt.Key.Key_9, "Ctrl+9", None)
+        centre_layout_page(3, "facing-left")
+
+        press_layout_key(Qt.Key.Key_9, "Ctrl+9", None)
+        continuous = wait_for_layout(0)
+        assert_exit_page(3, "facing-left")
         self.assertIsNone(self.window._preview_multi_up_count)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.2)
+        self.assertTrue(continuous.get("hasLastSection"))
 
         QTest.keyClick(
             key_target,
@@ -137,21 +314,23 @@ class WindowLayoutTests(unittest.TestCase):
         )
         QApplication.processEvents()
         self.assertIsNone(self.window._preview_multi_up_count)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.2)
 
-        press_density_key(Qt.Key.Key_7, "Ctrl+7", 6)
+        press_layout_key(Qt.Key.Key_7, "Ctrl+7", 6)
         self.assertEqual(self.window._preview_multi_up_count, 6)
+        wait_for_layout(6)
 
         self.window._prepare_preview_zoom_for_pdf_export()
         QApplication.processEvents()
         self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
-        self.assertAlmostEqual(wait_for_css_zoom(1.0), 1.0)
+        export_layout = wait_for_layout(0)
+        self.assertTrue(export_layout.get("hasLastSection"))
 
         self.window._restore_preview_zoom_after_pdf_export()
         QApplication.processEvents()
         self.assertEqual(self.window._preview_multi_up_count, 6)
-        self.assertAlmostEqual(self.window.preview.zoomFactor(), 0.25)
-        self.assertAlmostEqual(wait_for_css_zoom(2.0 / 3.0), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+        wait_for_layout(6)
 
         QTest.keyClick(
             key_target,
@@ -162,6 +341,7 @@ class WindowLayoutTests(unittest.TestCase):
         if self.window._preview_multi_up_count is not None:
             self.window._reset_preview_zoom()
             QApplication.processEvents()
+        wait_for_layout(0)
         self.assertIsNone(self.window._preview_multi_up_count)
         self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
 
