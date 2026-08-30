@@ -4222,7 +4222,7 @@ class PdfExploreWindow(QMainWindow):
             QUrl.toPercentEncoding(encoded_pdf_url)
         ).decode("ascii")
         viewer_url.setQuery(f"file={encoded_query_value}")
-        viewer_url.setFragment("zoom=page-fit")
+        viewer_url.setFragment("zoom=page-width")
         return viewer_url
 
     def _current_preview_widget(self) -> QWebEngineView | None:
@@ -4429,12 +4429,24 @@ class PdfExploreWindow(QMainWindow):
             scroll_ratio = float(payload.get("scrollRatio", 0.0) or 0.0)
         except Exception:
             scroll_ratio = 0.0
-        scale = str(payload.get("scale", "page-fit") or "page-fit").strip() or "page-fit"
+        try:
+            scroll_left = float(payload.get("scrollLeft", 0.0) or 0.0)
+        except Exception:
+            scroll_left = 0.0
+        try:
+            scroll_left_ratio = float(payload.get("scrollLeftRatio", 0.0) or 0.0)
+        except Exception:
+            scroll_left_ratio = 0.0
+        scale = str(payload.get("scale", "page-width") or "page-width").strip() or "page-width"
+        layout = str(payload.get("layout", "single") or "single").strip().lower()
         if (
             page <= 1
             and scroll_top <= 1.0
             and scroll_ratio <= 0.001
-            and scale == "page-fit"
+            and scroll_left <= 1.0
+            and scroll_left_ratio <= 0.001
+            and scale == "page-width"
+            and layout in {"", "single", "one-up"}
         ):
             return
         interaction_marker = float(self._last_user_interaction_at)
@@ -4700,9 +4712,12 @@ class PdfExploreWindow(QMainWindow):
         return {
             "page": 1,
             "pagesCount": 1,
-            "scale": "page-fit",
+            "scale": "page-width",
             "scrollTop": 0.0,
             "scrollRatio": 0.0,
+            "scrollLeft": 0.0,
+            "scrollLeftRatio": 0.0,
+            "layout": "single",
         }
 
     @staticmethod
@@ -5018,11 +5033,11 @@ class PdfExploreWindow(QMainWindow):
 
     @staticmethod
     def _should_persist_document_view_session(session: dict | None) -> bool:
-        """Handle should persist document view session."""
+        """Persist meaningful tab, position, layout, or zoom state."""
         if not isinstance(session, dict):
             return False
         tabs = session.get("tabs")
-        if not isinstance(tabs, list):
+        if not isinstance(tabs, list) or not tabs:
             return False
         if len(tabs) > 1:
             return True
@@ -5033,7 +5048,67 @@ class PdfExploreWindow(QMainWindow):
                 and entry.get("custom_label").strip()
             ):
                 return True
+        for entry in tabs:
+            if not isinstance(entry, dict):
+                continue
+            state = entry.get("state")
+            if not isinstance(state, dict):
+                continue
+            layout = str(state.get("layout", "single") or "single").strip().lower()
+            scale = str(state.get("scale", "page-width") or "page-width").strip()
+            try:
+                page = int(state.get("page", 1) or 1)
+            except Exception:
+                page = 1
+            try:
+                scroll_top = float(state.get("scrollTop", 0.0) or 0.0)
+            except Exception:
+                scroll_top = 0.0
+            try:
+                scroll_ratio = float(state.get("scrollRatio", 0.0) or 0.0)
+            except Exception:
+                scroll_ratio = 0.0
+            try:
+                scroll_left = float(state.get("scrollLeft", 0.0) or 0.0)
+            except Exception:
+                scroll_left = 0.0
+            try:
+                scroll_left_ratio = float(
+                    state.get("scrollLeftRatio", 0.0) or 0.0
+                )
+            except Exception:
+                scroll_left_ratio = 0.0
+            if (
+                layout not in {"", "single", "one-up"}
+                or scale != "page-width"
+                or page > 1
+                or (scroll_top == scroll_top and scroll_top > 1.0)
+                or (scroll_ratio == scroll_ratio and scroll_ratio > 0.001)
+                or (scroll_left == scroll_left and scroll_left > 1.0)
+                or (
+                    scroll_left_ratio == scroll_left_ratio
+                    and scroll_left_ratio > 0.001
+                )
+            ):
+                return True
         return False
+
+    @staticmethod
+    def _session_has_multiple_views(session: dict | None) -> bool:
+        """Return whether a session should produce the explicit-view tree badge."""
+        if not isinstance(session, dict):
+            return False
+        tabs = session.get("tabs")
+        if not isinstance(tabs, list):
+            return False
+        if len(tabs) > 1:
+            return True
+        return any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("custom_label"), str)
+            and bool(entry.get("custom_label").strip())
+            for entry in tabs
+        )
 
     def _save_document_view_session(
         self, path_key: str | None = None, *, capture_current: bool = True
@@ -5374,7 +5449,7 @@ class PdfExploreWindow(QMainWindow):
             self._viewer_bridge_ready_by_path[path_key] = False
             preview.setUrl(QUrl(wanted_url))
         elif self._viewer_bridge_ready_by_path.get(path_key, False):
-            restore_state = wanted_state or {"scale": "page-fit"}
+            restore_state = wanted_state or dict(self._default_view_state())
             self._run_viewer_js(
                 "window.__pdfexploreBridge && window.__pdfexploreBridge.restoreViewState && "
                 f"window.__pdfexploreBridge.restoreViewState({json.dumps(restore_state)});"
@@ -5627,9 +5702,7 @@ class PdfExploreWindow(QMainWindow):
             candidate = str(data.get("path_key") or "").strip()
             if candidate:
                 open_counts[candidate] = open_counts.get(candidate, 0) + 1
-        if open_counts.get(path_key, 0) > 1 or self._should_persist_document_view_session(
-            session
-        ):
+        if open_counts.get(path_key, 0) > 1 or self._session_has_multiple_views(session):
             self._tree_multi_view_marker_paths.add(path_key)
         else:
             self._tree_multi_view_marker_paths.discard(path_key)
@@ -6172,7 +6245,7 @@ class PdfExploreWindow(QMainWindow):
             self._viewer_bridge_ready_by_path[path_key] = True
             restore_state = (
                 self._viewer_pending_restore_state_by_path.get(path_key)
-                or {"scale": "page-fit"}
+                or dict(self._default_view_state())
             )
             self._viewer_pending_restore_state_by_path[path_key] = None
             self._run_viewer_js(

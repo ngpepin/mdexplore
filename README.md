@@ -172,8 +172,9 @@ gradually decomposed.
 - Highlight colors persist per directory in `.mdexplore-colors.json` files.
 - Available file-highlight colors are: Yellow, Green, Blue, Orange, Purple,  
 Light Gray, Medium Gray, and Red.
-- View-tab state persists per directory in `.mdexplore-views.json` files for  
-documents that have more than one saved view or a custom tab label.
+- Per-document tab, active-tab, position, preview zoom, and page-layout state
+persists per directory in `.mdexplore-views.json` when it differs meaningfully
+from an untouched default view.
 - Persistent preview text highlights are stored per directory in  
 `.mdexplore-highlighting.json`.
 - Files in the tree show a small light-gray tab badge when they currently have  
@@ -341,7 +342,7 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
 | `MDEXPLORE_RECENT_ROOT_MENU_MRU_COUNT` | `10` | Legacy compatibility setting; the full `Recent` menu is now newest-first. |
 | `MDEXPLORE_MIN_RECENT_ROOT_DWELL_SECONDS` | `30.0` | Minimum time a root must stay active before being persisted as recent. |
 | `MDEXPLORE_CONFIG_LOCK_STALE_SECONDS` | `120.0` | Age threshold for lock-file stale cleanup. |
-| `MDEXPLORE_VIEWS_FILE_NAME` | `.mdexplore-views.json` | Sidecar file for per-document multi-view sessions. |
+| `MDEXPLORE_VIEWS_FILE_NAME` | `.mdexplore-views.json` | Sidecar file for per-document tabs, positions, preview zoom, and page layout. |
 | `MDEXPLORE_HIGHLIGHTING_FILE_NAME` | `.mdexplore-highlighting.json` | Sidecar file for persistent text highlights. |
 | `MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY` | `default_root` | Config JSON key for default root path. |
 | `MDEXPLORE_CONFIG_RECENT_ROOTS_KEY` | `recent_roots` | Config JSON key for recent-root list. |
@@ -882,15 +883,17 @@ the same way relabeling the tab does.
 to the scroll position at the time of relabeling.
 - When a new view is added and the palette wraps, mdexplore skips any color already used by open tabs.
 - If you switch to another markdown file and later return in the same app run, that file's tabs restore with their prior order and selected tab.
-- View-tab state also persists across app restarts in `.mdexplore-views.json`  
-beside the document directory, keyed by markdown filename.
+- View state persists across app restarts in `.mdexplore-views.json` beside the
+document directory, keyed by markdown filename. It includes tab order and
+positions, the active tab, preview zoom, and continuous/2-up/3-up/6-up layout.
 - For custom-labeled tabs, `.mdexplore-views.json` also persists the stored  
 label-time beginning location used by `Return to beginning`.
 - If custom labels make the tab strip too wide for the window, tab scrolling  
 is enabled through the tab bar's built-in scroll buttons.
-- Only documents with more than one saved view, or with a custom tab label, are  
-written to `.mdexplore-views.json`; untouched single-view documents continue  
-to use the default one-tab state.
+- A meaningful single-view position, non-default zoom, or page layout is also
+persisted. Untouched single-view documents at the beginning are omitted and,
+like documents never viewed before, open in continuous page-width view at
+`100%` zoom.
 - The tab strip is hidden when there is only one unlabeled default view.
 - If only one view remains and it has a custom label, its tab stays visible so  
 the custom label and `Return to beginning` action remain available.

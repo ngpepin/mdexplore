@@ -92,6 +92,8 @@ It is designed for people who review many PDFs and need stable annotation/sessio
   - custom tab labels via tab context menu,
   - labeled-tab `Return to beginning` support,
   - home/reset icon actions from shared `ViewTabBar`,
+  - active tab, per-tab page/scroll position, zoom, and
+    single/2-up/3-up/6-up layout restored across application runs,
   - hide tab strip when only one unlabeled default view remains,
   - per-document tab sessions persisted/restored from `.pdfexplore-views.json`.
 - PDF preview widget caching:
@@ -459,7 +461,10 @@ General conversion rule: `MiB * 1024 * 1024`.
 - `.pdfexplore-views.json`
 - `.pdfexplore-highlighting.json`
 
-`views` sidecars store multi-view sessions (tabs, active tab, per-tab state, custom labels when present). As with `mdexplore`, default untouched single-view sessions are not kept as persistent entries.
+`views` sidecars store tabs, the active tab, per-tab page/scroll position, zoom,
+page layout, and custom labels when present. Meaningful single-view state is
+stored too. Default untouched single-view sessions are omitted; a PDF without
+saved state opens at the beginning in single page-width view.
 
 ### Sidecar Compatibility and Safety
 
@@ -480,7 +485,7 @@ General conversion rule: `MiB * 1024 * 1024`.
 - `.pdfexplore-colors.json`
   - file highlight colors for tree rows.
 - `.pdfexplore-views.json`
-  - multi-view tab sessions and active view placement.
+  - tabs, active tab, per-tab page/scroll position, zoom, and page layout.
 - `.pdfexplore-highlighting.json`
   - persistent in-document text highlight ranges (normal/important).
 

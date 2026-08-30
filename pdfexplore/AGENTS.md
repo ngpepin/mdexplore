@@ -57,7 +57,8 @@ The system should feel predictable under stress: opening a new root, expanding f
 ## Key Sidecars
 
 - `.pdfexplore-colors.json`: tree color assignments.
-- `.pdfexplore-views.json`: per-document multi-view tab sessions.
+- `.pdfexplore-views.json`: per-document tabs, active tab, page/layout, zoom,
+  and scroll position.
 - `.pdfexplore-highlighting.json`: persistent in-document text highlight ranges.
 
 ## Settings Files
@@ -78,6 +79,13 @@ runtime settings in `pdfexplore.settings.json`.
 
 - Sidecars store intent/state, not source transformations.
 - Writes should avoid noisy churn (do not persist trivial default state unless required).
+- A meaningful page/scroll position, zoom, or 2-up/3-up/6-up layout makes a
+  single-view PDF session nontrivial and eligible for persistence. A PDF with
+  no saved entry opens in single-page-width view at the beginning.
+- Multipage persistence anchors the page nearest the viewport centre; for
+  two-up facing pages, persist and restore the left page on that centre row.
+- View badges still mean explicit tab state (multiple views or a custom-labeled
+  tab); persisting only a single view's display or position must not create one.
 - Reads should be permissive:
     - tolerate partial payloads,
     - accept legacy shapes when feasible,

@@ -641,10 +641,10 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             " return {normalAlpha: alpha(normal), importantAlpha: alpha(important)};"
             "})()"
         )
-        self.assertAlmostEqual(float(colors.get("normalAlpha", -1)), 0.24, places=2)
+        self.assertAlmostEqual(float(colors.get("normalAlpha", -1)), 0.12, places=2)
         self.assertAlmostEqual(
             float(colors.get("importantAlpha", -1)),
-            0.36,
+            0.25,
             places=2,
         )
         self.assertLess(float(colors.get("importantAlpha", 1)), 0.5)
@@ -1041,7 +1041,7 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             "return rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height } : {}; "
             "})()"
         )
-        # pdf.js may finish a page-fit scroll adjustment while the persistent
+        # pdf.js may finish a page-width scroll adjustment while the persistent
         # overlay is being created. Compare both rectangles in the same settled
         # viewport rather than treating the earlier screen coordinate as fixed.
         live_selection_rect = self.run_current_viewer_js_json(
@@ -1087,7 +1087,9 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
         self.window._apply_persistent_text_highlights()
 
         self.run_current_viewer_js(
-            "window.PDFViewerApplication.pdfViewer.scrollPageIntoView({ pageNumber: 4 });"
+            "window.__pdfexploreBridge.restoreViewState({"
+            "page: 4, scale: 'page-width'"
+            "});"
         )
         self.wait_until(
             lambda: self.run_current_viewer_js_json(
@@ -1184,7 +1186,7 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
         )
         self.assertEqual(str(reset_state.get("currentScaleValue", "")), "page-width")
 
-    def test_three_up_does_not_persist_scroll_and_restores_one_page_zoom(self) -> None:
+    def test_three_up_layout_zoom_and_position_restore_after_document_switch(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
 
         desired_state = {
@@ -1204,10 +1206,6 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             >= 1400,
             timeout_ms=12000,
         )
-        settled_before = self.run_current_viewer_js_json(
-            "window.__pdfexploreBridge.getViewState()"
-        )
-
         toggled = self.run_current_viewer_js_json(
             "window.__pdfexploreBridge.toggleThreeUpMode()"
         )
@@ -1224,8 +1222,21 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             timeout_ms=8000,
         )
 
+        self.wait_ms(800)
         self.run_current_viewer_js(
-            "(() => { const c = document.getElementById('viewerContainer'); if (c) { c.scrollLeft = 1400; c.scrollTop = 400; } return true; })();"
+            "(() => { const c = document.getElementById('viewerContainer'); if (c) { c.scrollTop = c.scrollHeight; } return true; })();"
+        )
+        self.wait_until(
+            lambda: int(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getViewState()"
+                ).get("page", 0)
+            )
+            >= 4,
+            timeout_ms=8000,
+        )
+        persisted_multi = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getViewState()"
         )
 
         self._open_and_wait_for_viewer(self.second_pdf)
@@ -1235,7 +1246,14 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             lambda: self.run_current_viewer_js(
                 "window.__pdfexploreBridge.isThreeUpActive();"
             )
-            is False,
+            is True,
+            timeout_ms=12000,
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("page")
+            == persisted_multi.get("page"),
             timeout_ms=12000,
         )
 
@@ -1246,15 +1264,58 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
             "window.__pdfexploreBridge.getViewState()"
         )
 
-        self.assertFalse(bool(restored_zoom.get("threeUpActive")))
+        self.assertTrue(bool(restored_zoom.get("threeUpActive")))
         self.assertLessEqual(
             abs(float(restored_zoom.get("currentScale", 0.0)) - 1.6),
             0.12,
         )
-        self.assertLessEqual(
-            abs(float(restored_view.get("scrollTop", 0)) - float(settled_before.get("scrollTop", 0))),
-            260.0,
+        self.assertEqual(restored_view.get("layout"), "three-up")
+        self.assertEqual(restored_view.get("page"), persisted_multi.get("page"))
+
+    def test_two_up_restores_the_saved_facing_left_page(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.run_current_viewer_js(
+            "window.__pdfexploreBridge.restoreViewState({"
+            "page: 4, scale: '1.4', layout: 'two-up'"
+            "});"
         )
+        self.wait_until(
+            lambda: bool(
+                self.run_current_viewer_js_json(
+                    "window.__pdfexploreBridge.getZoomState()"
+                ).get("twoUpActive")
+            )
+            and self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("page")
+            == 4,
+            timeout_ms=12000,
+        )
+        persisted = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getViewState()"
+        )
+
+        self._open_and_wait_for_viewer(self.second_pdf)
+        self._open_and_wait_for_viewer(self.first_pdf)
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("layout")
+            == "two-up"
+            and self.run_current_viewer_js_json(
+                "window.__pdfexploreBridge.getViewState()"
+            ).get("page")
+            == persisted.get("page"),
+            timeout_ms=12000,
+        )
+
+        restored = self.run_current_viewer_js_json(
+            "window.__pdfexploreBridge.getViewState()"
+        )
+        self.assertEqual(persisted.get("page"), 4)
+        self.assertEqual(restored.get("layout"), "two-up")
+        self.assertEqual(restored.get("page"), 4)
+        self.assertEqual(restored.get("scale"), "1.4")
 
     def test_layout_shortcuts_route_ctrl_seven_eight_and_nine(self) -> None:
         six_page_pdf = self.root / "six-pages.pdf"

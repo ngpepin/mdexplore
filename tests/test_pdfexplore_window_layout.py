@@ -499,7 +499,7 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             str(pdf_path.resolve()).replace(" ", r"\ ").replace("[", r"\[").replace("]", r"\]"),
         )
 
-    def test_new_document_defaults_to_page_fit_view(self) -> None:
+    def test_new_document_defaults_to_page_width_view(self) -> None:
         pdf_path = Path(self._tempdir.name) / "default-fit.pdf"
         _create_pdf_with_text(pdf_path, "default fit")
 
@@ -509,10 +509,11 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         tab_index = self.window.view_tabs.currentIndex()
         tab_data = self.window._tab_data(tab_index) or {}
         state = tab_data.get("state") if isinstance(tab_data, dict) else {}
-        self.assertEqual((state or {}).get("scale"), "page-fit")
+        self.assertEqual((state or {}).get("scale"), "page-width")
+        self.assertEqual((state or {}).get("layout"), "single")
 
         viewer_url = self.window._viewer_url_for_pdf(pdf_path)
-        self.assertEqual(viewer_url.fragment(), "zoom=page-fit")
+        self.assertEqual(viewer_url.fragment(), "zoom=page-width")
 
     def test_viewer_url_preserves_ampersands_and_other_query_characters(self) -> None:
         pdf_path = (
@@ -629,6 +630,49 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
 
         self.assertEqual(reopened.view_tabs.count(), 2)
         self.assertTrue(reopened.view_tabs.isVisible())
+        reopened.close()
+        QApplication.processEvents()
+
+    def test_single_view_layout_zoom_and_position_persist_across_runs(self) -> None:
+        pdf_path = Path(self._tempdir.name) / "single-state.pdf"
+        _create_pdf_with_text(pdf_path, "single state")
+        path_key = self.window._path_key(pdf_path)
+
+        self.window._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+        tab_index = self.window.view_tabs.currentIndex()
+        tab_data = dict(self.window._tab_data(tab_index) or {})
+        tab_data["state"] = {
+            "page": 4,
+            "pagesCount": 9,
+            "scale": "1.35",
+            "scrollTop": 860.0,
+            "scrollRatio": 0.42,
+            "layout": "three-up",
+        }
+        self.window._set_tab_data(tab_index, tab_data)
+        self.window._persist_document_view_session(path_key, capture_current=False)
+
+        sidecar = Path(self._tempdir.name) / ".pdfexplore-views.json"
+        self.assertTrue(sidecar.is_file())
+
+        reopened = PdfExploreWindow(
+            root=Path(self._tempdir.name),
+            app_icon=QIcon(),
+            config_path=Path(self._tempdir.name) / ".pdfexplore-reopened.cfg",
+            gpu_context_available=False,
+        )
+        reopened.show()
+        reopened._open_path_in_active_view(pdf_path)
+        QApplication.processEvents()
+
+        restored_data = reopened._tab_data(reopened.view_tabs.currentIndex()) or {}
+        restored_state = restored_data.get("state") or {}
+        self.assertEqual(restored_state.get("layout"), "three-up")
+        self.assertEqual(restored_state.get("scale"), "1.35")
+        self.assertEqual(restored_state.get("page"), 4)
+        self.assertEqual(restored_state.get("scrollTop"), 860.0)
+        reopened.current_file = None
         reopened.close()
         QApplication.processEvents()
 

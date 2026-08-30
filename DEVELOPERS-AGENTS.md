@@ -113,7 +113,7 @@ app icon normalization and two-tone icon recolor results).
 - Runtime color sidecars: per-directory `.mdexplore-colors.json` files for  
 persisted tree highlight colors where writable.
 - Runtime view sidecars: per-directory `.mdexplore-views.json` files for  
-persisted view-tab state (multi-view sessions and custom tab labels).
+persisted view tabs, active tab, positions, preview zoom, and page layout.
 - Runtime preview-highlight sidecars: per-directory  
 `.mdexplore-highlighting.json` files for persistent text highlights created  
 from the preview pane.
@@ -255,13 +255,20 @@ file and back must restore prior tabs, their order, and the previously selected
 tab.
 - View-tab state should also persist across app restarts via per-directory  
 `.mdexplore-views.json`, keyed by markdown filename.
+- The same session entry should persist the active tab, each tab's last
+position, the ordinary preview zoom, and the active continuous/2-up/3-up/6-up
+layout. Layout zoom stores the ordinary one-page baseline, not the temporary
+native zoom used while page cards are active.
 - For custom-labeled tabs, `.mdexplore-views.json` should also persist the  
 saved label-time beginning location used by `Return to beginning`.
 - If custom labels make the tab strip wider than the available space, the tab  
 bar should scroll rather than truncating the tab set.
-- Only documents with explicit multi-view state or custom tab labels should be  
-written to `.mdexplore-views.json`; untouched single-view documents should  
-fall back to the default one-tab state without sidecar entries.
+- Documents with explicit multi-view/custom-label state or a meaningful saved
+position, zoom, or page layout should be written to `.mdexplore-views.json`.
+Untouched single-view documents at their default position and page-width zoom
+should fall back to the default one-tab state without sidecar entries.
+- A document with no sidecar entry must open at the beginning in continuous
+page-width view at `100%` zoom.
 - The tab strip should remain hidden when there is only one unlabeled default  
 view.
 - If only one view remains and it has a custom label, its tab should stay  
@@ -885,14 +892,19 @@ R.VIEW.11 :: [custom-labeled tab refresh icon clicked] => O(reset saved beginnin
 #### 9.2 Persistence law
 
 ```text
-persist_view_session(file) := has_multiple_views(file) or has_custom_label(file)
+persist_view_session(file) := has_multiple_views(file)
+                              or has_custom_label(file)
+                              or has_meaningful_position(file)
+                              or has_nondefault_zoom(file)
+                              or has_page_layout(file)
 ```
 
 ```text
 R.SESSION.01 :: [switch away and back during app run] => O(restore tabs, order, and selected tab)
-R.SESSION.02 :: [persist_view_session(file)] => O(write file state to .mdexplore-views.json)
-R.SESSION.03 :: [not persist_view_session(file)] => X(write default single-view sidecar entry)
+R.SESSION.02 :: [persist_view_session(file)] => O(write tabs, active tab, positions, preview zoom, and page layout to .mdexplore-views.json)
+R.SESSION.03 :: [default single view at beginning and page-width zoom] => X(write a sidecar entry)
 R.SESSION.04 :: [named home anchor exists] => O(persist anchor for Return to beginning)
+R.SESSION.05 :: [no saved session exists] => O(open at beginning in continuous page-width view at 100% zoom)
 ```
 
 ### 10. Clipboard, Edit, and PDF Export Rules
@@ -997,12 +1009,12 @@ R.QA.03 :: [render behavior changed] => O(re-test GUI and PDF for JS and Rust br
 
 #### 13.3 View-session persistence
 
-| Multi-view | Custom label | Persist to `.mdexplore-views.json` |
-| ---------- | ------------ | ---------------------------------- |
-| no         | no           | no                                 |
-| yes        | no           | yes                                |
-| no         | yes          | yes                                |
-| yes        | yes          | yes                                |
+| Multi-view | Custom label | Meaningful position/zoom/layout | Persist to `.mdexplore-views.json` |
+| ---------- | ------------ | ------------------------------- | ---------------------------------- |
+| no         | no           | no                              | no                                 |
+| no         | no           | yes                             | yes                                |
+| yes        | any          | any                             | yes                                |
+| any        | yes          | any                             | yes                                |
 
 ### 14. Rule Summary
 

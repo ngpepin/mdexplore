@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QSizePolicy
 
 import mdexplore
 from mdexplore_app import search as search_query
+from mdexplore_app.file_coordination import load_files_payload, update_files_sidecar
 from mdexplore_app.workers import SearchScanWorker
 
 
@@ -344,6 +345,115 @@ class WindowLayoutTests(unittest.TestCase):
         wait_for_layout(0)
         self.assertIsNone(self.window._preview_multi_up_count)
         self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+
+    def test_single_view_zoom_and_position_persist_across_runs(self) -> None:
+        root = Path(self._tempdir.name)
+        markdown_path = root / "single-state.md"
+        markdown_path.write_text("# Saved state\n\nContent\n", encoding="utf-8")
+        path_key = self.window._path_key(markdown_path)
+        self.window.current_file = markdown_path
+        self.window._reset_document_views(initial_scroll=720.0, initial_line=38)
+        self.window.preview.setZoomFactor(1.3)
+
+        self.window._persist_document_view_session(path_key, capture_current=False)
+
+        sidecar = root / ".mdexplore-views.json"
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        persisted = payload["files"][markdown_path.name]
+        self.assertEqual(persisted["preview"]["layout"], 0)
+        self.assertAlmostEqual(persisted["preview"]["zoom_factor"], 1.3)
+
+        reopened = mdexplore.MdExploreWindow(
+            root=root,
+            app_icon=QIcon(),
+            config_path=root / ".mdexplore-reopened.cfg",
+            gpu_context_available=False,
+        )
+        reopened.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        reopened.current_file = markdown_path
+        reopened._load_persisted_document_view_session(path_key)
+        self.assertTrue(reopened._restore_document_view_session(path_key))
+        restored_state = reopened._current_view_state() or {}
+        self.assertAlmostEqual(float(restored_state.get("scroll_y", 0.0)), 720.0)
+        self.assertEqual(int(restored_state.get("top_line", 0)), 38)
+        self.assertIsNone(reopened._preview_multi_up_count)
+        self.assertAlmostEqual(reopened.preview.zoomFactor(), 1.3)
+        reopened.current_file = None
+        reopened.close()
+        QApplication.processEvents()
+
+    def test_page_layout_and_active_view_tab_persist_across_runs(self) -> None:
+        root = Path(self._tempdir.name)
+        markdown_path = root / "multi-state.md"
+        markdown_path.write_text("# Saved tabs\n\nContent\n", encoding="utf-8")
+        path_key = self.window._path_key(markdown_path)
+        self.window.current_file = markdown_path
+        self.window._reset_document_views(initial_scroll=110.0, initial_line=8)
+        second_view_id = self.window._create_document_view(
+            980.0,
+            74,
+            make_current=True,
+        )
+        self.window._preview_multi_up_count = 2
+        self.window._preview_multi_up_baseline_zoom = 1.2
+        self.window.preview.setZoomFactor(1.0)
+
+        self.window._persist_document_view_session(path_key, capture_current=False)
+
+        reopened = mdexplore.MdExploreWindow(
+            root=root,
+            app_icon=QIcon(),
+            config_path=root / ".mdexplore-tabs-reopened.cfg",
+            gpu_context_available=False,
+        )
+        reopened.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        reopened.current_file = markdown_path
+        reopened._load_persisted_document_view_session(path_key)
+        self.assertTrue(reopened._restore_document_view_session(path_key))
+        self.assertEqual(reopened._active_view_id, second_view_id)
+        self.assertEqual(reopened.view_tabs.count(), 2)
+        self.assertEqual(reopened._preview_multi_up_count, 2)
+        self.assertAlmostEqual(
+            float(reopened._preview_multi_up_baseline_zoom or 0.0),
+            1.2,
+        )
+        restored_state = reopened._current_view_state() or {}
+        self.assertAlmostEqual(float(restored_state.get("scroll_y", 0.0)), 980.0)
+        self.assertEqual(int(restored_state.get("top_line", 0)), 74)
+        reopened.current_file = None
+        reopened.close()
+        QApplication.processEvents()
+
+    def test_stale_view_cache_merge_preserves_another_instance_entry(self) -> None:
+        root = Path(self._tempdir.name)
+        local_sessions = self.window._directory_view_sessions(root)
+        external_session = {
+            "view_states": {"1": {"scroll_y": 440.0, "top_line": 22}},
+            "tabs": [{"view_id": 1, "sequence": 1, "color_slot": 0}],
+            "active_view_id": 1,
+            "preview": {"layout": 0, "zoom_factor": 1.0},
+        }
+        update_files_sidecar(
+            root / ".mdexplore-views.json",
+            {"external.md": external_session},
+        )
+        local_session = {
+            "view_states": {"1": {"scroll_y": 880.0, "top_line": 44}},
+            "tabs": [{"view_id": 1, "sequence": 1, "color_slot": 0}],
+            "active_view_id": 1,
+            "preview": {"layout": 3, "zoom_factor": 1.25},
+        }
+        local_sessions["local.md"] = local_session
+
+        self.window._save_directory_view_sessions(
+            root,
+            changed_file_names={"local.md"},
+        )
+
+        committed = load_files_payload(root / ".mdexplore-views.json")
+        self.assertEqual(set(committed), {"external.md", "local.md"})
+        self.assertEqual(committed["external.md"], external_session)
+        self.assertEqual(committed["local.md"], local_session)
 
     def test_safe_path_helpers_swallow_permission_errors(self) -> None:
         class _DeniedPath:

@@ -83,6 +83,24 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
   and other `data:` URI consumers do not break.
 - `MDEXPLORE_BASE64_IMAGE_THREADS` controls worker-pool size used for both preview inline data-image materialization and copy-time image-link prefetch.
 
+## Per-Document View Persistence
+
+- The existing per-directory sidecar is `.mdexplore-views.json` (plural
+  `views`); do not introduce a competing `.mdexplore-view.json` file.
+- Returning to a Markdown document across navigation or application restarts
+  must restore its active view tab, tab positions, ordinary preview zoom, and
+  active continuous/2-up/3-up/6-up layout.
+- A meaningful position, non-default zoom, or page layout makes even an
+  unlabeled single-view session eligible for persistence. An untouched
+  single-view document at the beginning may still be omitted to avoid sidecar
+  churn.
+- A document with no saved view state opens in continuous page-width view at
+  `100%` zoom and at the beginning.
+- Tree view badges continue to mean that a document has multiple views; a
+  single saved position or zoom must not create a multi-view badge.
+- Preserve the existing merge-safe, atomic per-file sidecar update path so two
+  running instances do not overwrite unrelated document sessions.
+
 ## Preview Page-Layout Hotkeys
 
 - Markdown preview page layouts are `Ctrl+7` for 6-up, `Ctrl+8` for 3-up, and

@@ -159,6 +159,7 @@ from mdexplore_app.constants import (
     PDF_LANDSCAPE_PAGE_TOKEN,
     SEARCH_CLOSE_WORD_GAP,
 )
+from mdexplore_app.file_coordination import update_files_sidecar
 from mdexplore_app.icons import (
     build_clear_x_icon as _build_clear_x_icon,
     build_markdown_icon as _build_markdown_icon,
@@ -3246,7 +3247,66 @@ class MdExploreWindow(QMainWindow):
             "next_view_id": next_view_id,
             "next_view_sequence": next_sequence,
             "next_tab_color_index": next_color_index,
+            "preview": self._current_preview_display_state(),
         }
+
+    def _current_preview_display_state(self) -> dict[str, int | float]:
+        """Return the current per-document Markdown layout and ordinary zoom."""
+        layout = (
+            int(self._preview_multi_up_count)
+            if self._preview_multi_up_count in {2, 3, 6}
+            else 0
+        )
+        if layout:
+            raw_zoom = self._preview_multi_up_baseline_zoom
+        else:
+            try:
+                raw_zoom = float(self.preview.zoomFactor())
+            except Exception:
+                raw_zoom = PREVIEW_ZOOM_RESET
+        try:
+            zoom_factor = float(raw_zoom)
+        except Exception:
+            zoom_factor = PREVIEW_ZOOM_RESET
+        if not math.isfinite(zoom_factor):
+            zoom_factor = PREVIEW_ZOOM_RESET
+        zoom_factor = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, zoom_factor))
+        return {"layout": layout, "zoom_factor": zoom_factor}
+
+    @staticmethod
+    def _normalized_preview_display_state(session: dict | None) -> tuple[int, float]:
+        """Sanitize persisted Markdown preview state with page-width defaults."""
+        preview_state = session.get("preview") if isinstance(session, dict) else None
+        if not isinstance(preview_state, dict):
+            return 0, PREVIEW_ZOOM_RESET
+        try:
+            layout = int(preview_state.get("layout", 0) or 0)
+        except Exception:
+            layout = 0
+        if layout not in {2, 3, 6}:
+            layout = 0
+        try:
+            zoom_factor = float(
+                preview_state.get("zoom_factor", PREVIEW_ZOOM_RESET)
+            )
+        except Exception:
+            zoom_factor = PREVIEW_ZOOM_RESET
+        if not math.isfinite(zoom_factor):
+            zoom_factor = PREVIEW_ZOOM_RESET
+        zoom_factor = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, zoom_factor))
+        return layout, zoom_factor
+
+    def _restore_preview_display_state(self, session: dict | None) -> None:
+        """Prepare one document's saved layout/zoom before its HTML is loaded."""
+        layout, zoom_factor = self._normalized_preview_display_state(session)
+        if layout in {2, 3, 6}:
+            self._preview_multi_up_count = layout
+            self._preview_multi_up_baseline_zoom = zoom_factor
+            self.preview.setZoomFactor(PREVIEW_ZOOM_RESET)
+            return
+        self._preview_multi_up_count = None
+        self._preview_multi_up_baseline_zoom = None
+        self.preview.setZoomFactor(zoom_factor)
 
     @staticmethod
     def _clone_json_compatible_dict(payload: dict) -> dict:
@@ -3944,8 +4004,13 @@ class MdExploreWindow(QMainWindow):
         self._persisted_view_sessions_by_dir[directory_key] = sessions
         return sessions
 
-    def _save_directory_view_sessions(self, directory: Path) -> None:
-        """Persist one directory's view-session sidecar, failing quietly on IO errors."""
+    def _save_directory_view_sessions(
+        self,
+        directory: Path,
+        *,
+        changed_file_names: set[str],
+    ) -> None:
+        """Merge view sessions into one directory sidecar, failing quietly."""
         try:
             resolved_directory = directory.resolve()
         except Exception:
@@ -3954,36 +4019,45 @@ class MdExploreWindow(QMainWindow):
         sessions = self._persisted_view_sessions_by_dir.get(directory_key, {})
         file_path = self._views_file_path(resolved_directory)
 
-        serializable_files: dict[str, dict] = {}
-        if isinstance(sessions, dict):
-            for file_name in sorted(sessions):
+        try:
+            names = set(changed_file_names)
+            updates: dict[str, object | None] = {}
+            for file_name in names:
                 raw_session = sessions.get(file_name)
-                if not isinstance(file_name, str) or not isinstance(raw_session, dict):
+                if (
+                    isinstance(file_name, str)
+                    and isinstance(raw_session, dict)
+                    and self._should_persist_document_view_session(raw_session)
+                ):
+                    updates[file_name] = self._clone_json_compatible_dict(raw_session)
+                elif isinstance(file_name, str):
+                    updates[file_name] = None
+            committed = update_files_sidecar(
+                file_path,
+                updates,
+            )
+            refreshed: dict[str, dict] = {}
+            for raw_name, raw_session in committed.items():
+                if not isinstance(raw_name, str) or not isinstance(raw_session, dict):
+                    continue
+                file_name = Path(raw_name).name
+                if not file_name.lower().endswith(".md"):
                     continue
                 cloned = self._clone_json_compatible_dict(raw_session)
                 if cloned:
-                    serializable_files[file_name] = cloned
-
-        try:
-            if not serializable_files:
-                if file_path.exists():
-                    file_path.unlink()
-                return
-            payload = {"files": serializable_files}
-            file_path.write_text(
-                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+                    refreshed[file_name] = cloned
+            self._persisted_view_sessions_by_dir[directory_key] = refreshed
         except Exception:
             # View persistence is best-effort only and must not interrupt UI flow.
             pass
 
     @staticmethod
     def _should_persist_document_view_session(session: dict | None) -> bool:
-        """Persist documents that have multi-view or custom-label state to restore."""
+        """Persist meaningful tab, position, layout, or zoom state."""
         if not isinstance(session, dict):
             return False
         tabs = session.get("tabs")
-        if not isinstance(tabs, list):
+        if not isinstance(tabs, list) or not tabs:
             return False
         if len(tabs) > 1:
             return True
@@ -3994,6 +4068,26 @@ class MdExploreWindow(QMainWindow):
                 and entry.get("custom_label").strip()
             ):
                 return True
+        layout, zoom_factor = MdExploreWindow._normalized_preview_display_state(
+            session
+        )
+        if layout in {2, 3, 6} or abs(zoom_factor - PREVIEW_ZOOM_RESET) > 1e-6:
+            return True
+        raw_states = session.get("view_states")
+        if isinstance(raw_states, dict):
+            for raw_state in raw_states.values():
+                if not isinstance(raw_state, dict):
+                    continue
+                try:
+                    scroll_y = float(raw_state.get("scroll_y", 0.0) or 0.0)
+                except Exception:
+                    scroll_y = 0.0
+                try:
+                    top_line = int(raw_state.get("top_line", 1) or 1)
+                except Exception:
+                    top_line = 1
+                if (math.isfinite(scroll_y) and scroll_y > 0.5) or top_line > 1:
+                    return True
         return False
 
     def _load_persisted_document_view_session(self, path_key: str) -> None:
@@ -4041,7 +4135,10 @@ class MdExploreWindow(QMainWindow):
             sessions[file_name] = self._clone_json_compatible_dict(session)
         else:
             sessions.pop(file_name, None)
-        self._save_directory_view_sessions(directory)
+        self._save_directory_view_sessions(
+            directory,
+            changed_file_names={file_name},
+        )
         self._refresh_tree_multi_view_markers(changed_path_key=path_key)
 
     def _serialized_mermaid_cache_json(self) -> str:
@@ -4612,6 +4709,7 @@ class MdExploreWindow(QMainWindow):
         self._sync_all_view_tab_progress()
         self._update_view_tabs_visibility()
         self._update_add_view_button_state()
+        self._restore_preview_display_state(session)
         return True
 
     def _set_view_tab_line(self, view_id: int, line_number: int) -> None:
@@ -10933,6 +11031,7 @@ class MdExploreWindow(QMainWindow):
         target_sessions = self._directory_view_sessions(target_directory)
         target_highlights = self._directory_text_highlights(target_directory)
         sessions_changed = False
+        changed_session_names: set[str] = set()
         highlights_changed = False
 
         for source_path, destination_path in copied_pairs:
@@ -10953,10 +11052,12 @@ class MdExploreWindow(QMainWindow):
                     source_session if isinstance(source_session, dict) else {}
                 )
                 sessions_changed = True
+                changed_session_names.add(destination_path.name)
                 view_updates += 1
             elif destination_path.name in target_sessions:
                 target_sessions.pop(destination_path.name, None)
                 sessions_changed = True
+                changed_session_names.add(destination_path.name)
 
             source_highlights = self._load_text_highlights_for_path_key(source_key)
             if source_highlights:
@@ -10970,7 +11071,10 @@ class MdExploreWindow(QMainWindow):
                 highlights_changed = True
 
         if sessions_changed:
-            self._save_directory_view_sessions(target_directory)
+            self._save_directory_view_sessions(
+                target_directory,
+                changed_file_names=changed_session_names,
+            )
         if highlights_changed:
             self._save_directory_text_highlights(target_directory)
 
@@ -11941,6 +12045,7 @@ class MdExploreWindow(QMainWindow):
             restored = self._restore_document_view_session(next_path_key)
             if not restored:
                 self._reset_document_views(initial_scroll=0.0, initial_line=1)
+                self._restore_preview_display_state(None)
         should_highlight_search = bool(
             self.match_input.text().strip()
         ) and self._is_path_in_current_matches(path)

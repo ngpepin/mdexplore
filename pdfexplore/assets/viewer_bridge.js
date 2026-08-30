@@ -259,13 +259,20 @@
         Number(doc && doc.scrollHeight ? doc.scrollHeight : 0),
         Number(body && body.scrollHeight ? body.scrollHeight : 0),
       );
+      const scrollWidth = Math.max(
+        Number(doc && doc.scrollWidth ? doc.scrollWidth : 0),
+        Number(body && body.scrollWidth ? body.scrollWidth : 0),
+      );
       const scrollTop = Number(window.scrollY || (doc && doc.scrollTop) || (body && body.scrollTop) || 0);
+      const scrollLeft = Number(window.scrollX || (doc && doc.scrollLeft) || (body && body.scrollLeft) || 0);
       return {
         isDocument: true,
         clientWidth,
         clientHeight,
         scrollHeight,
+        scrollWidth,
         scrollTop,
+        scrollLeft,
         rect: {
           top: 0,
           left: 0,
@@ -284,7 +291,9 @@
       clientWidth: Number(host.clientWidth || rect.width || 0),
       clientHeight: Number(host.clientHeight || rect.height || 0),
       scrollHeight: Number(host.scrollHeight || 0),
+      scrollWidth: Number(host.scrollWidth || 0),
       scrollTop: Number(host.scrollTop || 0),
+      scrollLeft: Number(host.scrollLeft || 0),
       rect,
     };
   }
@@ -296,6 +305,19 @@
       return;
     }
     host.scrollTop = target;
+  }
+
+  function setScrollLeftForHost(host, nextLeft) {
+    const target = Math.max(0, Number(nextLeft || 0));
+    if (!host || isDocumentScrollHost(host)) {
+      window.scrollTo({
+        top: Number(window.scrollY || 0),
+        left: target,
+        behavior: "auto",
+      });
+      return;
+    }
+    host.scrollLeft = target;
   }
 
   function scrollHostCandidates() {
@@ -387,6 +409,7 @@
     const containerRect = metrics.rect;
     const viewportCenterX = containerRect.left + (metrics.clientWidth / 2);
     const viewportCenterY = containerRect.top + (metrics.clientHeight / 2);
+    const tieTolerance = Math.max(2, Number(metrics.clientWidth || 0) * 0.01);
 
     let bestPage = Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
     let bestDistance = Number.POSITIVE_INFINITY;
@@ -403,13 +426,59 @@
       const pageCenterY = rect.top + (rect.height / 2);
       const dx = pageCenterX - viewportCenterX;
       const dy = pageCenterY - viewportCenterY;
-      const distance = (dx * dx) + (dy * dy);
-      if (distance < bestDistance) {
+      const distance = Math.hypot(dx, dy);
+      if (distance < bestDistance - tieTolerance) {
+        bestDistance = distance;
+        bestPage = pageNumber;
+      } else if (
+        Math.abs(distance - bestDistance) <= tieTolerance
+        && pageNumber === fallbackPage
+      ) {
         bestDistance = distance;
         bestPage = pageNumber;
       }
     }
     return bestPage;
+  }
+
+  function leftPageNearestViewportCenterLine(currentApp, currentViewer, container) {
+    const fallbackPage = Number.parseInt(
+      (currentApp && currentApp.page) || (currentViewer && currentViewer.currentPageNumber) || 1,
+      10
+    );
+    if (!container) {
+      return Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
+    }
+    const metrics = scrollHostMetrics(container);
+    const viewportCenterY = metrics.rect.top + (metrics.clientHeight / 2);
+    const candidates = pageElements()
+      .map((pageEl) => {
+        const pageNumber = Number.parseInt(pageEl.dataset.pageNumber || "", 10);
+        const rect = pageEl.getBoundingClientRect();
+        return { pageNumber, rect, distance: Math.abs((rect.top + (rect.height / 2)) - viewportCenterY) };
+      })
+      .filter((candidate) => (
+        Number.isFinite(candidate.pageNumber)
+        && candidate.pageNumber > 0
+        && candidate.rect
+        && candidate.rect.width > 0
+        && candidate.rect.height > 0
+      ));
+    if (!candidates.length) {
+      return Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
+    }
+    const nearestDistance = Math.min(...candidates.map((candidate) => candidate.distance));
+    const rowTolerance = Math.max(
+      2,
+      Math.min(...candidates.map((candidate) => candidate.rect.height)) * 0.1
+    );
+    const nearestRow = candidates.filter(
+      (candidate) => Math.abs(candidate.distance - nearestDistance) <= rowTolerance
+    );
+    nearestRow.sort((left, right) => (
+      left.rect.left - right.rect.left || left.pageNumber - right.pageNumber
+    ));
+    return nearestRow[0].pageNumber;
   }
 
   function clampZoomScale(rawScale) {
@@ -444,6 +513,8 @@
     );
     const scrollTop = Number(baseline.scrollTop || 0);
     const scrollRatio = Number(baseline.scrollRatio || 0);
+    const scrollLeft = Number(baseline.scrollLeft || 0);
+    const scrollLeftRatio = Number(baseline.scrollLeftRatio || 0);
     const onePageScale = clampZoomScale(state.threeUpOnePageScale);
     const baselineScaleValue = String(state.threeUpBaselineScaleValue || "").trim();
     const scaleValue = baselineScaleValue || String(onePageScale);
@@ -453,12 +524,50 @@
       scale: scaleValue,
       scrollTop: Number.isFinite(scrollTop) && scrollTop >= 0 ? scrollTop : 0,
       scrollRatio: Number.isFinite(scrollRatio) && scrollRatio >= 0 ? scrollRatio : 0,
+      scrollLeft: Number.isFinite(scrollLeft) && scrollLeft >= 0 ? scrollLeft : 0,
+      scrollLeftRatio: Number.isFinite(scrollLeftRatio) && scrollLeftRatio >= 0
+        ? scrollLeftRatio
+        : 0,
     };
   }
 
   function capturePersistedViewState() {
     if (state.sixUpActive || state.threeUpActive || state.twoUpActive) {
-      return threeUpViewState();
+      const persisted = threeUpViewState();
+      const currentApp = app();
+      const currentViewer = viewer();
+      const container = primaryScrollContainer();
+      const metrics = scrollHostMetrics(container);
+      const centerPage = state.twoUpActive
+        ? leftPageNearestViewportCenterLine(currentApp, currentViewer, container)
+        : pageNearestViewportCenter(currentApp, currentViewer, container);
+      const maxScrollTop = Math.max(
+        1,
+        Number(metrics.scrollHeight || 0) - Number(metrics.clientHeight || 0)
+      );
+      const maxScrollLeft = Math.max(
+        1,
+        Number(metrics.scrollWidth || 0) - Number(metrics.clientWidth || 0)
+      );
+      persisted.page = Number.isFinite(centerPage) && centerPage > 0
+        ? centerPage
+        : Number.parseInt(state.threeUpCenterPage, 10) || persisted.page;
+      persisted.scrollTop = Math.max(0, Number(metrics.scrollTop || 0));
+      persisted.scrollRatio = Math.max(
+        0,
+        Math.min(1, persisted.scrollTop / maxScrollTop)
+      );
+      persisted.scrollLeft = Math.max(0, Number(metrics.scrollLeft || 0));
+      persisted.scrollLeftRatio = Math.max(
+        0,
+        Math.min(1, persisted.scrollLeft / maxScrollLeft)
+      );
+      persisted.layout = state.sixUpActive
+        ? "six-up"
+        : state.threeUpActive
+          ? "three-up"
+          : "two-up";
+      return persisted;
     }
     return captureViewState();
   }
@@ -471,12 +580,16 @@
       return {};
     }
     const maxScrollTop = Math.max(1, container.scrollHeight - container.clientHeight);
+    const maxScrollLeft = Math.max(1, container.scrollWidth - container.clientWidth);
     return {
       page: Number(currentApp.page || currentViewer.currentPageNumber || 1),
       pagesCount: Number(currentViewer.pagesCount || currentApp.pagesCount || 0),
       scale: String(currentViewer.currentScaleValue || "page-width"),
       scrollTop: Number(container.scrollTop || 0),
       scrollRatio: Number((container.scrollTop || 0) / maxScrollTop),
+      scrollLeft: Number(container.scrollLeft || 0),
+      scrollLeftRatio: Number((container.scrollLeft || 0) / maxScrollLeft),
+      layout: "single",
     };
   }
 
@@ -803,6 +916,41 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     const absoluteTop = metrics.scrollTop + (pageRect.top - metrics.rect.top);
     const desiredTop = Math.max(0, absoluteTop - (metrics.clientHeight * 0.08));
     setScrollTopForHost(container, desiredTop);
+    return true;
+  }
+
+  function centerRenderedPageInPrimaryHost(pageNumber) {
+    const container = primaryScrollContainer();
+    if (!container || !Number.isFinite(pageNumber) || pageNumber <= 0) {
+      return false;
+    }
+    const pageEl = document.querySelector(`#viewer .page[data-page-number="${pageNumber}"]`);
+    if (!pageEl) {
+      return false;
+    }
+    const metrics = scrollHostMetrics(container);
+    const pageRect = pageEl.getBoundingClientRect();
+    if (!pageRect || pageRect.width <= 0 || pageRect.height <= 0) {
+      return false;
+    }
+    const absoluteCenterTop = (
+      metrics.scrollTop
+      + (pageRect.top - metrics.rect.top)
+      + (pageRect.height / 2)
+    );
+    const absoluteCenterLeft = (
+      metrics.scrollLeft
+      + (pageRect.left - metrics.rect.left)
+      + (pageRect.width / 2)
+    );
+    setScrollTopForHost(
+      container,
+      Math.max(0, absoluteCenterTop - (metrics.clientHeight / 2))
+    );
+    setScrollLeftForHost(
+      container,
+      Math.max(0, absoluteCenterLeft - (metrics.clientWidth / 2))
+    );
     return true;
   }
 
@@ -2439,12 +2587,23 @@ html.pdfexplore-dark-mode .page .xfaLayer {
 
   function applyScrollState(container, stateValue) {
     const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
     const ratio = Number(stateValue.scrollRatio);
     const scrollTop = Number(stateValue.scrollTop);
+    const horizontalRatio = Number(stateValue.scrollLeftRatio);
+    const scrollLeft = Number(stateValue.scrollLeft);
     if (Number.isFinite(scrollTop) && scrollTop >= 0) {
       container.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop));
     } else if (Number.isFinite(ratio) && ratio >= 0) {
       container.scrollTop = Math.max(0, Math.min(maxScrollTop, ratio * maxScrollTop));
+    }
+    if (Number.isFinite(scrollLeft) && scrollLeft >= 0) {
+      container.scrollLeft = Math.max(0, Math.min(maxScrollLeft, scrollLeft));
+    } else if (Number.isFinite(horizontalRatio) && horizontalRatio >= 0) {
+      container.scrollLeft = Math.max(
+        0,
+        Math.min(maxScrollLeft, horizontalRatio * maxScrollLeft)
+      );
     }
   }
 
@@ -2482,6 +2641,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       scale: scale || "page-width",
       scrollTop: Number(stateValue.scrollTop || 0),
       scrollRatio: Number(stateValue.scrollRatio || 0),
+      scrollLeft: Number(stateValue.scrollLeft || 0),
+      scrollLeftRatio: Number(stateValue.scrollLeftRatio || 0),
+      layout: "single",
     };
     state.pendingRestoreViewState = cloneStateObject(state.lastViewState);
     state.pendingRestoreUntil = Date.now() + RESTORE_STABILIZE_MS;
@@ -2565,7 +2727,13 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.sixUpActive) {
       leaveSixUpMode({ restoreBaseline: false });
     }
-    const baseline = capturePersistedViewState();
+    const pendingBaseline = (
+      state.pendingRestoreViewState
+      && Date.now() <= Number(state.pendingRestoreUntil || 0)
+    )
+      ? cloneStateObject(state.pendingRestoreViewState)
+      : null;
+    const baseline = pendingBaseline || capturePersistedViewState();
     state.threeUpBaselineViewState = baseline && Object.keys(baseline).length
       ? baseline
       : {
@@ -2939,6 +3107,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (
       !state.sixUpActive
       && !state.threeUpActive
+      && !state.twoUpActive
       &&
       state.pendingRestoreViewState
       && Date.now() <= Number(state.pendingRestoreUntil || 0)
@@ -2960,6 +3129,12 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   }
 
   function restoreViewState(stateValue) {
+    const rawLayout = String(
+      stateValue && stateValue.layout ? stateValue.layout : "single"
+    ).trim().toLowerCase();
+    const requestedLayout = ["six-up", "three-up", "two-up"].includes(rawLayout)
+      ? rawLayout
+      : "single";
     if (state.threeUpActive) {
       leaveThreeUpMode({ restoreBaseline: false });
     }
@@ -2969,7 +3144,53 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     if (state.twoUpActive) {
       leaveTwoUpMode({ restoreBaseline: false });
     }
-    return applyViewState(stateValue);
+    const restored = applyViewState(stateValue);
+    if (!restored || requestedLayout === "single") {
+      return restored;
+    }
+    const entered = requestedLayout === "six-up"
+      ? enterSixUpMode()
+      : requestedLayout === "three-up"
+        ? enterThreeUpMode()
+        : enterTwoUpMode();
+    if (!entered) {
+      return false;
+    }
+    const restoreId = state.viewRestoreId;
+    const page = Number.parseInt(stateValue && stateValue.page, 10);
+    const layoutIsCurrent = () => (
+      requestedLayout === "six-up"
+        ? state.sixUpActive
+        : requestedLayout === "three-up"
+          ? state.threeUpActive
+          : state.twoUpActive
+    );
+    const reapplyMultiUpPosition = () => {
+      if (restoreId !== state.viewRestoreId || !layoutIsCurrent()) {
+        return false;
+      }
+      const currentApp = app();
+      const currentViewer = viewer();
+      const container = viewerContainer();
+      if (!currentApp || !currentViewer || !container) {
+        return false;
+      }
+      applyPageState(currentApp, currentViewer, page);
+      applyScrollState(container, stateValue);
+      centerRenderedPageInPrimaryHost(page);
+      state.lastViewState = capturePersistedViewState();
+      return true;
+    };
+    window.requestAnimationFrame(() => {
+      if (!reapplyMultiUpPosition()) {
+        return;
+      }
+      window.requestAnimationFrame(reapplyMultiUpPosition);
+    });
+    for (const delay of [100, 300, 700]) {
+      window.setTimeout(reapplyMultiUpPosition, delay);
+    }
+    return true;
   }
 
   function goToTop() {
