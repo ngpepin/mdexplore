@@ -220,6 +220,9 @@ of highlighted hits; clicking a marker jumps to the nearest hit in that cluster.
   Copies matching source markdown using direct range mapping first, then  
   selected-text/fuzzy line matching as fallback, and finally the full source  
   file if no match is possible.
+- Right-click an image to keep the native `Copy Image` behavior or choose
+  `Save Image`, which opens a destination/filename dialog and converts the
+  rendered image (including BASE64 images) to PNG.
 - Clipboard copy uses file URI MIME formats compatible with Nemo/Nautilus paste.
 - Last effective root plus recent-root history are persisted to `~/.mdexplore.cfg` on root navigation and on exit.
   - Payload format is JSON with keys `default_root`, `recent_roots`, and `copy_base64_images_enabled`  

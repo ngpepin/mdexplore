@@ -358,6 +358,10 @@ selected subrange between normal and important highlighting.
 - Preview context menu should keep standard actions and add  
 `Copy Rendered Text` and `Copy Source Markdown` when there is a text  
 selection.
+- Preview image context menus should preserve WebEngine's native `Copy Image`
+action, but replace native `Save Image` with an application-owned PNG export.
+The replacement must prompt for destination and filename, append `.png` when
+needed, and decode/rasterize BASE64 `data:` images before writing.
 - `Copy Rendered Text` should copy the selected preview text as plain text.
 - `Copy Source Markdown` should map preview selection to source markdown line  
 ranges and copy source text (not rendered plain text).  
@@ -922,6 +926,9 @@ R.CLIP.07 :: [preview text selection and Copy Source Markdown] => O(map selectio
 R.CLIP.08 :: [direct source mapping fails] => P(fallback to text match, then fuzzy lines, then full file)
 R.CLIP.09 :: [Edit clicked] => O(invoke /usr/bin/marktext on current file)
 R.CLIP.10 :: [/usr/bin/marktext missing] => O(fail gracefully with user-visible error)
+R.CLIP.11 :: [preview image and Copy Image] => O(preserve native WebEngine copy behavior)
+R.CLIP.12 :: [preview image and Save Image] => O(prompt for destination/name and write PNG)
+R.CLIP.13 :: [Save Image source is BASE64 data URI] => O(decode/rasterize before PNG write)
 ```
 
 #### 10.2 PDF export law

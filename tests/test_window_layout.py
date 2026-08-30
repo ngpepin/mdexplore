@@ -7,10 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QRect, Qt, QUrl
+from PySide6.QtCore import QPoint, QRect, Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QIcon
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtWidgets import QApplication, QMenu, QSizePolicy
 
 import mdexplore
 from mdexplore_app import search as search_query
@@ -345,6 +346,75 @@ class WindowLayoutTests(unittest.TestCase):
         wait_for_layout(0)
         self.assertIsNone(self.window._preview_multi_up_count)
         self.assertAlmostEqual(self.window.preview.zoomFactor(), 1.0)
+
+    def test_save_preview_base64_image_prompts_and_converts_to_png(self) -> None:
+        gif_data_uri = (
+            "data:image/gif;base64,"
+            "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+        )
+        destination_without_suffix = Path(self._tempdir.name) / "saved-image"
+
+        with patch.object(
+            mdexplore.QFileDialog,
+            "getSaveFileName",
+            return_value=(str(destination_without_suffix), "PNG Image (*.png)"),
+        ) as save_dialog:
+            self.window._save_preview_image_as_png(
+                gif_data_uri,
+                click_x=12,
+                click_y=24,
+            )
+
+        output_path = destination_without_suffix.with_suffix(".png")
+        self.assertTrue(output_path.is_file())
+        self.assertTrue(output_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertFalse(mdexplore.QImage(str(output_path)).isNull())
+        self.assertEqual(save_dialog.call_args.args[1], "Save Image")
+        self.assertEqual(save_dialog.call_args.args[3], "PNG Image (*.png)")
+
+    def test_preview_context_menu_replaces_native_save_image_action(self) -> None:
+        media_url = "data:image/png;base64,AAAA"
+        standard_menu = QMenu(self.window.preview)
+        native_save_action = self.window.preview.pageAction(
+            QWebEnginePage.WebAction.DownloadImageToDisk
+        )
+        native_save_action.setText("Save Image")
+        standard_menu.addAction(native_save_action)
+
+        menu = QMenu(self.window.preview)
+        with patch.object(
+            self.window, "_save_preview_image_as_png"
+        ) as save_image:
+            custom_save_action = self.window._append_preview_standard_menu_actions(
+                menu,
+                standard_menu,
+                image_media_url=media_url,
+                click_x=7,
+                click_y=11,
+            )
+            candidates = [
+                action
+                for action in menu.actions()
+                if action.text().replace("&", "").strip() == "Save Image"
+            ]
+            self.assertEqual(len(candidates), 1)
+            self.assertIs(candidates[0], custom_save_action)
+            self.assertIsNot(candidates[0], native_save_action)
+            candidates[0].trigger()
+
+        save_image.assert_called_once_with(media_url, click_x=7, click_y=11)
+
+    def test_preview_image_png_filename_uses_source_stem(self) -> None:
+        self.assertEqual(
+            self.window._preview_image_png_filename(
+                "https://example.test/images/figure.final.jpg?download=1"
+            ),
+            "figure.final.png",
+        )
+        self.assertEqual(
+            self.window._preview_image_png_filename("data:image/png;base64,AAAA"),
+            "image.png",
+        )
 
     def test_single_view_zoom_and_position_persist_across_runs(self) -> None:
         root = Path(self._tempdir.name)

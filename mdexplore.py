@@ -8648,6 +8648,12 @@ class MdExploreWindow(QMainWindow):
         standard_menu = self.preview.createStandardContextMenu()
         request = self.preview.lastContextMenuRequest()
         selected_text_hint = request.selectedText() if request is not None else ""
+        image_media_url = ""
+        if request is not None:
+            try:
+                image_media_url = request.mediaUrl().toString().strip()
+            except Exception:
+                image_media_url = ""
         click_x = int(pos.x())
         click_y = int(pos.y())
         # Show the menu immediately. For custom actions, run an async probe
@@ -8659,7 +8665,158 @@ class MdExploreWindow(QMainWindow):
             standard_menu,
             click_x=click_x,
             click_y=click_y,
+            image_media_url=image_media_url,
         )
+
+    @staticmethod
+    def _preview_image_png_filename(media_url: str) -> str:
+        """Return a safe PNG filename suggested from an image media URL."""
+        raw_url = str(media_url or "").strip()
+        candidate_name = "image"
+        if raw_url and not raw_url.casefold().startswith("data:"):
+            try:
+                parsed_url = QUrl(raw_url)
+                if parsed_url.isLocalFile():
+                    candidate_name = Path(parsed_url.toLocalFile()).name or candidate_name
+                else:
+                    parsed_path = urllib.parse.urlparse(raw_url).path
+                    candidate_name = Path(
+                        urllib.parse.unquote(parsed_path)
+                    ).name or candidate_name
+            except Exception:
+                candidate_name = "image"
+        stem = Path(candidate_name).stem.strip() or "image"
+        stem = re.sub(r"[^A-Za-z0-9._ -]+", "_", stem).strip(" .") or "image"
+        return f"{stem}.png"
+
+    @staticmethod
+    def _preview_image_from_media_url(media_url: str) -> QImage:
+        """Decode a local or data-URI preview image into a raster image."""
+        raw_url = str(media_url or "").strip()
+        if not raw_url:
+            return QImage()
+        if raw_url.casefold().startswith("data:"):
+            if "," not in raw_url:
+                return QImage()
+            header, payload = raw_url.split(",", 1)
+            if not header[5:].split(";", 1)[0].strip().casefold().startswith(
+                "image/"
+            ):
+                return QImage()
+            try:
+                if ";base64" in header.casefold():
+                    raw_bytes = _b64decode_loose(re.sub(r"\s+", "", payload))
+                else:
+                    raw_bytes = urllib.parse.unquote_to_bytes(payload)
+            except Exception:
+                return QImage()
+            return QImage.fromData(raw_bytes)
+
+        try:
+            parsed_url = QUrl(raw_url)
+            if parsed_url.isLocalFile():
+                return QImage(parsed_url.toLocalFile())
+        except Exception:
+            pass
+        try:
+            candidate = Path(raw_url)
+            if candidate.is_file():
+                return QImage(str(candidate))
+        except Exception:
+            pass
+        return QImage()
+
+    def _request_preview_image_png_data(
+        self,
+        click_x: int,
+        click_y: int,
+        callback: Callable[[QImage], None],
+    ) -> None:
+        """Rasterize the clicked browser image to PNG-compatible pixels."""
+        js = f"""
+(() => {{
+  try {{
+    let node = document.elementFromPoint({int(click_x)}, {int(click_y)});
+    if (node && node.nodeType !== Node.ELEMENT_NODE) node = node.parentElement;
+    const image = node && node.closest ? node.closest("img") : null;
+    if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight) {{
+      return "";
+    }}
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return "";
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  }} catch (_error) {{
+    return "";
+  }}
+}})();
+"""
+
+        def _on_result(result) -> None:
+            image = (
+                self._preview_image_from_media_url(result)
+                if isinstance(result, str)
+                else QImage()
+            )
+            callback(image)
+
+        self.preview.page().runJavaScript(js, _on_result)
+
+    def _write_preview_image_png(self, image: QImage, output_path: Path) -> bool:
+        """Write a decoded preview image as PNG and report the outcome."""
+        if image.isNull():
+            return False
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            return bool(image.save(str(output_path), "PNG"))
+        except Exception:
+            return False
+
+    def _save_preview_image_as_png(
+        self,
+        media_url: str,
+        *,
+        click_x: int,
+        click_y: int,
+    ) -> None:
+        """Prompt for a destination and save the clicked preview image as PNG."""
+        default_directory = self.root
+        if isinstance(self.current_file, Path):
+            default_directory = self.current_file.parent
+        suggested_path = default_directory / self._preview_image_png_filename(media_url)
+        selected_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Image",
+            str(suggested_path),
+            "PNG Image (*.png)",
+        )
+        if not selected_path:
+            return
+        output_path = Path(selected_path)
+        if output_path.suffix.casefold() != ".png":
+            output_path = output_path.with_suffix(".png")
+
+        def _finish(image: QImage) -> None:
+            if self._write_preview_image_png(image, output_path):
+                self.statusBar().showMessage(
+                    f"Saved image: {output_path}",
+                    4000,
+                )
+                return
+            QMessageBox.warning(
+                self,
+                "Save Image Failed",
+                "The selected preview image could not be converted to PNG.",
+            )
+
+        decoded = self._preview_image_from_media_url(media_url)
+        if not decoded.isNull():
+            _finish(decoded)
+            return
+        self._request_preview_image_png_data(click_x, click_y, _finish)
 
     def _request_preview_context_menu_selection_info(
         self, click_x: int, click_y: int, selected_text_hint: str, callback
@@ -8720,6 +8877,7 @@ class MdExploreWindow(QMainWindow):
         *,
         click_x: int | None = None,
         click_y: int | None = None,
+        image_media_url: str = "",
     ) -> None:
         """Build preview menu and use cached selection metadata for copy action."""
         if standard_menu is None:
@@ -8794,8 +8952,13 @@ class MdExploreWindow(QMainWindow):
             copy_source_action = menu.addAction("Copy Source Markdown")
             menu.addSeparator()
 
-        for action in standard_menu.actions():
-            menu.addAction(action)
+        self._append_preview_standard_menu_actions(
+            menu,
+            standard_menu,
+            image_media_url=image_media_url,
+            click_x=int(click_x or 0),
+            click_y=int(click_y or 0),
+        )
 
         def _run_with_fresh_context_info(handler: Callable[[dict], None]) -> None:
             if click_x is None or click_y is None:
@@ -8865,6 +9028,42 @@ class MdExploreWindow(QMainWindow):
             )
         standard_menu.deleteLater()
         menu.deleteLater()
+
+    def _append_preview_standard_menu_actions(
+        self,
+        menu: QMenu,
+        standard_menu: QMenu,
+        *,
+        image_media_url: str,
+        click_x: int,
+        click_y: int,
+    ) -> QAction | None:
+        """Copy native preview actions, replacing Save Image with PNG export."""
+        save_image_action: QAction | None = None
+        native_save_image_action = self.preview.pageAction(
+            QWebEnginePage.WebAction.DownloadImageToDisk
+        )
+        for action in standard_menu.actions():
+            is_native_save_image = action == native_save_image_action
+            if not is_native_save_image:
+                is_native_save_image = (
+                    bool(image_media_url)
+                    and action.text().replace("&", "").strip().casefold()
+                    == "save image"
+                )
+            if bool(image_media_url) and is_native_save_image:
+                save_image_action = menu.addAction(action.icon(), action.text())
+                save_image_action.setEnabled(action.isEnabled())
+                save_image_action.triggered.connect(
+                    lambda _checked=False: self._save_preview_image_as_png(
+                        image_media_url,
+                        click_x=click_x,
+                        click_y=click_y,
+                    )
+                )
+                continue
+            menu.addAction(action)
+        return save_image_action
 
     @staticmethod
     def _selection_offsets_from_info(selection_info) -> tuple[int, int] | None:

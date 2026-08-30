@@ -101,6 +101,17 @@ For full architecture and behavior details, see `DEVELOPERS-AGENTS.md`.
 - Preserve the existing merge-safe, atomic per-file sidecar update path so two
   running instances do not overwrite unrelated document sessions.
 
+## Preview Image Context Menu
+
+- Keep Qt WebEngine's native `Copy Image` action and behavior intact.
+- Replace the native `Save Image` action with mdexplore's PNG-only save flow;
+  do not rely on WebEngine's profile download handler for this action.
+- `Save Image` must open a modal destination/filename chooser, suggest a
+  `.png` filename, append `.png` when omitted, and rasterize the selected image
+  as PNG. This includes images whose source is a BASE64 `data:` URI.
+- Cancelling the chooser must not write a file. Conversion or write failures
+  must produce a user-visible warning.
+
 ## Preview Page-Layout Hotkeys
 
 - Markdown preview page layouts are `Ctrl+7` for 6-up, `Ctrl+8` for 3-up, and
