@@ -4,9 +4,9 @@
 
 ## Features
 
-- **Editor toolbar preview:** while viewing a Markdown document, click the mdExt preview button in the editor toolbar to keep the current Markdown editing surface open and open the mdExt preview beside it.
+- **Editor toolbar preview toggle:** from the built-in Text Editor, click the mdExt preview button to open Text Editor on the left and mdExt on the right; click it again to return to the single Text Editor pane. From a single mdExt read-only editor, the button places Text Editor over the original mdExt tab on the left and opens a temporary mdExt preview on the right; the next click closes that temporary preview and the Text Editor, revealing the original rendered mdExt editor again.
 - **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown (Read-only)**.
-- **Edit from preview:** the `Edit` button immediately to the right of `Search` reopens the previewed document with the configured default Markdown editor. If mdExt itself is configured as the default for that Markdown file, `Edit` opens VS Code's Markdown Editor (not Markdown Preview); only when the Markdown Editor is unavailable does it fall back to the plain Text Editor.
+- **Edit from preview:** the `Edit` button immediately to the right of `Search` always reopens the previewed document in VS Code's built-in Text Editor. mdExt deliberately does not route editing through the newer Markdown Editor or Markdown Preview.
 - **Comfortable default zoom:** preview text starts two font-size steps larger than VS Code's editor font. `Alt++` and `Alt+-` still adjust it one pixel at a time.
 - **Per-document zoom memory:** font-size adjustments are stored in VS Code workspace storage for each Markdown document and restored when it is previewed again. Stale zoom records are periodically garbage-collected, with a bounded retained history.
 - **PDF export:** the `PDF` button creates a letter-sized **native Chromium PDF** through PySide6 Qt WebEngine, matching mdexplore's rendering architecture. Text stays selectable/searchable, SVG/MathJax/Mermaid content remains vector where Chromium supports it, and links are preserved instead of flattening each page to a screenshot.
@@ -49,7 +49,7 @@ For PDF export, mdExt needs a Python runtime containing PySide6 Qt WebEngine. Fr
 - `mdExt: Refresh Preview`
 - `mdExt: Open Markdown Source`
 
-The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown resource is active. VS Code's built-in Text Editor, Markdown Preview, and newer Markdown Editor/Hybrid Markdown Editor are preserved in place while mdExt opens beside them. Other third-party/custom Markdown editors are first reopened with the built-in Text Editor, then mdExt opens to the right.
+The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown resource is active. mdExt interoperates with VS Code's built-in Text Editor: if the Markdown resource is currently shown in Markdown Preview, the newer Markdown Editor/Hybrid Markdown Editor, or another custom editor, mdExt first reopens it in the built-in Text Editor and then opens the read-only mdExt preview to the right.
 
 ## Settings
 

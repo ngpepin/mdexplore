@@ -69060,6 +69060,7 @@ var require_previewCoordinator = __commonJS({
         this.pdfExporter = new PdfExporter(context);
         this.sourceScrollSuppressions = /* @__PURE__ */ new WeakMap();
         this.scrollLeaderByUri = /* @__PURE__ */ new Map();
+        this.splitOriginByUri = /* @__PURE__ */ new Map();
       }
       get configuration() {
         return vscode2.workspace.getConfiguration("mdExt");
@@ -69200,15 +69201,7 @@ var require_previewCoordinator = __commonJS({
         return editor.document.uri.toString() === uri.toString() ? editor : null;
       }
       activeMarkdownSurfaceCanRemainOpen(uri) {
-        if (this.activeBuiltInTextEditorForUri(uri)) {
-          return true;
-        }
-        const activeTab = vscode2.window.tabGroups?.activeTabGroup?.activeTab;
-        const viewType = String(activeTab?.input?.viewType || "").toLowerCase();
-        if (!viewType) {
-          return false;
-        }
-        return viewType.startsWith("vscode.markdown.") || viewType === "markdown.preview" || viewType === "markdown.editor";
+        return Boolean(this.activeBuiltInTextEditorForUri(uri));
       }
       activeEditorColumn() {
         return vscode2.window.activeTextEditor?.viewColumn ?? vscode2.window.tabGroups?.activeTabGroup?.viewColumn ?? vscode2.ViewColumn.Active;
@@ -69227,6 +69220,74 @@ var require_previewCoordinator = __commonJS({
           }
         }
         return null;
+      }
+      textTabForUri(uri) {
+        if (!uri) {
+          return null;
+        }
+        const key = uri.toString();
+        for (const group of vscode2.window.tabGroups?.all || []) {
+          for (const tab of group.tabs || []) {
+            const input = tab?.input;
+            if (input?.uri?.toString() !== key) {
+              continue;
+            }
+            if (!input?.viewType || input.viewType === "default") {
+              return tab;
+            }
+          }
+        }
+        return null;
+      }
+      activeMdExtTabForUri(uri) {
+        const tab = vscode2.window.tabGroups?.activeTabGroup?.activeTab;
+        return tab?.input?.viewType === "mdExt.markdownEditor" && tab?.input?.uri?.toString() === uri?.toString() ? tab : null;
+      }
+      splitPreviewTabForUri(uri, textTab) {
+        if (!uri) {
+          return null;
+        }
+        const groups = vscode2.window.tabGroups?.all || [];
+        const textGroup = groups.find((group) => (group.tabs || []).includes(textTab));
+        const key = uri.toString();
+        for (const group of groups) {
+          if (group === textGroup) {
+            continue;
+          }
+          for (const tab of group.tabs || []) {
+            const input = tab?.input;
+            if (input?.viewType === "mdExt.markdownEditor" && input?.uri?.toString() === key) {
+              return tab;
+            }
+          }
+        }
+        return null;
+      }
+      async collapseSplitForUri(uri, previewTab, textTab) {
+        const key = uri.toString();
+        const origin = this.splitOriginByUri.get(key);
+        this.splitOriginByUri.delete(key);
+        const splitPreviewTab = this.splitPreviewTabForUri(uri, textTab);
+        if (origin === "mdext" && textTab) {
+          if (splitPreviewTab) {
+            await vscode2.window.tabGroups.close(splitPreviewTab);
+          }
+          await vscode2.window.tabGroups.close(textTab);
+          return true;
+        }
+        if (origin === "text" && previewTab) {
+          await vscode2.window.tabGroups.close(splitPreviewTab || previewTab);
+          return true;
+        }
+        if (this.activeMdExtTabForUri(uri) && textTab) {
+          await vscode2.window.tabGroups.close(textTab);
+          return true;
+        }
+        if (this.activeBuiltInTextEditorForUri(uri) && previewTab) {
+          await vscode2.window.tabGroups.close(previewTab);
+          return true;
+        }
+        return false;
       }
       onActiveEditorChanged(editor) {
         if (!editor || editor.document.languageId !== "markdown") {
@@ -69391,14 +69452,30 @@ var require_previewCoordinator = __commonJS({
           vscode2.window.showInformationMessage("Open a Markdown document before starting mdExt preview.");
           return;
         }
+        const key = uri.toString();
         const existingPreviewTab = this.previewTabForUri(uri);
+        const existingTextTab = this.textTabForUri(uri);
+        if (existingPreviewTab && existingTextTab) {
+          if (await this.collapseSplitForUri(uri, existingPreviewTab, existingTextTab)) {
+            return;
+          }
+        }
+        if (existingPreviewTab && this.activeMdExtTabForUri(uri)) {
+          const sourceColumn = this.activeEditorColumn();
+          this.splitOriginByUri.set(key, "mdext");
+          await vscode2.commands.executeCommand("vscode.openWith", uri, "default", sourceColumn);
+          await this.openWithMdExt(uri, vscode2.ViewColumn.Beside);
+          return;
+        }
         if (existingPreviewTab) {
           await vscode2.window.tabGroups.close(existingPreviewTab);
+          this.splitOriginByUri.delete(key);
           return;
         }
         if (!this.activeMarkdownSurfaceCanRemainOpen(uri)) {
           await vscode2.commands.executeCommand("vscode.openWith", uri, "default", this.activeEditorColumn());
         }
+        this.splitOriginByUri.set(key, "text");
         await this.openWithMdExt(uri, vscode2.ViewColumn.Beside);
       }
       async openAsEditor() {
@@ -69435,25 +69512,7 @@ var require_previewCoordinator = __commonJS({
         if (!uri || !isMarkdownPath(uri.fsPath || uri.path)) {
           return;
         }
-        const configuredEditorId = this.configuredEditorIdForUri(uri);
         const viewColumn = this.activeEditorColumn();
-        if (configuredEditorId !== "mdExt.markdownEditor") {
-          await vscode2.commands.executeCommand(
-            "vscode.openWith",
-            uri,
-            configuredEditorId || "default",
-            viewColumn
-          );
-          return;
-        }
-        const markdownEditorIds = ["vscode.markdown.editor", "markdown.editor"];
-        for (const editorId of markdownEditorIds) {
-          try {
-            await vscode2.commands.executeCommand("vscode.openWith", uri, editorId, viewColumn);
-            return;
-          } catch {
-          }
-        }
         await vscode2.commands.executeCommand("vscode.openWith", uri, "default", viewColumn);
       }
       async openWithMdExt(uri, viewColumn = void 0) {

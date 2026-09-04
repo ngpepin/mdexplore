@@ -101,6 +101,7 @@ class PreviewCoordinator {
     this.pdfExporter = new PdfExporter(context);
     this.sourceScrollSuppressions = new WeakMap();
     this.scrollLeaderByUri = new Map();
+    this.splitOriginByUri = new Map();
   }
 
   get configuration() {
@@ -257,23 +258,10 @@ class PreviewCoordinator {
   }
 
   activeMarkdownSurfaceCanRemainOpen(uri) {
-    if (this.activeBuiltInTextEditorForUri(uri)) {
-      return true;
-    }
-
-    const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
-    const viewType = String(activeTab?.input?.viewType || '').toLowerCase();
-    if (!viewType) {
-      return false;
-    }
-
-    // VS Code's built-in Markdown Preview and newer Hybrid Markdown Editor are
-    // custom/editor surfaces rather than activeTextEditor instances. Preserve
-    // those surfaces and open mdExt beside them instead of replacing them with
-    // the Text Editor. Third-party custom editors still take the legacy path.
-    return viewType.startsWith('vscode.markdown.')
-      || viewType === 'markdown.preview'
-      || viewType === 'markdown.editor';
+    // mdExt deliberately interoperates only with VS Code's built-in Text Editor.
+    // Any Markdown custom editor/preview surface is reopened as text before the
+    // mdExt read-only preview is opened beside it.
+    return Boolean(this.activeBuiltInTextEditorForUri(uri));
   }
 
   activeEditorColumn() {
@@ -296,6 +284,90 @@ class PreviewCoordinator {
       }
     }
     return null;
+  }
+
+  textTabForUri(uri) {
+    if (!uri) {
+      return null;
+    }
+    const key = uri.toString();
+    for (const group of vscode.window.tabGroups?.all || []) {
+      for (const tab of group.tabs || []) {
+        const input = tab?.input;
+        if (input?.uri?.toString() !== key) {
+          continue;
+        }
+        if (!input?.viewType || input.viewType === 'default') {
+          return tab;
+        }
+      }
+    }
+    return null;
+  }
+
+  activeMdExtTabForUri(uri) {
+    const tab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+    return tab?.input?.viewType === 'mdExt.markdownEditor'
+      && tab?.input?.uri?.toString() === uri?.toString()
+      ? tab
+      : null;
+  }
+
+  splitPreviewTabForUri(uri, textTab) {
+    if (!uri) {
+      return null;
+    }
+    const groups = vscode.window.tabGroups?.all || [];
+    const textGroup = groups.find((group) => (group.tabs || []).includes(textTab));
+    const key = uri.toString();
+    for (const group of groups) {
+      if (group === textGroup) {
+        continue;
+      }
+      for (const tab of group.tabs || []) {
+        const input = tab?.input;
+        if (input?.viewType === 'mdExt.markdownEditor' && input?.uri?.toString() === key) {
+          return tab;
+        }
+      }
+    }
+    return null;
+  }
+
+  async collapseSplitForUri(uri, previewTab, textTab) {
+    const key = uri.toString();
+    const origin = this.splitOriginByUri.get(key);
+    this.splitOriginByUri.delete(key);
+
+    const splitPreviewTab = this.splitPreviewTabForUri(uri, textTab);
+
+    if (origin === 'mdext' && textTab) {
+      // A split created from mdExt keeps the original mdExt tab underneath the
+      // Text Editor in the left group. Remove the right-hand split preview first,
+      // then close the Text Editor so the original rendered mdExt tab is revealed.
+      if (splitPreviewTab) {
+        await vscode.window.tabGroups.close(splitPreviewTab);
+      }
+      await vscode.window.tabGroups.close(textTab);
+      return true;
+    }
+    if (origin === 'text' && previewTab) {
+      await vscode.window.tabGroups.close(splitPreviewTab || previewTab);
+      return true;
+    }
+
+    // If the split was not created by this coordinator instance (for example
+    // after an extension-host reload), preserve whichever side the user is
+    // actively invoking the toggle from.
+    if (this.activeMdExtTabForUri(uri) && textTab) {
+      await vscode.window.tabGroups.close(textTab);
+      return true;
+    }
+    if (this.activeBuiltInTextEditorForUri(uri) && previewTab) {
+      await vscode.window.tabGroups.close(previewTab);
+      return true;
+    }
+    return false;
   }
 
   onActiveEditorChanged(editor) {
@@ -478,9 +550,31 @@ class PreviewCoordinator {
       return;
     }
 
+    const key = uri.toString();
     const existingPreviewTab = this.previewTabForUri(uri);
+    const existingTextTab = this.textTabForUri(uri);
+
+    if (existingPreviewTab && existingTextTab) {
+      if (await this.collapseSplitForUri(uri, existingPreviewTab, existingTextTab)) {
+        return;
+      }
+    }
+
+    if (existingPreviewTab && this.activeMdExtTabForUri(uri)) {
+      // Keep the rendered mdExt tab in the original group, place the built-in
+      // Text Editor over it, and open a second mdExt preview to the right. On the
+      // next toggle collapseSplitForUri removes that temporary right preview and
+      // the Text Editor, revealing the original rendered mdExt tab again.
+      const sourceColumn = this.activeEditorColumn();
+      this.splitOriginByUri.set(key, 'mdext');
+      await vscode.commands.executeCommand('vscode.openWith', uri, 'default', sourceColumn);
+      await this.openWithMdExt(uri, vscode.ViewColumn.Beside);
+      return;
+    }
+
     if (existingPreviewTab) {
       await vscode.window.tabGroups.close(existingPreviewTab);
+      this.splitOriginByUri.delete(key);
       return;
     }
 
@@ -488,6 +582,7 @@ class PreviewCoordinator {
       await vscode.commands.executeCommand('vscode.openWith', uri, 'default', this.activeEditorColumn());
     }
 
+    this.splitOriginByUri.set(key, 'text');
     await this.openWithMdExt(uri, vscode.ViewColumn.Beside);
   }
 
@@ -532,27 +627,9 @@ class PreviewCoordinator {
       return;
     }
 
-    const configuredEditorId = this.configuredEditorIdForUri(uri);
     const viewColumn = this.activeEditorColumn();
-    if (configuredEditorId !== 'mdExt.markdownEditor') {
-      await vscode.commands.executeCommand(
-        'vscode.openWith',
-        uri,
-        configuredEditorId || 'default',
-        viewColumn,
-      );
-      return;
-    }
-
-    const markdownEditorIds = ['vscode.markdown.editor', 'markdown.editor'];
-    for (const editorId of markdownEditorIds) {
-      try {
-        await vscode.commands.executeCommand('vscode.openWith', uri, editorId, viewColumn);
-        return;
-      } catch {
-        // Try the next known Markdown Editor id. Do not use the Markdown Preview id here.
-      }
-    }
+    // Editing from mdExt always means returning to VS Code's built-in Text
+    // Editor. Do not route through Markdown Editor/Markdown Preview associations.
     await vscode.commands.executeCommand('vscode.openWith', uri, 'default', viewColumn);
   }
 
