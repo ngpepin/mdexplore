@@ -27,12 +27,13 @@ from PySide6.QtCore import (
     QMimeData,
     QPoint,
     QSize,
+    QItemSelectionModel,
     Qt,
     QThreadPool,
     QTimer,
     QUrl,
 )
-from PySide6.QtGui import QAction, QClipboard, QIcon, QKeyEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QClipboard, QColor, QIcon, QKeyEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -44,10 +45,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
+    QWidgetAction,
     QMessageBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
+    QAbstractItemView,
     QSplitter,
     QStyle,
     QStackedWidget,
@@ -127,6 +130,7 @@ _DEFAULT_HIGHLIGHT_COLORS = [
     ("Blue", "#7bb9ff"),
     ("Orange", "#f6a05f"),
     ("Purple", "#bb9df5"),
+    ("Violet", "#7D12FF"),
     ("Light Gray", "#d1d5db"),
     ("Medium Gray", "#9ca3af"),
     ("Red", "#ef7d7d"),
@@ -518,6 +522,7 @@ class PdfExploreWindow(QMainWindow):
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setItemDelegate(PdfTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedPdfModel.decorated_icon_size())
         # Match mdexplore's proven tree/delegate configuration. In particular,
@@ -4012,7 +4017,14 @@ class PdfExploreWindow(QMainWindow):
         index = self.tree.indexAt(pos)
         if not index.isValid():
             return
-        self.tree.setCurrentIndex(index)
+        selection_model = self.tree.selectionModel()
+        if selection_model.isSelected(index):
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.SelectionFlag.NoUpdate,
+            )
+        else:
+            self.tree.setCurrentIndex(index)
         path = Path(self.model.filePath(index))
 
         menu = QMenu(self)
@@ -4024,10 +4036,28 @@ class PdfExploreWindow(QMainWindow):
             make_root_action = menu.addAction("Make Root")
             menu.addSeparator()
 
+        highlight_paths: list[Path] = []
         if path.is_file() and path.suffix.lower() == ".pdf":
-            for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
-                label = f"Highlight {color_name}" if idx == 0 else f"... {color_name}"
-                action = menu.addAction(label)
+            for selected_index in selection_model.selectedRows(0):
+                selected_path = Path(self.model.filePath(selected_index))
+                if selected_path.is_file() and selected_path.suffix.lower() == ".pdf":
+                    highlight_paths.append(selected_path)
+            if path not in highlight_paths:
+                highlight_paths.append(path)
+
+            for color_name, color_value in self.HIGHLIGHT_COLORS:
+                swatch = QPixmap(36, 14)
+                swatch.fill(QColor(color_value))
+                action = QWidgetAction(menu)
+                color_button = QPushButton("Highlight with: ")
+                color_button.setIcon(QIcon(swatch))
+                color_button.setIconSize(swatch.size())
+                color_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+                color_button.setFlat(True)
+                color_button.clicked.connect(action.trigger)
+                action.setDefaultWidget(color_button)
+                menu.addAction(action)
+                action.setToolTip(f"Highlight selected file(s) {color_name.lower()}")
                 action.setData(color_value)
                 color_actions[action] = color_value
             menu.addSeparator()
@@ -4056,9 +4086,11 @@ class PdfExploreWindow(QMainWindow):
             self._copy_tree_path_to_clipboard(path)
             return
         if clear_action is not None and chosen == clear_action:
-            self.model.set_color_for_file(path, None)
+            for highlight_path in highlight_paths:
+                self.model.set_color_for_file(highlight_path, None)
         elif chosen in color_actions:
-            self.model.set_color_for_file(path, color_actions[chosen])
+            for highlight_path in highlight_paths:
+                self.model.set_color_for_file(highlight_path, color_actions[chosen])
         self.tree.viewport().update()
 
     def _copy_tree_path_to_clipboard(self, path: Path) -> None:

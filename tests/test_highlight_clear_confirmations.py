@@ -43,6 +43,9 @@ class HighlightClearConfirmationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.cleanup()
 
+    def test_violet_file_highlight_color_is_available(self) -> None:
+        self.assertIn(("Violet", "#7D12FF"), mdexplore.MdExploreWindow.HIGHLIGHT_COLORS)
+
     def test_clear_directory_highlights_requires_confirmation(self) -> None:
         with patch.object(
             QMessageBox,

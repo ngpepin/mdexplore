@@ -85,6 +85,7 @@ _DEFAULTS: dict[str, Any] = {
         ["Blue", "#7bb9ff"],
         ["Orange", "#f6a05f"],
         ["Purple", "#bb9df5"],
+        ["Violet", "#7D12FF"],
         ["Light Gray", "#d1d5db"],
         ["Medium Gray", "#9ca3af"],
         ["Red", "#ef7d7d"],

@@ -41,6 +41,7 @@ from PySide6.QtCore import (
     QPoint,
     QRect,
     QSize,
+    QItemSelectionModel,
     Qt,
     QThreadPool,
     QTimer,
@@ -80,10 +81,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
+    QWidgetAction,
     QMessageBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
+    QAbstractItemView,
     QSplitter,
     QStyle,
     QTreeView,
@@ -2050,6 +2053,7 @@ class MdExploreWindow(QMainWindow):
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setItemDelegate(MarkdownTreeItemDelegate(self.tree))
         self.tree.setIconSize(ColorizedMarkdownModel.decorated_icon_size())
         # Reduce branch indentation so gutter markers/counts sit closer to the
@@ -8535,7 +8539,14 @@ class MdExploreWindow(QMainWindow):
         index = self.tree.indexAt(pos)
         if not index.isValid():
             return
-        self.tree.setCurrentIndex(index)
+        selection_model = self.tree.selectionModel()
+        if selection_model.isSelected(index):
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.SelectionFlag.NoUpdate,
+            )
+        else:
+            self.tree.setCurrentIndex(index)
         self._update_window_title()
         path = Path(self.model.filePath(index))
 
@@ -8549,10 +8560,28 @@ class MdExploreWindow(QMainWindow):
             make_root_action = menu.addAction("Make Root")
             menu.addSeparator()
 
+        highlight_paths: list[Path] = []
         if self._safe_is_file(path) and path.suffix.lower() == ".md":
-            for idx, (color_name, color_value) in enumerate(self.HIGHLIGHT_COLORS):
-                label = f"Highlight {color_name}" if idx == 0 else f"... {color_name}"
-                action = menu.addAction(label)
+            for selected_index in selection_model.selectedRows(0):
+                selected_path = Path(self.model.filePath(selected_index))
+                if self._safe_is_file(selected_path) and selected_path.suffix.lower() == ".md":
+                    highlight_paths.append(selected_path)
+            if path not in highlight_paths:
+                highlight_paths.append(path)
+
+            for color_name, color_value in self.HIGHLIGHT_COLORS:
+                swatch = QPixmap(36, 14)
+                swatch.fill(QColor(color_value))
+                action = QWidgetAction(menu)
+                color_button = QPushButton("Highlight with: ")
+                color_button.setIcon(QIcon(swatch))
+                color_button.setIconSize(swatch.size())
+                color_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+                color_button.setFlat(True)
+                color_button.clicked.connect(action.trigger)
+                action.setDefaultWidget(color_button)
+                menu.addAction(action)
+                action.setToolTip(f"Highlight selected file(s) {color_name.lower()}")
                 action.setData(color_value)
                 color_actions[action] = color_value
 
@@ -8578,9 +8607,11 @@ class MdExploreWindow(QMainWindow):
             return
 
         if clear_action is not None and chosen == clear_action:
-            self.model.set_color_for_file(path, None)
+            for highlight_path in highlight_paths:
+                self.model.set_color_for_file(highlight_path, None)
         elif chosen in color_actions:
-            self.model.set_color_for_file(path, color_actions[chosen])
+            for highlight_path in highlight_paths:
+                self.model.set_color_for_file(highlight_path, color_actions[chosen])
         self.tree.viewport().update()
 
     def _on_tree_directory_expanded(self, index) -> None:

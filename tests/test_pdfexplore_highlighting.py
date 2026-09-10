@@ -36,6 +36,9 @@ class PdfExploreHighlightPersistenceTests(unittest.TestCase):
         QApplication.processEvents()
         self._tempdir.cleanup()
 
+    def test_violet_file_highlight_color_is_available(self) -> None:
+        self.assertIn(("Violet", "#7D12FF"), PdfExploreWindow.HIGHLIGHT_COLORS)
+
     def test_highlights_persist_to_pdfexplore_sidecar(self) -> None:
         pdf_path = self.root / "doc.pdf"
         pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")

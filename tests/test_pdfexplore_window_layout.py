@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, QEvent, QRect, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QPoint, QEvent, QRect, Qt, QUrl
 from PySide6.QtGui import (
     QBrush,
     QClipboard,
@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QPushButton,
     QSizePolicy,
     QStyle,
@@ -191,6 +192,99 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             self.window._show_tree_context_menu(pos)
 
         set_root_mock.assert_called_once_with(target)
+
+    def test_tree_extended_selection_batch_highlights_with_color_swatch(self) -> None:
+        root = Path(self._tempdir.name)
+        first = root / "first.pdf"
+        second = root / "second.pdf"
+        _create_pdf_with_text(first, "first")
+        _create_pdf_with_text(second, "second")
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        first_index = self._wait_for_tree_index(first)
+        second_index = self._wait_for_tree_index(second)
+
+        self.assertEqual(
+            self.window.tree.selectionMode(),
+            QAbstractItemView.SelectionMode.ExtendedSelection,
+        )
+        selection_model = self.window.tree.selectionModel()
+        selection_model.select(
+            first_index,
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        selection_model.select(
+            second_index,
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        selection_model.setCurrentIndex(
+            second_index,
+            QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
+        self.window.tree.scrollTo(first_index)
+        QApplication.processEvents()
+        pos = self.window.tree.visualRect(first_index).center()
+
+        class _FakeAction:
+            def __init__(self, *_args) -> None:
+                self.value = None
+                self.tooltip = ""
+                self.default_widget = None
+
+            def setData(self, value) -> None:
+                self.value = value
+
+            def setToolTip(self, text: str) -> None:
+                self.tooltip = text
+
+            def setDefaultWidget(self, widget) -> None:
+                self.default_widget = widget
+
+            def trigger(self) -> None:
+                return None
+
+        class _FakeMenu:
+            chosen_action = None
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.actions: list[_FakeAction] = []
+
+            def addAction(self, *args):
+                if len(args) == 1 and isinstance(args[0], _FakeAction):
+                    action = args[0]
+                else:
+                    action = _FakeAction(*args)
+                self.actions.append(action)
+                return action
+
+            def addSeparator(self) -> None:
+                return None
+
+            def exec(self, *_args, **_kwargs):
+                action = next(action for action in self.actions if action.value is not None)
+                _FakeMenu.chosen_action = action
+                return action
+
+        with patch("pdfexplore.app.QMenu", _FakeMenu), patch(
+            "pdfexplore.app.QWidgetAction", _FakeAction
+        ), patch.object(self.window.model, "set_color_for_file") as set_color_mock:
+            self.window._show_tree_context_menu(pos)
+
+        expected_color = self.window.HIGHLIGHT_COLORS[0][1]
+        self.assertEqual(
+            set_color_mock.call_args_list,
+            [
+                unittest.mock.call(first, expected_color),
+                unittest.mock.call(second, expected_color),
+            ],
+        )
+        self.assertIsNotNone(_FakeMenu.chosen_action)
+        button = _FakeMenu.chosen_action.default_widget
+        self.assertIsNotNone(button)
+        self.assertEqual(button.text(), "Highlight with: ")
+        self.assertFalse(button.icon().isNull())
+        self.assertEqual(button.layoutDirection(), Qt.LayoutDirection.RightToLeft)
+        self.assertIn("highlight selected file(s)", _FakeMenu.chosen_action.tooltip.lower())
 
     def test_folder_search_hit_counts_are_independent_of_selected_scope(self) -> None:
         root = Path(self._tempdir.name)
