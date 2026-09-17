@@ -61,6 +61,18 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         QApplication.processEvents()
         self._tempdir.cleanup()
 
+    def test_search_highlighting_feature_is_off_by_default(self) -> None:
+        self.assertFalse(self.window.SEARCH_HIGHLIGHTING_ENABLED)
+        labels = {
+            widget.text()
+            for widget in self.window.findChildren(type(self.window.path_label))
+        }
+        self.assertIn("Search: ", labels)
+        self.assertNotIn("Search and highlight: ", labels)
+        self.assertFalse(
+            any(kind == "highlight" for _button, kind, _name, _value in self.window._highlight_color_buttons)
+        )
+
     def test_long_path_label_does_not_raise_window_minimum_width(self) -> None:
         self.assertEqual(
             self.window.path_label.sizePolicy().horizontalPolicy(),

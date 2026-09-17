@@ -282,6 +282,9 @@ class PdfExploreWindow(QMainWindow):
     HIGHLIGHT_COLORS = _normalize_highlight_colors(
         _app_setting("highlight_colors", [])
     ) or list(_DEFAULT_HIGHLIGHT_COLORS)
+    SEARCH_HIGHLIGHTING_ENABLED = bool(
+        _app_setting("search_highlighting_enabled", False)
+    )
 
     def __init__(
         self,
@@ -700,7 +703,9 @@ class PdfExploreWindow(QMainWindow):
             self._highlight_color_buttons.append((color_btn, "copy", color_name, color_value))
             copy_buttons_layout.addWidget(color_btn)
 
-        match_label = QLabel("Search and highlight: ")
+        match_label = QLabel(
+            "Search and highlight: " if self.SEARCH_HIGHLIGHTING_ENABLED else "Search: "
+        )
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
         self.match_input.setPlaceholderText(
@@ -723,23 +728,24 @@ class PdfExploreWindow(QMainWindow):
         match_buttons_layout.setSpacing(4)
         match_buttons_layout.addWidget(match_label)
         match_buttons_layout.addWidget(self.match_input)
-        for color_name, color_value in self.HIGHLIGHT_COLORS:
-            color_btn = QPushButton("")
-            color_btn.setFixedSize(18, 18)
-            color_btn.setStyleSheet(
-                f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
-            )
-            color_btn.clicked.connect(
-                lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(
-                    c, n
+        if self.SEARCH_HIGHLIGHTING_ENABLED:
+            for color_name, color_value in self.HIGHLIGHT_COLORS:
+                color_btn = QPushButton("")
+                color_btn.setFixedSize(18, 18)
+                color_btn.setStyleSheet(
+                    f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
                 )
-            )
-            color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            color_btn.customContextMenuRequested.connect(
-                lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
-            )
-            self._highlight_color_buttons.append((color_btn, "highlight", color_name, color_value))
-            match_buttons_layout.addWidget(color_btn)
+                color_btn.clicked.connect(
+                    lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(
+                        c, n
+                    )
+                )
+                color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                color_btn.customContextMenuRequested.connect(
+                    lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
+                )
+                self._highlight_color_buttons.append((color_btn, "highlight", color_name, color_value))
+                match_buttons_layout.addWidget(color_btn)
         self._refresh_highlight_color_tooltips()
         self.tree.selectionModel().currentChanged.connect(
             lambda *_args: self._refresh_highlight_color_tooltips()

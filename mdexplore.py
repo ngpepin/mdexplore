@@ -112,6 +112,7 @@ from mdexplore_app.constants import (
     MDEXPLORE_FILE_CHANGE_WATCH_INTERVAL_MS,
     MDEXPLORE_HIGHLIGHTING_FILE_NAME,
     MDEXPLORE_HIGHLIGHT_COLORS,
+    MDEXPLORE_SEARCH_HIGHLIGHTING_ENABLED,
     MDEXPLORE_INLINE_DATA_IMAGE_POOL_THREADS,
     MDEXPLORE_MATCH_TIMER_INTERVAL_MS,
     MDEXPLORE_MAX_DOCUMENT_VIEWS,
@@ -1712,6 +1713,7 @@ class MdExploreWindow(QMainWindow):
         r"(?m)^(?P<indent>\s{0,3})\[(?P<label>[^\]]+)\]:\s*(?P<dest><[^>]+>|[^\s]+)(?P<title>\s+(?:\"[^\"]*\"|'[^']*'|\([^)]+\)))?\s*$"
     )
     HIGHLIGHT_COLORS = list(MDEXPLORE_HIGHLIGHT_COLORS)
+    SEARCH_HIGHLIGHTING_ENABLED = MDEXPLORE_SEARCH_HIGHLIGHTING_ENABLED
     DEFAULT_SEARCH_SCAN_MAX_THREADS = MDEXPLORE_DEFAULT_SEARCH_SCAN_MAX_THREADS
     SEARCH_WORKER_CHUNK_SIZE = MDEXPLORE_SEARCH_WORKER_CHUNK_SIZE
     # Keep BASE64 work parallel, but avoid saturating all cores by default.
@@ -2275,7 +2277,9 @@ class MdExploreWindow(QMainWindow):
 
         # Search UI stays in the toolbar so tree filtering/highlighting remains
         # visible while the preview reacts in the right pane.
-        match_label = QLabel("Search and highlight: ")
+        match_label = QLabel(
+            "Search and highlight: " if self.SEARCH_HIGHLIGHTING_ENABLED else "Search: "
+        )
         self.match_input = QLineEdit()
         self.match_input.setClearButtonEnabled(False)
         self.match_input.setPlaceholderText(
@@ -2298,23 +2302,24 @@ class MdExploreWindow(QMainWindow):
         match_buttons_layout.setSpacing(4)
         match_buttons_layout.addWidget(match_label)
         match_buttons_layout.addWidget(self.match_input)
-        for color_name, color_value in self.HIGHLIGHT_COLORS:
-            color_btn = QPushButton("")
-            color_btn.setFixedSize(18, 18)
-            color_btn.setStyleSheet(
-                f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
-            )
-            color_btn.clicked.connect(
-                lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(
-                    c, n
+        if self.SEARCH_HIGHLIGHTING_ENABLED:
+            for color_name, color_value in self.HIGHLIGHT_COLORS:
+                color_btn = QPushButton("")
+                color_btn.setFixedSize(18, 18)
+                color_btn.setStyleSheet(
+                    f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
                 )
-            )
-            color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            color_btn.customContextMenuRequested.connect(
-                lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
-            )
-            self._highlight_color_buttons.append((color_btn, "highlight", color_name, color_value))
-            match_buttons_layout.addWidget(color_btn)
+                color_btn.clicked.connect(
+                    lambda _checked=False, c=color_value, n=color_name: self._apply_match_highlight_color(
+                        c, n
+                    )
+                )
+                color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                color_btn.customContextMenuRequested.connect(
+                    lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
+                )
+                self._highlight_color_buttons.append((color_btn, "highlight", color_name, color_value))
+                match_buttons_layout.addWidget(color_btn)
         self._refresh_highlight_color_tooltips()
         self.tree.selectionModel().currentChanged.connect(
             lambda *_args: self._refresh_highlight_color_tooltips()

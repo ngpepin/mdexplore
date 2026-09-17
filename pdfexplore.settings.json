@@ -3,6 +3,7 @@
     "config_file_name": ".pdfexplore.cfg",
     "views_file_name": ".pdfexplore-views.json",
     "highlighting_file_name": ".pdfexplore-highlighting.json",
+    "search_highlighting_enabled": false,
     "viewer_html_relative": "vendor/pdfjs/web/viewer.html",
     "viewer_bridge_js_relative": "assets/viewer_bridge.js",
     "okular_edit_launcher": "/home/npepin/.local/share/applications-scripts/run-okular.sh",
