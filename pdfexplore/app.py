@@ -38,6 +38,9 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -45,7 +48,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
-    QWidgetAction,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -679,12 +681,10 @@ class PdfExploreWindow(QMainWindow):
         copy_current_btn.clicked.connect(self._copy_current_preview_file_to_clipboard)
         copy_buttons_layout.addWidget(copy_current_btn)
 
+        self._highlight_color_buttons = []
         for color_name, color_value in self.HIGHLIGHT_COLORS:
             color_btn = QPushButton("")
             color_btn.setFixedSize(18, 18)
-            color_btn.setToolTip(
-                f"Copy files highlighted with {color_name.lower()} to selected destination"
-            )
             color_btn.setStyleSheet(
                 f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
             )
@@ -693,6 +693,11 @@ class PdfExploreWindow(QMainWindow):
                     c, n
                 )
             )
+            color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            color_btn.customContextMenuRequested.connect(
+                lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
+            )
+            self._highlight_color_buttons.append((color_btn, "copy", color_name, color_value))
             copy_buttons_layout.addWidget(color_btn)
 
         match_label = QLabel("Search and highlight: ")
@@ -721,7 +726,6 @@ class PdfExploreWindow(QMainWindow):
         for color_name, color_value in self.HIGHLIGHT_COLORS:
             color_btn = QPushButton("")
             color_btn.setFixedSize(18, 18)
-            color_btn.setToolTip(f"Highlight current matches with {color_name.lower()}")
             color_btn.setStyleSheet(
                 f"background-color: {color_value}; border: 1px solid #4b5563; border-radius: 3px;"
             )
@@ -730,7 +734,16 @@ class PdfExploreWindow(QMainWindow):
                     c, n
                 )
             )
+            color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            color_btn.customContextMenuRequested.connect(
+                lambda _pos, c=color_value, n=color_name: self._edit_highlight_color_label(c, n)
+            )
+            self._highlight_color_buttons.append((color_btn, "highlight", color_name, color_value))
             match_buttons_layout.addWidget(color_btn)
+        self._refresh_highlight_color_tooltips()
+        self.tree.selectionModel().currentChanged.connect(
+            lambda *_args: self._refresh_highlight_color_tooltips()
+        )
 
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
@@ -4045,18 +4058,20 @@ class PdfExploreWindow(QMainWindow):
             if path not in highlight_paths:
                 highlight_paths.append(path)
 
+            from mdexplore_app.highlight_labels import highlight_label_menu_text
+
+            label_directory = path.parent
             for color_name, color_value in self.HIGHLIGHT_COLORS:
                 swatch = QPixmap(36, 14)
                 swatch.fill(QColor(color_value))
-                action = QWidgetAction(menu)
-                color_button = QPushButton("Highlight with: ")
-                color_button.setIcon(QIcon(swatch))
-                color_button.setIconSize(swatch.size())
-                color_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-                color_button.setFlat(True)
-                color_button.clicked.connect(action.trigger)
-                action.setDefaultWidget(color_button)
-                menu.addAction(action)
+                display_text = highlight_label_menu_text(
+                    label_directory,
+                    ".pdfexplore-labels.json",
+                    color_value,
+                    color_name,
+                    max_chars=25,
+                )
+                action = menu.addAction(QIcon(swatch), display_text)
                 action.setToolTip(f"Highlight selected file(s) {color_name.lower()}")
                 action.setData(color_value)
                 color_actions[action] = color_value
@@ -6750,6 +6765,118 @@ class PdfExploreWindow(QMainWindow):
             highlight_updates,
             target_directory,
         )
+
+    def _highlight_label_directory(self) -> Path:
+        try:
+            index = self.tree.currentIndex()
+            if index.isValid():
+                selected = Path(self.model.filePath(index))
+                if selected.is_file():
+                    selected = selected.parent
+                if selected.is_dir():
+                    return selected.resolve()
+        except Exception:
+            pass
+        if self.current_file is not None:
+            try:
+                return self.current_file.resolve().parent
+            except Exception:
+                pass
+        if self.last_directory_selection is not None:
+            try:
+                if self.last_directory_selection.is_dir():
+                    return self.last_directory_selection.resolve()
+            except Exception:
+                pass
+        return self.root.resolve()
+
+    def _highlight_label_for_color(self, color_value: str) -> str | None:
+        from mdexplore_app.highlight_labels import effective_highlight_label
+
+        return effective_highlight_label(
+            self._highlight_label_directory(), ".pdfexplore-labels.json", color_value
+        )
+
+    def _refresh_highlight_color_tooltips(self) -> None:
+        for button, kind, color_name, color_value in getattr(
+            self, "_highlight_color_buttons", []
+        ):
+            label = self._highlight_label_for_color(color_value)
+            if label:
+                if kind == "copy":
+                    tooltip = f"Copy files labeled {label}"
+                else:
+                    tooltip = f"Highlight current matches labeled {label}"
+            elif kind == "copy":
+                tooltip = (
+                    f"Copy files highlighted with {color_name.lower()} to selected destination"
+                )
+            else:
+                tooltip = f"Highlight current matches with {color_name.lower()}"
+            button.setToolTip(tooltip)
+
+    def _edit_highlight_color_label(self, color_value: str, color_name: str) -> None:
+        from mdexplore_app.highlight_labels import (
+            effective_highlight_label,
+            label_assignment_directory,
+            set_highlight_label,
+        )
+
+        directory = self._highlight_label_directory()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Highlight color label")
+        layout = QVBoxLayout(dialog)
+        scope_label = QLabel(dialog)
+        label_input = QLineEdit(dialog)
+        parent_checkbox = QCheckBox(
+            "Make label effective at the parent directory level", dialog
+        )
+        parent_checkbox.setEnabled(directory.parent != directory)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(scope_label)
+        layout.addWidget(label_input)
+        layout.addWidget(parent_checkbox)
+        layout.addWidget(buttons)
+
+        inherited = effective_highlight_label(
+            directory, ".pdfexplore-labels.json", color_value
+        ) or ""
+        label_input.setText(inherited)
+
+        def update_dialog_scope(use_parent: bool) -> None:
+            target = label_assignment_directory(directory, use_parent)
+            scope_label.setText(
+                f"Label for {color_name} in {target}:\n"
+                "(leave blank to remove this directory's override)"
+            )
+
+        parent_checkbox.toggled.connect(update_dialog_scope)
+        update_dialog_scope(False)
+        label_input.selectAll()
+        label_input.setFocus()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        use_parent = parent_checkbox.isChecked()
+        target = label_assignment_directory(directory, use_parent)
+        set_highlight_label(
+            target,
+            ".pdfexplore-labels.json",
+            color_value,
+            label_input.text(),
+        )
+        if use_parent and target != directory:
+            set_highlight_label(
+                directory,
+                ".pdfexplore-labels.json",
+                color_value,
+                "",
+            )
+        self._refresh_highlight_color_tooltips()
 
     def _copy_current_preview_file_to_clipboard(self) -> None:
         """Copy current preview file to clipboard."""

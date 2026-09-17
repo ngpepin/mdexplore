@@ -226,19 +226,17 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
         pos = self.window.tree.visualRect(first_index).center()
 
         class _FakeAction:
-            def __init__(self, *_args) -> None:
+            def __init__(self, *args) -> None:
                 self.value = None
                 self.tooltip = ""
-                self.default_widget = None
+                self.icon = args[0] if len(args) >= 2 else None
+                self.text = args[1] if len(args) >= 2 else (args[0] if args else "")
 
             def setData(self, value) -> None:
                 self.value = value
 
             def setToolTip(self, text: str) -> None:
                 self.tooltip = text
-
-            def setDefaultWidget(self, widget) -> None:
-                self.default_widget = widget
 
             def trigger(self) -> None:
                 return None
@@ -265,9 +263,9 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
                 _FakeMenu.chosen_action = action
                 return action
 
-        with patch("pdfexplore.app.QMenu", _FakeMenu), patch(
-            "pdfexplore.app.QWidgetAction", _FakeAction
-        ), patch.object(self.window.model, "set_color_for_file") as set_color_mock:
+        with patch("pdfexplore.app.QMenu", _FakeMenu), patch.object(
+            self.window.model, "set_color_for_file"
+        ) as set_color_mock:
             self.window._show_tree_context_menu(pos)
 
         expected_color = self.window.HIGHLIGHT_COLORS[0][1]
@@ -279,11 +277,9 @@ class PdfExploreWindowLayoutTests(unittest.TestCase):
             ],
         )
         self.assertIsNotNone(_FakeMenu.chosen_action)
-        button = _FakeMenu.chosen_action.default_widget
-        self.assertIsNotNone(button)
-        self.assertEqual(button.text(), "Highlight with: ")
-        self.assertFalse(button.icon().isNull())
-        self.assertEqual(button.layoutDirection(), Qt.LayoutDirection.RightToLeft)
+        self.assertEqual(_FakeMenu.chosen_action.text, "Yellow")
+        self.assertIsNotNone(_FakeMenu.chosen_action.icon)
+        self.assertFalse(_FakeMenu.chosen_action.icon.isNull())
         self.assertIn("highlight selected file(s)", _FakeMenu.chosen_action.tooltip.lower())
 
     def test_folder_search_hit_counts_are_independent_of_selected_scope(self) -> None:
