@@ -79,7 +79,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._symlink_icon = self._load_symlink_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
-        self._note_icon = self._build_note_icon()
+        self._note_icon = load_svg_icon("marker.svg", QColor(self.NOTE_ICON_COLOR))
         self._cached_icon = self._load_cached_icon()
         self._decorated_icon_cache: dict[tuple[object, ...], QIcon] = {}
 
@@ -118,23 +118,6 @@ class ColorizedExtensionModel(QFileSystemModel):
         except Exception:
             pass
         return self._fallback_primary_icon()
-
-    def _build_note_icon(self) -> QIcon:
-        """Return a compact green pencil icon for markdown files containing notes."""
-        size = 32
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        color = QColor(self.NOTE_ICON_COLOR)
-        pen = QPen(color, 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.drawLine(8, 24, 23, 9)
-        painter.drawLine(22, 8, 25, 11)
-        painter.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(7, 25, 11, 24)
-        painter.end()
-        return QIcon(pixmap)
 
     def _load_cached_icon(self) -> QIcon:
         """Load small marker icon used for rows with extracted text cached."""

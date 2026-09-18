@@ -1310,6 +1310,65 @@ Intro paragraph.
         self.assertIn("A few packaging ideas for Upwork projects", joined)
         self.assertIn("Specialty Pharmacy Data Architecture Review", joined)
 
+    def test_note_large_multiline_selection_prefers_live_offsets_over_cached_partial(self) -> None:
+        doc = """# Multi-line Note Fixture
+
+    ```text
+    10) A few packaging ideas for Upwork projects
+    11) You can also package these as fixed-scope offers:
+    12) Specialty Pharmacy Data Architecture Review
+    ```
+    """
+        self.load_markdown_text("multiline-note-prefers-live.md", doc)
+        selected_text = self.run_js(
+            """
+(() => {
+  const root = document.querySelector("main") || document.body;
+  if (!root) return "";
+  const startNeedle = "10) A few packaging ideas for Upwork projects";
+  const endNeedle = "12) Specialty Pharmacy Data Architecture Review";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    const startAt = value.indexOf(startNeedle);
+    const endAt = value.indexOf(endNeedle);
+    if (startAt < 0 || endAt < 0 || endAt <= startAt) continue;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, startAt);
+    range.setEnd(node, endAt + endNeedle.length);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString() || "";
+  }
+  return "";
+})();
+"""
+        )
+        self.assertIsInstance(selected_text, str)
+        live_offsets = self.request_live_selection_offsets(selected_text)
+        live_start = int(live_offsets["selectionOffsetStart"])
+        live_end = int(live_offsets["selectionOffsetEnd"])
+        partial_info = {
+            "hasSelection": True,
+            "selectedText": "10) A few",
+            "selectionOffsetStart": live_start,
+            "selectionOffsetEnd": live_start + len("10) A few"),
+        }
+        with patch.object(
+            self.window,
+            "_run_preview_note_dialog",
+            return_value=("ok", "multiline note"),
+        ):
+            self.window._add_preview_note(partial_info, selected_text)
+            self.wait_until(
+                lambda: bool(self.window._current_preview_notes), timeout_ms=6000
+            )
+        note = self.window._current_preview_notes[0]
+        self.assertEqual(int(note["start"]), live_start)
+        self.assertEqual(int(note["end"]), live_end)
+
     def test_search_marker_positions_track_scrollable_document_offsets(self) -> None:
         self.load_markdown_text("search-marker-positions.md", SEARCH_MARKER_POSITION_TEXT)
         self.window.match_input.setText("UNIQUEHIT")

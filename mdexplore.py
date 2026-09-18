@@ -9768,22 +9768,47 @@ class MdExploreWindow(QMainWindow):
         path_key = self._current_preview_path_key()
         if not path_key:
             return
-        selected = selected_text_hint
-        if isinstance(selection_info, dict) and isinstance(selection_info.get("selectedText"), str):
-            selected = selection_info.get("selectedText") or selected
-        offsets = self._selection_offsets_from_info(selection_info)
-        if offsets is not None:
-            self._create_preview_note_at_range(path_key, offsets[0], offsets[1], selected)
-            return
+        cached_offsets = self._selection_offsets_from_info(selection_info)
+        selected_text = ""
+        if isinstance(selection_info, dict):
+            raw_selected = selection_info.get("selectedText")
+            if isinstance(raw_selected, str):
+                selected_text = raw_selected
+        normalized_selected = re.sub(r"\s+", " ", selected_text).strip()
+        normalized_hint = re.sub(r"\s+", " ", selected_text_hint or "").strip()
+        best_selected_text = (
+            selected_text_hint
+            if len(normalized_hint) > len(normalized_selected)
+            else selected_text
+        )
+        line_range_hint = self._selection_text_hint_from_line_range(path_key, selection_info)
+        if len(re.sub(r"\s+", " ", line_range_hint).strip()) > len(
+            re.sub(r"\s+", " ", str(best_selected_text or "")).strip()
+        ):
+            best_selected_text = line_range_hint
+        if not str(best_selected_text or "").strip():
+            best_selected_text = selected_text or selected_text_hint
+
         def finish(info: dict) -> None:
             if self._current_preview_path_key() != path_key:
                 return
             live = self._selection_offsets_from_info(info)
-            if live is None:
-                self.statusBar().showMessage("Select text to add a note", 3000)
+            if live is not None:
+                self._create_preview_note_at_range(
+                    path_key, live[0], live[1], best_selected_text
+                )
                 return
-            self._create_preview_note_at_range(path_key, live[0], live[1], selected)
-        self._request_live_preview_selection_offsets(selected, finish)
+            if cached_offsets is not None:
+                self._create_preview_note_at_range(
+                    path_key,
+                    cached_offsets[0],
+                    cached_offsets[1],
+                    best_selected_text,
+                )
+                return
+            self.statusBar().showMessage("Select text to add a note", 3000)
+
+        self._request_live_preview_selection_offsets(best_selected_text, finish)
 
     def _delete_preview_note(self, note_id: str) -> None:
         path_key = self._current_preview_path_key()
