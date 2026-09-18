@@ -127,6 +127,7 @@ class PreviewRenderWorker(QRunnable):
             else:
                 html_doc, mtime_ns, size = result
                 self.render_metadata = {}
+
             self.signals.finished.emit(
                 self.request_id,
                 str(resolved),
@@ -357,7 +358,7 @@ def _normalize_text_highlight_entries(raw_entries: object) -> list[dict[str, int
 class TreeMarkerScanWorkerSignals(QObject):
     """Signals emitted by background tree-sidecar scan workers."""
 
-    finished = Signal(int, str, object, object, str)
+    finished = Signal(int, str, object, object, object, str)
 
 
 class TreeMarkerScanWorker(QRunnable):
@@ -369,12 +370,14 @@ class TreeMarkerScanWorker(QRunnable):
         request_id: int,
         views_file_name: str,
         highlighting_file_name: str,
+        notes_file_name: str,
     ) -> None:
         super().__init__()
         self.root = root
         self.request_id = request_id
         self.views_file_name = views_file_name
         self.highlighting_file_name = highlighting_file_name
+        self.notes_file_name = notes_file_name
         self.signals = TreeMarkerScanWorkerSignals()
 
     def run(self) -> None:
@@ -383,6 +386,7 @@ class TreeMarkerScanWorker(QRunnable):
             root_key = str(resolved_root)
             multi_view_paths: set[str] = set()
             highlighted_paths: set[str] = set()
+            noted_paths: set[str] = set()
 
             def on_walk_error(_err) -> None:
                 return
@@ -410,17 +414,27 @@ class TreeMarkerScanWorker(QRunnable):
                                 str((directory / file_name).resolve())
                             )
 
+                if self.notes_file_name in filenames:
+                    notes_by_file = self._load_directory_text_highlights(
+                        directory / self.notes_file_name
+                    )
+                    for file_name, entries in notes_by_file.items():
+                        if _normalize_text_highlight_entries(entries):
+                            noted_paths.add(str((directory / file_name).resolve()))
+
             self.signals.finished.emit(
                 self.request_id,
                 root_key,
                 multi_view_paths,
                 highlighted_paths,
+                noted_paths,
                 "",
             )
         except Exception as exc:
             self.signals.finished.emit(
                 self.request_id,
                 str(self.root),
+                set(),
                 set(),
                 set(),
                 str(exc),

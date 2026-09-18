@@ -41,6 +41,7 @@ class ColorizedExtensionModel(QFileSystemModel):
     PRIMARY_ICON_COLOR = "#bcc5d1"
     VIEWS_ICON_COLOR = "#e3e7ee"
     MARKER_ICON_COLOR = "#c8b4f6"
+    NOTE_ICON_COLOR = "#78be87"
     SYMLINK_ICON_COLOR = "#a8bcc8"
     _ICON_SIZE = 16
     _ICON_GAP = 2
@@ -68,6 +69,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._search_filename_match_paths: set[str] = set()
         self._multi_view_paths: set[str] = set()
         self._highlighted_preview_paths: set[str] = set()
+        self._noted_preview_paths: set[str] = set()
         self._cached_text_paths: set[str] = set()
         self._effective_scope_root_key: str | None = None
         self._out_of_scope_background_enabled = False
@@ -77,6 +79,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._symlink_icon = self._load_symlink_icon()
         self._views_icon = load_svg_icon("views2.svg", QColor(self.VIEWS_ICON_COLOR))
         self._marker_icon = load_svg_icon("marker.svg", QColor(self.MARKER_ICON_COLOR))
+        self._note_icon = self._build_note_icon()
         self._cached_icon = self._load_cached_icon()
         self._decorated_icon_cache: dict[tuple[object, ...], QIcon] = {}
 
@@ -115,6 +118,23 @@ class ColorizedExtensionModel(QFileSystemModel):
         except Exception:
             pass
         return self._fallback_primary_icon()
+
+    def _build_note_icon(self) -> QIcon:
+        """Return a compact green pencil icon for markdown files containing notes."""
+        size = 32
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        color = QColor(self.NOTE_ICON_COLOR)
+        pen = QPen(color, 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(8, 24, 23, 9)
+        painter.drawLine(22, 8, 25, 11)
+        painter.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(7, 25, 11, 24)
+        painter.end()
+        return QIcon(pixmap)
 
     def _load_cached_icon(self) -> QIcon:
         """Load small marker icon used for rows with extracted text cached."""
@@ -194,12 +214,14 @@ class ColorizedExtensionModel(QFileSystemModel):
                     return self._decorated_symlink_icon(search_hit_count)
                 has_multi_view = path_key in self._multi_view_paths
                 has_persistent_highlight = path_key in self._highlighted_preview_paths
+                has_note = path_key in self._noted_preview_paths
                 has_cached_text = path_key in self._cached_text_paths
                 return self._decorated_primary_icon(
                     has_multi_view,
                     has_persistent_highlight,
                     has_cached_text,
                     search_hit_count,
+                    has_note=has_note,
                 )
         if role == Qt.ItemDataRole.ForegroundRole:
             info = self.fileInfo(index)
@@ -547,6 +569,19 @@ class ColorizedExtensionModel(QFileSystemModel):
         self._highlighted_preview_paths.clear()
         self._decorated_icon_cache.clear()
 
+    def set_note_path_keys(self, path_keys: set[str]) -> None:
+        next_paths = {str(path_key) for path_key in path_keys if isinstance(path_key, str)}
+        if next_paths == self._noted_preview_paths:
+            return
+        self._noted_preview_paths = next_paths
+        self._decorated_icon_cache.clear()
+
+    def clear_note_paths(self) -> None:
+        if not self._noted_preview_paths:
+            return
+        self._noted_preview_paths.clear()
+        self._decorated_icon_cache.clear()
+
     def set_cached_path_keys(self, path_keys: set[str]) -> bool:
         next_paths = {
             str(path_key)
@@ -746,6 +781,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         has_persistent_highlight: bool,
         has_cached_text: bool,
         search_hit_count: int,
+        has_note: bool = False,
     ) -> QSize:
         search_count_text = self._search_count_display_text(search_hit_count)
         widths: list[int] = []
@@ -753,7 +789,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             widths.append(self._SEARCH_SLOT_WIDTH)
         if has_cached_text and not self._cached_icon.isNull():
             widths.append(self._CACHED_ICON_SIZE)
-        if has_persistent_highlight:
+        if has_persistent_highlight or has_note:
             widths.append(self._MARKER_ICON_SIZE)
         if has_multi_view:
             widths.append(self._VIEWS_ICON_SIZE)
@@ -781,12 +817,14 @@ class ColorizedExtensionModel(QFileSystemModel):
             )
         has_multi_view = path_key in self._multi_view_paths
         has_persistent_highlight = path_key in self._highlighted_preview_paths
+        has_note = path_key in self._noted_preview_paths
         has_cached_text = path_key in self._cached_text_paths
         return self.decoration_size_for_state(
             has_multi_view,
             has_persistent_highlight,
             has_cached_text,
             search_hit_count,
+            has_note=has_note,
         )
 
     def _decorated_primary_icon(
@@ -795,6 +833,7 @@ class ColorizedExtensionModel(QFileSystemModel):
         has_persistent_highlight: bool,
         has_cached_text: bool,
         search_hit_count: int,
+        has_note: bool = False,
     ) -> QIcon:
         search_count_text = self._search_count_display_text(search_hit_count)
         show_cached_icon = has_cached_text and not self._cached_icon.isNull()
@@ -802,6 +841,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             "primary",
             has_multi_view,
             has_persistent_highlight,
+            has_note,
             show_cached_icon,
             search_count_text,
         )
@@ -814,6 +854,7 @@ class ColorizedExtensionModel(QFileSystemModel):
             has_persistent_highlight,
             show_cached_icon,
             search_hit_count,
+            has_note=has_note,
         )
         total_width = self.max_decoration_width()
         total_height = self._ICON_SIZE
@@ -917,8 +958,9 @@ class ColorizedExtensionModel(QFileSystemModel):
             painter.drawPixmap(cursor_x, cached_y, cached_pixmap)
             cursor_x += self._CACHED_ICON_SIZE + self._ICON_GAP
 
-        if has_persistent_highlight and not self._marker_icon.isNull():
-            marker_pixmap = self._marker_icon.pixmap(
+        marker_icon = self._note_icon if has_note else self._marker_icon
+        if (has_note or has_persistent_highlight) and not marker_icon.isNull():
+            marker_pixmap = marker_icon.pixmap(
                 self._MARKER_ICON_SIZE, self._MARKER_ICON_SIZE
             )
             marker_y = max(0, (self._ICON_SIZE - self._MARKER_ICON_SIZE) // 2)

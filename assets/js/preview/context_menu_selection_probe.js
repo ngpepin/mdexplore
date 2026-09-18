@@ -380,6 +380,7 @@
   const highlightEntries = normalizeHighlightEntries(
     window.__mdexplorePersistentHighlights || []
   );
+  const noteEntries = Array.isArray(window.__mdexplorePersistentNotes) ? window.__mdexplorePersistentNotes : [];
   const fallbackClickX =
     typeof window.__mdexploreLastContextClientX === "number" &&
     Number.isFinite(window.__mdexploreLastContextClientX)
@@ -408,6 +409,9 @@
         clickedHighlight.getAttribute("data-mdexplore-persistent-highlight-id") || ""
       )
     : fallbackClickedHighlightId;
+  let clickedNoteId = "";
+  const clickedNote = clickedNode && clickedNode.closest ? clickedNode.closest('span[data-mdexplore-persistent-note="1"]') : null;
+  if (clickedNote) clickedNoteId = String(clickedNote.getAttribute("data-mdexplore-persistent-note-id") || "").trim();
   let clickedOffset = clickTextOffset(__CLICK_X__, __CLICK_Y__);
   if (
     clickedOffset === null &&
@@ -425,6 +429,10 @@
       0,
       Math.floor(window.__mdexploreLastPersistentHighlightOffset)
     );
+  }
+  if (!clickedNoteId && Number.isFinite(clickedOffset)) {
+    const note = noteEntries.find((item) => item && Number(item.start) <= clickedOffset && clickedOffset <= Number(item.end));
+    if (note && typeof note.id === "string") clickedNoteId = note.id.trim();
   }
   let selectionOffsetStart = null;
   let selectionOffsetEnd = null;
@@ -460,6 +468,7 @@
         selectionHasUnhighlightedPart,
         selectedHighlightIds,
         clickedHighlightId,
+        clickedNoteId,
         clickedOffset,
       };
     }
@@ -477,6 +486,7 @@
         selectionHasUnhighlightedPart,
         selectedHighlightIds,
         clickedHighlightId,
+        clickedNoteId,
         clickedOffset,
       };
     }
@@ -520,6 +530,7 @@
       selectionHasUnhighlightedPart,
       selectedHighlightIds,
       clickedHighlightId,
+      clickedNoteId,
       clickedOffset,
     };
   }
@@ -533,6 +544,7 @@
     selectionHasUnhighlightedPart: hasSelection ? true : false,
     selectedHighlightIds,
     clickedHighlightId,
+    clickedNoteId,
     clickedOffset,
   };
 })();

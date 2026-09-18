@@ -5,14 +5,19 @@
   const importantHighlightTextColor = __IMPORTANT_TEXT_COLOR__;
   const highlightMarkerColor = __MARKER_COLOR__;
   const importantHighlightMarkerColor = __IMPORTANT_MARKER_COLOR__;
+  const noteColor = __NOTE_COLOR__;
+  const noteMarkerColor = __NOTE_MARKER_COLOR__;
+  const noteKind = "__NOTE_KIND__";
   const previewOffsetSpace = "__OFFSET_SPACE_PREVIEW__";
   const sourceOffsetSpace = "__OFFSET_SPACE_SOURCE__";
   window.__mdexplorePersistentHighlightMarkerColor = highlightMarkerColor;
   window.__mdexplorePersistentHighlightImportantMarkerColor =
     importantHighlightMarkerColor;
+  window.__mdexplorePersistentNoteMarkerColor = noteMarkerColor;
   const root = document.querySelector("main") || document.body;
   if (!root) {
     window.__mdexplorePersistentHighlights = [];
+    window.__mdexplorePersistentNotes = [];
     return { applied: 0, entries: 0 };
   }
 
@@ -331,7 +336,7 @@
     return merged;
   }
 
-  for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]'))) {
+  for (const mark of Array.from(root.querySelectorAll('span[data-mdexplore-persistent-highlight="1"], span[data-mdexplore-persistent-note="1"]'))) {
     const parent = mark.parentNode;
     if (!parent) continue;
     parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
@@ -358,10 +363,8 @@
       const id = typeof item.id === "string" ? item.id.trim() : "";
       const start = Number(item.start);
       const end = Number(item.end);
-      const kind =
-        String(item.kind || "__NORMAL_KIND__").trim().toLowerCase() === "__IMPORTANT_KIND__"
-          ? "__IMPORTANT_KIND__"
-          : "__NORMAL_KIND__";
+      const rawKind = String(item.kind || "__NORMAL_KIND__").trim().toLowerCase();
+      const kind = rawKind === noteKind ? noteKind : (rawKind === "__IMPORTANT_KIND__" ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__");
       const offsetSpace = String(
         item.offset_space || item.offsetSpace || ""
       ).trim().toLowerCase();
@@ -403,7 +406,7 @@
         continue;
       }
       const prev = merged[merged.length - 1];
-      if (item.kind === prev.kind && item.start <= prev.end) {
+      if (item.kind !== noteKind && item.kind === prev.kind && item.start <= prev.end) {
         prev.end = Math.max(prev.end, item.end);
       } else {
         merged.push(item);
@@ -547,7 +550,8 @@
   const resolvedEntries = normalizeEntries(
     entries.map((entry) => resolveLegacyEntry(entry, compactIndex))
   );
-  window.__mdexplorePersistentHighlights = resolvedEntries;
+  window.__mdexplorePersistentHighlights = resolvedEntries.filter((entry) => entry.kind !== noteKind);
+  window.__mdexplorePersistentNotes = resolvedEntries.filter((entry) => entry.kind === noteKind);
   if (!resolvedEntries.length) {
     if (typeof window.__mdexploreRefreshPersistentHighlightMarkers === "function") {
       window.__mdexploreRefreshPersistentHighlightMarkers();
@@ -601,34 +605,35 @@
       }
 
       nodeChanged = true;
-      localRanges.sort((a, b) => a.start - b.start);
+      const boundaries = new Set([0, piece.text.length]);
+      for (const range of localRanges) { boundaries.add(range.start); boundaries.add(range.end); }
+      const points = Array.from(boundaries).sort((x, y) => x - y);
       let cursor = 0;
-      for (const range of localRanges) {
-        if (range.start > cursor) {
-          fragment.appendChild(
-            document.createTextNode(piece.text.slice(cursor, range.start))
-          );
-        }
+      for (let i = 0; i < points.length - 1; i += 1) {
+        const segStart = points[i], segEnd = points[i + 1];
+        if (segEnd <= segStart) continue;
+        if (segStart > cursor) fragment.appendChild(document.createTextNode(piece.text.slice(cursor, segStart)));
+        const active = localRanges.filter((range) => range.start < segEnd && range.end > segStart);
+        if (!active.length) { fragment.appendChild(document.createTextNode(piece.text.slice(segStart, segEnd))); cursor = segEnd; continue; }
+        const range = active.find((item) => item.kind === noteKind) || active.find((item) => item.kind === "__IMPORTANT_KIND__") || active[0];
         const mark = document.createElement("span");
-        mark.setAttribute("data-mdexplore-persistent-highlight", "1");
-        mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
-        mark.setAttribute(
-          "data-mdexplore-persistent-highlight-kind",
-          range.kind === "__IMPORTANT_KIND__" ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__"
-        );
+        const isNote = range.kind === noteKind;
         const isImportant = range.kind === "__IMPORTANT_KIND__";
-        mark.style.backgroundColor = isImportant
-          ? importantHighlightColor
-          : highlightColor;
-        mark.style.color = isImportant ? importantHighlightTextColor : "";
-        mark.style.borderRadius = "2px";
-        mark.style.padding = "0 1px";
-        mark.style.boxDecorationBreak = "clone";
-        mark.style.webkitBoxDecorationBreak = "clone";
-        mark.textContent = piece.text.slice(range.start, range.end);
-        fragment.appendChild(mark);
-        cursor = range.end;
-        applied += 1;
+        if (isNote) {
+          mark.setAttribute("data-mdexplore-persistent-note", "1");
+          mark.setAttribute("data-mdexplore-persistent-note-id", range.id);
+          mark.style.backgroundColor = noteColor;
+          mark.style.cursor = "pointer";
+          mark.ondblclick = (event) => { event.preventDefault(); event.stopPropagation(); window.location.href = `mdexplore://note/${encodeURIComponent(range.id)}`; };
+        } else {
+          mark.setAttribute("data-mdexplore-persistent-highlight", "1");
+          mark.setAttribute("data-mdexplore-persistent-highlight-id", range.id);
+          mark.setAttribute("data-mdexplore-persistent-highlight-kind", isImportant ? "__IMPORTANT_KIND__" : "__NORMAL_KIND__");
+          mark.style.backgroundColor = isImportant ? importantHighlightColor : highlightColor;
+          mark.style.color = isImportant ? importantHighlightTextColor : "";
+        }
+        mark.style.borderRadius = "2px"; mark.style.padding = "0 1px"; mark.style.boxDecorationBreak = "clone"; mark.style.webkitBoxDecorationBreak = "clone";
+        mark.textContent = piece.text.slice(segStart, segEnd); fragment.appendChild(mark); cursor = segEnd; applied += 1;
       }
       if (cursor < piece.text.length) {
         fragment.appendChild(document.createTextNode(piece.text.slice(cursor)));

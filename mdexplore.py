@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -111,6 +112,7 @@ from mdexplore_app.constants import (
     MDEXPLORE_DIAGRAM_STATE_CAPTURE_INTERVAL_MS,
     MDEXPLORE_FILE_CHANGE_WATCH_INTERVAL_MS,
     MDEXPLORE_HIGHLIGHTING_FILE_NAME,
+    MDEXPLORE_NOTES_FILE_NAME,
     MDEXPLORE_HIGHLIGHT_COLORS,
     MDEXPLORE_SEARCH_HIGHLIGHTING_ENABLED,
     MDEXPLORE_INLINE_DATA_IMAGE_POOL_THREADS,
@@ -148,11 +150,14 @@ from mdexplore_app.constants import (
     PLANTUML_RESTORE_BATCH_SIZE,
     PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
     PREVIEW_HIGHLIGHT_KIND_NORMAL,
+    PREVIEW_HIGHLIGHT_KIND_NOTE,
     PREVIEW_PERSISTENT_HIGHLIGHT_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_TEXT_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR,
+    PREVIEW_PERSISTENT_NOTE_COLOR,
+    PREVIEW_PERSISTENT_NOTE_MARKER_COLOR,
     PREVIEW_SETHTML_MAX_BYTES,
     PREVIEW_ZOOM_MAX,
     PREVIEW_ZOOM_MIN,
@@ -1651,6 +1656,7 @@ class PreviewPage(QWebEnginePage):
 
     namedViewRequested = Signal(int)
     relativeMarkdownLinkRequested = Signal(str)
+    noteRequested = Signal(str)
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # type: ignore[override]
         if isinstance(url, QUrl) and url.scheme() == "mdexplore":
@@ -1666,6 +1672,11 @@ class PreviewPage(QWebEnginePage):
                             requested_view_id
                         ),
                     )
+                return False
+            if url.host() == "note":
+                note_id = urllib.parse.unquote(str(url.path() or "").lstrip("/"))
+                if note_id:
+                    QTimer.singleShot(0, lambda value=note_id: self.noteRequested.emit(value))
                 return False
             if url.host() == "open-relative":
                 encoded_target = str(url.path() or "").lstrip("/")
@@ -1694,10 +1705,12 @@ class MdExploreWindow(QMainWindow):
     CONFIG_LOCK_STALE_SECONDS = MDEXPLORE_CONFIG_LOCK_STALE_SECONDS
     VIEWS_FILE_NAME = MDEXPLORE_VIEWS_FILE_NAME
     HIGHLIGHTING_FILE_NAME = MDEXPLORE_HIGHLIGHTING_FILE_NAME
+    NOTES_FILE_NAME = MDEXPLORE_NOTES_FILE_NAME
     CONFIG_DEFAULT_ROOT_KEY = MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY
     CONFIG_RECENT_ROOTS_KEY = MDEXPLORE_CONFIG_RECENT_ROOTS_KEY
     CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY = MDEXPLORE_CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
+    PREVIEW_NOTE_COLOR = PREVIEW_PERSISTENT_NOTE_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
     DEBUG_LOG_FILE_NAME = MDEXPLORE_DEBUG_LOG_FILE_NAME
     DEBUG_LOG_MAX_LINES = MDEXPLORE_DEBUG_LOG_MAX_LINES
@@ -1906,6 +1919,7 @@ class MdExploreWindow(QMainWindow):
         # the whole tree on every selection.
         self._tree_multi_view_marker_paths: set[str] = set()
         self._tree_highlight_marker_paths: set[str] = set()
+        self._tree_note_marker_paths: set[str] = set()
         self._tree_marker_cache_root_key: str | None = None
         self._document_line_counts: dict[str, int] = {}
         self._current_document_total_lines = 1
@@ -1914,7 +1928,10 @@ class MdExploreWindow(QMainWindow):
         self._preview_feature_flags_by_key: dict[str, tuple[bool, bool, bool]] = {}
         self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
         self._current_preview_text_highlights: list[dict[str, int | str]] = []
+        self._persisted_notes_by_dir: dict[str, dict[str, list[dict]]] = {}
+        self._current_preview_notes: list[dict[str, int | str]] = []
         self._next_text_highlight_id = 1
+        self._next_preview_note_id = 1
         self._last_named_view_marker_payload_key: str | None = None
         self._last_named_view_marker_payload_json: str | None = None
         self._debug_enabled = bool(debug_mode)
@@ -2106,6 +2123,7 @@ class MdExploreWindow(QMainWindow):
         self._preview_page.relativeMarkdownLinkRequested.connect(
             self._on_preview_relative_markdown_link_requested
         )
+        self._preview_page.noteRequested.connect(self._on_preview_note_requested)
 
         self.view_tabs = ViewTabBar()
         self.view_tabs.setDocumentMode(True)
@@ -3413,6 +3431,57 @@ class MdExploreWindow(QMainWindow):
         """Return the sidecar JSON path that stores preview text highlights."""
         return directory / self.HIGHLIGHTING_FILE_NAME
 
+    def _notes_file_path(self, directory: Path) -> Path:
+        """Return the sidecar JSON path that stores preview notes."""
+        return directory / self.NOTES_FILE_NAME
+
+    @staticmethod
+    def _normalize_preview_note_entries(raw_entries) -> list[dict[str, int | str]]:
+        """Sanitize persistent preview note ranges without merging distinct notes."""
+        if not isinstance(raw_entries, list):
+            return []
+        sanitized: list[dict[str, int | str]] = []
+        seen_ids: set[str] = set()
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            note_id = raw_id.strip()
+            if note_id in seen_ids:
+                continue
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            note_text = item.get("text", "")
+            if not isinstance(note_text, str):
+                note_text = str(note_text or "")
+            entry: dict[str, int | str] = {
+                "id": note_id,
+                "start": start,
+                "end": end,
+                "text": note_text,
+                "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
+            }
+            raw_anchor_text = item.get("anchor_text")
+            if isinstance(raw_anchor_text, str):
+                anchor_text = re.sub(r"\s+", " ", raw_anchor_text).strip()
+                if len(anchor_text) >= 3:
+                    entry["anchor_text"] = anchor_text[:480]
+            raw_offset_space = item.get("offset_space")
+            offset_space = str(raw_offset_space).strip().lower() if isinstance(raw_offset_space, str) else ""
+            if offset_space in {PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW, PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE}:
+                entry["offset_space"] = offset_space
+            sanitized.append(entry)
+            seen_ids.add(note_id)
+        sanitized.sort(key=lambda entry: (int(entry["start"]), int(entry["end"]), str(entry["id"])))
+        return sanitized
+
     @staticmethod
     def _normalize_text_highlight_entries(raw_entries) -> list[dict[str, int | str]]:
         """Sanitize and merge persistent text-highlight ranges by kind."""
@@ -3987,6 +4056,84 @@ class MdExploreWindow(QMainWindow):
             except Exception:
                 target_path = directory / file_name
             target_key = self._path_key(target_path)
+            root_key = self._path_key(root)
+            if target_key == root_key or target_key.startswith(root_key + os.sep):
+                self._refresh_tree_multi_view_markers(changed_path_key=target_key)
+
+    def _new_preview_note_id(self) -> str:
+        token = self._next_preview_note_id
+        self._next_preview_note_id += 1
+        return f"n{int(time.time() * 1000):x}-{token:x}"
+
+    def _directory_notes(self, directory: Path) -> dict[str, list[dict]]:
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        key = str(resolved_directory)
+        cached = self._persisted_notes_by_dir.get(key)
+        if cached is not None:
+            return cached
+        notes: dict[str, list[dict]] = {}
+        try:
+            raw = json.loads(self._notes_file_path(resolved_directory).read_text(encoding="utf-8"))
+        except Exception:
+            raw = None
+        file_map = raw.get("files") if isinstance(raw, dict) else raw
+        if isinstance(file_map, dict):
+            for raw_name, entries in file_map.items():
+                if not isinstance(raw_name, str):
+                    continue
+                name = Path(raw_name).name
+                if name.lower().endswith(".md"):
+                    normalized = self._normalize_preview_note_entries(entries)
+                    if normalized:
+                        notes[name] = normalized
+        self._persisted_notes_by_dir[key] = notes
+        return notes
+
+    def _save_directory_notes(self, directory: Path) -> None:
+        try:
+            resolved_directory = directory.resolve()
+        except Exception:
+            resolved_directory = directory
+        key = str(resolved_directory)
+        notes = self._persisted_notes_by_dir.get(key, {})
+        path = self._notes_file_path(resolved_directory)
+        if not notes:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return
+        payload = {"files": notes}
+        try:
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception as exc:
+            self._debug_log(f"note-save failed path={path} error={exc}")
+
+    def _load_notes_for_path_key(self, path_key: str | None) -> list[dict]:
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return []
+        directory, file_name = resolved
+        return self._clone_json_compatible_list(self._directory_notes(directory).get(file_name, []))
+
+    def _persist_notes_for_path_key(self, path_key: str | None, entries: list[dict]) -> None:
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return
+        directory, file_name = resolved
+        normalized = self._normalize_preview_note_entries(entries)
+        notes = self._directory_notes(directory)
+        if normalized:
+            notes[file_name] = self._clone_json_compatible_list(normalized)
+        else:
+            notes.pop(file_name, None)
+        self._save_directory_notes(directory)
+        root = getattr(self, "root", None)
+        if isinstance(root, Path):
+            target_key = self._path_key(directory / file_name)
             root_key = self._path_key(root)
             if target_key == root_key or target_key.startswith(root_key + os.sep):
                 self._refresh_tree_multi_view_markers(changed_path_key=target_key)
@@ -7100,6 +7247,7 @@ class MdExploreWindow(QMainWindow):
         self._pending_preview_search_terms = []
         self._pending_preview_search_close_groups = []
         self._current_preview_text_highlights = []
+        self._current_preview_notes = []
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)
         self.tree.clearSelection()
@@ -7161,7 +7309,7 @@ class MdExploreWindow(QMainWindow):
         )
         has_client_renderers = has_math or has_mermaid
         has_ready_plantuml = self._has_ready_plantuml_for_key(current_key)
-        has_text_highlights = self._has_persistent_preview_highlights_for_key(
+        has_text_highlights = bool(self._current_preview_notes) or self._has_persistent_preview_highlights_for_key(
             current_key
         )
         has_named_view_markers = self._has_named_view_markers_for_key(current_key)
@@ -7728,35 +7876,23 @@ class MdExploreWindow(QMainWindow):
             active_for_request += 1
 
     def _merge_live_tree_marker_state(
-        self,
-        multi_view_paths: set[str] | None = None,
-        highlighted_paths: set[str] | None = None,
-        *,
-        root_key: str | None = None,
-    ) -> tuple[set[str], set[str]]:
-        """Merge worker/disk marker sets with current in-memory document state."""
+        self, multi_view_paths: set[str] | None = None, highlighted_paths: set[str] | None = None, noted_paths: set[str] | None = None, *, root_key: str | None = None
+    ) -> tuple[set[str], set[str], set[str]]:
         merged_multi_view = set(multi_view_paths or ())
         merged_highlighted = set(highlighted_paths or ())
-        if root_key is None:
-            root = getattr(self, "root", None)
-            if isinstance(root, Path):
-                root_key = self._path_key(root)
-
+        merged_noted = set(noted_paths or ())
+        if root_key is None and isinstance(getattr(self, "root", None), Path):
+            root_key = self._path_key(self.root)
         for raw_path_key, session in self._document_view_sessions.items():
-            if self._session_has_multiple_views(session) and self._is_path_key_under_root(
-                raw_path_key, root_key
-            ):
+            if self._session_has_multiple_views(session) and self._is_path_key_under_root(raw_path_key, root_key):
                 merged_multi_view.add(raw_path_key)
-
-        current_path_key = self._current_preview_path_key()
-        if (
-            current_path_key
-            and self.view_tabs.count() > 1
-            and self._is_path_key_under_root(current_path_key, root_key)
-        ):
-            merged_multi_view.add(current_path_key)
-
-        return merged_multi_view, merged_highlighted
+        current = self._current_preview_path_key()
+        if current and self._is_path_key_under_root(current, root_key):
+            if self.view_tabs.count() > 1:
+                merged_multi_view.add(current)
+            if self._normalize_preview_note_entries(self._current_preview_notes):
+                merged_noted.add(current)
+        return merged_multi_view, merged_highlighted, merged_noted
 
     def _start_tree_marker_scan(self) -> None:
         """Scan the current root for tree badge sidecars in the background."""
@@ -7764,6 +7900,7 @@ class MdExploreWindow(QMainWindow):
         if not isinstance(root, Path) or not root.exists():
             self._tree_multi_view_marker_paths.clear()
             self._tree_highlight_marker_paths.clear()
+            self._tree_note_marker_paths.clear()
             self._tree_marker_cache_root_key = None
             self._sync_tree_multi_view_markers_to_model()
             return
@@ -7776,6 +7913,7 @@ class MdExploreWindow(QMainWindow):
             request_id,
             self.VIEWS_FILE_NAME,
             self.HIGHLIGHTING_FILE_NAME,
+            self.NOTES_FILE_NAME,
         )
         self._active_tree_marker_scan_workers.add(worker)
         worker.signals.finished.connect(self._on_tree_marker_scan_finished)
@@ -7787,6 +7925,7 @@ class MdExploreWindow(QMainWindow):
         root_key: str,
         multi_view_paths,
         highlighted_paths,
+        noted_paths,
         error_text: str,
     ) -> None:
         """Apply finished tree-sidecar scan if it still matches the current root."""
@@ -7825,13 +7964,13 @@ class MdExploreWindow(QMainWindow):
             for path_key in (highlighted_paths or ())
             if isinstance(path_key, str)
         }
-        next_multi_view_paths, next_highlighted_paths = self._merge_live_tree_marker_state(
-            next_multi_view_paths,
-            next_highlighted_paths,
-            root_key=current_root_key,
+        next_noted_paths = {str(path_key) for path_key in (noted_paths or ()) if isinstance(path_key, str)}
+        next_multi_view_paths, next_highlighted_paths, next_noted_paths = self._merge_live_tree_marker_state(
+            next_multi_view_paths, next_highlighted_paths, next_noted_paths, root_key=current_root_key
         )
         self._tree_multi_view_marker_paths = next_multi_view_paths
         self._tree_highlight_marker_paths = next_highlighted_paths
+        self._tree_note_marker_paths = next_noted_paths
         self._tree_marker_cache_root_key = current_root_key
         dirty_paths = [
             path_key
@@ -8195,11 +8334,13 @@ class MdExploreWindow(QMainWindow):
             self._tree_multi_view_marker_paths != self.model._multi_view_paths
             or self._tree_highlight_marker_paths
             != self.model._highlighted_preview_paths
+            or self._tree_note_marker_paths != self.model._noted_preview_paths
         )
         self.model.set_multi_view_path_keys(self._tree_multi_view_marker_paths)
         self.model.set_persistent_highlight_path_keys(
             self._tree_highlight_marker_paths
         )
+        self.model.set_note_path_keys(self._tree_note_marker_paths)
         if should_update and hasattr(self, "tree"):
             self.tree.viewport().update()
 
@@ -8217,6 +8358,7 @@ class MdExploreWindow(QMainWindow):
         if not self._is_path_key_under_root(path_key, root_key):
             self._tree_multi_view_marker_paths.discard(path_key)
             self._tree_highlight_marker_paths.discard(path_key)
+            self._tree_note_marker_paths.discard(path_key)
             return
 
         has_multi_view = self._session_has_multiple_views(
@@ -8240,12 +8382,18 @@ class MdExploreWindow(QMainWindow):
         else:
             self._tree_highlight_marker_paths.discard(path_key)
 
+        if self._load_notes_for_path_key(path_key):
+            self._tree_note_marker_paths.add(path_key)
+        else:
+            self._tree_note_marker_paths.discard(path_key)
+
     def _rebuild_tree_multi_view_marker_cache(self) -> None:
         """Rebuild root-scoped tree badges with one recursive scan per root."""
         root = getattr(self, "root", None)
         if not isinstance(root, Path) or not root.exists():
             self._tree_multi_view_marker_paths.clear()
             self._tree_highlight_marker_paths.clear()
+            self._tree_note_marker_paths.clear()
             self._tree_marker_cache_root_key = None
             self._sync_tree_multi_view_markers_to_model()
             return
@@ -8253,6 +8401,7 @@ class MdExploreWindow(QMainWindow):
         root_key = self._path_key(root)
         marked_paths: set[str] = set()
         highlighted_paths: set[str] = set()
+        noted_paths: set[str] = set()
 
         for raw_path_key, session in self._document_view_sessions.items():
             if self._session_has_multiple_views(session) and self._is_path_key_under_root(
@@ -8287,8 +8436,15 @@ class MdExploreWindow(QMainWindow):
                     if self._normalize_text_highlight_entries(entries):
                         highlighted_paths.add(self._path_key(directory / file_name))
 
+            if self.NOTES_FILE_NAME in filenames:
+                notes_by_file = self._directory_notes(directory)
+                for file_name, entries in notes_by_file.items():
+                    if self._normalize_preview_note_entries(entries):
+                        noted_paths.add(self._path_key(directory / file_name))
+
         self._tree_multi_view_marker_paths = marked_paths
         self._tree_highlight_marker_paths = highlighted_paths
+        self._tree_note_marker_paths = noted_paths
         self._tree_marker_cache_root_key = root_key
         self._sync_tree_multi_view_markers_to_model()
 
@@ -8731,14 +8887,17 @@ class MdExploreWindow(QMainWindow):
         click_y = int(pos.y())
         # Show the menu immediately. For custom actions, run an async probe
         # after the user picks the action so native image actions remain intact.
+        if self._current_preview_notes:
+            self._request_preview_context_menu_selection_info(
+                click_x, click_y, selected_text_hint,
+                lambda info: self._show_preview_context_menu_with_cached_selection(
+                    pos, info if isinstance(info, dict) else {}, selected_text_hint, standard_menu,
+                    click_x=click_x, click_y=click_y, image_media_url=image_media_url
+                ),
+            )
+            return
         self._show_preview_context_menu_with_cached_selection(
-            pos,
-            {},
-            selected_text_hint,
-            standard_menu,
-            click_x=click_x,
-            click_y=click_y,
-            image_media_url=image_media_url,
+            pos, {}, selected_text_hint, standard_menu, click_x=click_x, click_y=click_y, image_media_url=image_media_url
         )
 
     @staticmethod
@@ -8976,6 +9135,9 @@ class MdExploreWindow(QMainWindow):
             isinstance(selection_info, dict)
             and selection_info.get("selectionHasUnhighlightedPart")
         )
+        clicked_note_id = ""
+        if isinstance(selection_info, dict) and isinstance(selection_info.get("clickedNoteId"), str):
+            clicked_note_id = selection_info.get("clickedNoteId", "").strip()
         clicked_highlight_id = ""
         if isinstance(selection_info, dict):
             raw_clicked = selection_info.get("clickedHighlightId")
@@ -8999,11 +9161,14 @@ class MdExploreWindow(QMainWindow):
         highlight_action: QAction | None = None
         highlight_important_action: QAction | None = None
         remove_highlight_action: QAction | None = None
+        add_note_action: QAction | None = None
+        delete_note_action: QAction | None = None
         # Always allow creating/extending highlight from any non-empty selection,
         # even if metadata probing fails on a specific right-click event.
         if has_selection:
             highlight_action = menu.addAction("Highlight")
             highlight_important_action = menu.addAction("Highlight Important")
+            add_note_action = menu.addAction("Add Note")
         if (
             has_selection
             or clicked_highlight_id
@@ -9011,10 +9176,14 @@ class MdExploreWindow(QMainWindow):
             or has_existing_persistent_highlights
         ):
             remove_highlight_action = menu.addAction("Remove Highlight")
+        if clicked_note_id:
+            delete_note_action = menu.addAction("Delete Note")
         if (
             highlight_action is not None
             or highlight_important_action is not None
             or remove_highlight_action is not None
+            or add_note_action is not None
+            or delete_note_action is not None
         ):
             menu.addSeparator()
 
@@ -9084,6 +9253,12 @@ class MdExploreWindow(QMainWindow):
             standard_menu.deleteLater()
             menu.deleteLater()
             return
+        if add_note_action is not None and chosen == add_note_action:
+            _run_with_fresh_context_info(lambda info: self._add_preview_note(info, selected_text_hint))
+            standard_menu.deleteLater(); menu.deleteLater(); return
+        if delete_note_action is not None and chosen == delete_note_action:
+            self._delete_preview_note(clicked_note_id)
+            standard_menu.deleteLater(); menu.deleteLater(); return
         if copy_rendered_action is not None and chosen == copy_rendered_action:
             _run_with_fresh_context_info(
                 lambda info: self._copy_preview_selection_as_rendered_text(
@@ -9428,6 +9603,14 @@ class MdExploreWindow(QMainWindow):
             entries = tagged_entries
         self._current_preview_text_highlights = entries
         payload_entries = self._preview_highlight_entries_for_apply(current_key, entries)
+        notes = self._normalize_preview_note_entries(self._current_preview_notes)
+        self._current_preview_notes = notes
+        note_text_by_id = {str(item.get("id", "")): str(item.get("text", "")) for item in notes}
+        for note in notes:
+            payload_note = dict(note)
+            payload_note.pop("text", None)
+            payload_note["kind"] = PREVIEW_HIGHLIGHT_KIND_NOTE
+            payload_entries.append(payload_note)
         self._debug_log(
             "highlight-apply-request "
             f"current_key={current_key} expected_key={expected_key} "
@@ -9455,8 +9638,11 @@ class MdExploreWindow(QMainWindow):
                 "__IMPORTANT_TEXT_COLOR__": important_text_color_json,
                 "__MARKER_COLOR__": marker_color_json,
                 "__IMPORTANT_MARKER_COLOR__": important_marker_color_json,
+                "__NOTE_COLOR__": json.dumps(self.PREVIEW_NOTE_COLOR),
+                "__NOTE_MARKER_COLOR__": json.dumps(PREVIEW_PERSISTENT_NOTE_MARKER_COLOR),
                 "__NORMAL_KIND__": PREVIEW_HIGHLIGHT_KIND_NORMAL,
                 "__IMPORTANT_KIND__": PREVIEW_HIGHLIGHT_KIND_IMPORTANT,
+                "__NOTE_KIND__": PREVIEW_HIGHLIGHT_KIND_NOTE,
                 "__OFFSET_SPACE_PREVIEW__": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW,
                 "__OFFSET_SPACE_SOURCE__": PREVIEW_HIGHLIGHT_OFFSET_SPACE_SOURCE,
             },
@@ -9489,19 +9675,30 @@ class MdExploreWindow(QMainWindow):
 
         def _finalize_apply_result(result) -> dict:
             normalized = _normalize_apply_result(result)
-            resolved_entries = self._normalize_text_highlight_entries(
-                normalized.get("resolvedEntries")
-            )
-            if resolved_entries:
-                normalized["resolvedEntries"] = self._clone_json_compatible_list(
-                    resolved_entries
-                )
-                if resolved_entries != entries:
-                    if self._current_preview_path_key() == current_key:
-                        self._current_preview_text_highlights = resolved_entries
-                    self._persist_text_highlights_for_path_key(
-                        current_key, resolved_entries
-                    )
+            raw_resolved = normalized.get("resolvedEntries")
+            if not isinstance(raw_resolved, list):
+                return normalized
+            resolved_entries = self._normalize_text_highlight_entries([
+                item for item in raw_resolved
+                if isinstance(item, dict) and str(item.get("kind", "")).strip().lower() != PREVIEW_HIGHLIGHT_KIND_NOTE
+            ])
+            rebuilt_notes = []
+            for item in raw_resolved:
+                if not isinstance(item, dict) or str(item.get("kind", "")).strip().lower() != PREVIEW_HIGHLIGHT_KIND_NOTE:
+                    continue
+                rebuilt = dict(item)
+                rebuilt["text"] = note_text_by_id.get(str(item.get("id", "")), "")
+                rebuilt_notes.append(rebuilt)
+            resolved_notes = self._normalize_preview_note_entries(rebuilt_notes)
+            normalized["resolvedEntries"] = self._clone_json_compatible_list(resolved_entries + resolved_notes)
+            if resolved_entries != entries:
+                if self._current_preview_path_key() == current_key:
+                    self._current_preview_text_highlights = resolved_entries
+                self._persist_text_highlights_for_path_key(current_key, resolved_entries)
+            if resolved_notes != notes:
+                if self._current_preview_path_key() == current_key:
+                    self._current_preview_notes = resolved_notes
+                self._persist_notes_for_path_key(current_key, resolved_notes)
             return normalized
 
         def _after_apply(result) -> None:
@@ -9519,6 +9716,112 @@ class MdExploreWindow(QMainWindow):
             self.preview.page().runJavaScript(js, _after_apply)
             return
         self.preview.page().runJavaScript(js, _after_apply)
+
+    def _run_preview_note_dialog(self, initial_text: str = "", *, editing: bool = False) -> tuple[str, str]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Note" if editing else "Add Note")
+        dialog.resize(420, 260)
+        dialog.setSizeGripEnabled(True)
+        layout = QVBoxLayout(dialog)
+        editor = QPlainTextEdit(dialog)
+        editor.setPlainText(initial_text or "")
+        try:
+            editor.setFont(self.preview.font())
+        except Exception:
+            pass
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(dialog)
+        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        delete_button = buttons.addButton("Delete", QDialogButtonBox.ButtonRole.DestructiveRole) if editing else None
+        if not editing:
+            buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if delete_button is not None:
+            delete_button.clicked.connect(lambda: dialog.done(2))
+        layout.addWidget(buttons)
+        result = dialog.exec()
+        if result == 2:
+            return "delete", editor.toPlainText()
+        if result == QDialog.DialogCode.Accepted:
+            return "ok", editor.toPlainText()
+        return "cancel", initial_text or ""
+
+    def _create_preview_note_at_range(self, path_key: str, start: int, end: int, anchor_text: str = "") -> None:
+        if end <= start:
+            self.statusBar().showMessage("Select text to add a note", 3000)
+            return
+        action, text = self._run_preview_note_dialog()
+        if action != "ok":
+            return
+        entry = {"id": self._new_preview_note_id(), "start": int(start), "end": int(end), "text": text, "kind": PREVIEW_HIGHLIGHT_KIND_NOTE, "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW}
+        anchor = re.sub(r"\s+", " ", str(anchor_text or "")).strip()
+        if anchor:
+            entry["anchor_text"] = anchor[:480]
+        notes = self._normalize_preview_note_entries(self._current_preview_notes + [entry])
+        self._current_preview_notes = notes
+        self._persist_notes_for_path_key(path_key, notes)
+        self._apply_persistent_preview_highlights(path_key)
+        self.statusBar().showMessage("Note added", 2500)
+
+    def _add_preview_note(self, selection_info, selected_text_hint: str = "") -> None:
+        path_key = self._current_preview_path_key()
+        if not path_key:
+            return
+        selected = selected_text_hint
+        if isinstance(selection_info, dict) and isinstance(selection_info.get("selectedText"), str):
+            selected = selection_info.get("selectedText") or selected
+        offsets = self._selection_offsets_from_info(selection_info)
+        if offsets is not None:
+            self._create_preview_note_at_range(path_key, offsets[0], offsets[1], selected)
+            return
+        def finish(info: dict) -> None:
+            if self._current_preview_path_key() != path_key:
+                return
+            live = self._selection_offsets_from_info(info)
+            if live is None:
+                self.statusBar().showMessage("Select text to add a note", 3000)
+                return
+            self._create_preview_note_at_range(path_key, live[0], live[1], selected)
+        self._request_live_preview_selection_offsets(selected, finish)
+
+    def _delete_preview_note(self, note_id: str) -> None:
+        path_key = self._current_preview_path_key()
+        note_id = str(note_id or "").strip()
+        if not path_key or not note_id:
+            return
+        notes = self._normalize_preview_note_entries(self._current_preview_notes)
+        updated = [item for item in notes if str(item.get("id", "")) != note_id]
+        if len(updated) == len(notes):
+            return
+        self._current_preview_notes = updated
+        self._persist_notes_for_path_key(path_key, updated)
+        self._apply_persistent_preview_highlights(path_key)
+        self.statusBar().showMessage("Note deleted", 2500)
+
+    def _edit_preview_note(self, note_id: str) -> None:
+        note_id = str(note_id or "").strip()
+        target = next((item for item in self._current_preview_notes if str(item.get("id", "")) == note_id), None)
+        if target is None:
+            return
+        action, text = self._run_preview_note_dialog(str(target.get("text", "")), editing=True)
+        if action == "delete":
+            self._delete_preview_note(note_id)
+            return
+        if action != "ok":
+            return
+        updated = []
+        for item in self._current_preview_notes:
+            copy = dict(item)
+            if str(copy.get("id", "")) == note_id:
+                copy["text"] = text
+            updated.append(copy)
+        self._current_preview_notes = self._normalize_preview_note_entries(updated)
+        self._persist_notes_for_path_key(self._current_preview_path_key(), self._current_preview_notes)
+        self._apply_persistent_preview_highlights(self._current_preview_path_key())
+
+    def _on_preview_note_requested(self, note_id: str) -> None:
+        self._edit_preview_note(note_id)
 
     def _add_persistent_preview_highlight(
         self,
@@ -12451,6 +12754,7 @@ class MdExploreWindow(QMainWindow):
         self._current_preview_text_highlights = self._load_text_highlights_for_path_key(
             next_path_key
         )
+        self._current_preview_notes = self._load_notes_for_path_key(next_path_key)
         # Explicitly clear any stale overlay at document entry before
         # considering whether the new document needs one.
         self._stop_restore_overlay_monitor()

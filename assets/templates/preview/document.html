@@ -1066,9 +1066,10 @@
         const importantHighlightMarkerColor =
           String(window.__mdexplorePersistentHighlightImportantMarkerColor || "").trim() ||
           "rgba(208, 188, 248, 0.96)";
+        const noteMarkerColor = String(window.__mdexplorePersistentNoteMarkerColor || "").trim() || "rgba(104, 174, 119, 0.96)";
         highlightOverlay.replaceChildren();
         const marks = Array.from(
-          document.querySelectorAll('span[data-mdexplore-persistent-highlight="1"]')
+          document.querySelectorAll('span[data-mdexplore-persistent-highlight="1"], span[data-mdexplore-persistent-note="1"]')
         );
         const scrollHeight = Math.max(
           1,
@@ -1084,10 +1085,9 @@
         const trackHeight = window.innerHeight;
         const groups = new Map();
         for (const mark of marks) {
-          const id = String(
-            mark.getAttribute("data-mdexplore-persistent-highlight-id") || ""
-          ).trim();
-          const kind =
+          const isNote = mark.getAttribute("data-mdexplore-persistent-note") === "1";
+          const id = String(isNote ? (mark.getAttribute("data-mdexplore-persistent-note-id") || "") : (mark.getAttribute("data-mdexplore-persistent-highlight-id") || "")).trim();
+          const kind = isNote ? "note" :
             String(
               mark.getAttribute("data-mdexplore-persistent-highlight-kind") || __PREVIEW_HIGHLIGHT_KIND_NORMAL_JSON__
             ).trim().toLowerCase() === __PREVIEW_HIGHLIGHT_KIND_IMPORTANT_JSON__
@@ -1152,9 +1152,11 @@
             bottom: Math.round(bottomPx),
             kind: group.kind,
             color:
-              group.kind === __PREVIEW_HIGHLIGHT_KIND_IMPORTANT_JSON__
-                ? importantHighlightMarkerColor
-                : highlightMarkerColor,
+              group.kind === "note"
+                ? noteMarkerColor
+                : group.kind === __PREVIEW_HIGHLIGHT_KIND_IMPORTANT_JSON__
+                  ? importantHighlightMarkerColor
+                  : highlightMarkerColor,
             targets: Array.isArray(group.targets) ? group.targets : [],
           });
         }
