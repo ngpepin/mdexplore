@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QModelIndex, QUrl
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
@@ -274,6 +274,41 @@ class SymlinkNavigationTests(unittest.TestCase):
 
         select_mock.assert_called_once_with(first.resolve())
         self.assertFalse(self.window.back_btn.isEnabled())
+
+    def test_back_from_external_preview_returns_to_originating_markdown(self) -> None:
+        first = self.root / "first.md"
+        second = self.root / "second.md"
+        first.write_text("# First\n", encoding="utf-8")
+        second.write_text("# Second\n", encoding="utf-8")
+
+        with patch.object(self.window._render_pool, "start"):
+            self.window._load_preview(first)
+            self.window._load_preview(second)
+
+        self.assertEqual(self.window._previous_document_path, first.resolve())
+        self.assertEqual(self.window.current_file, second)
+
+        with patch.object(self.window.preview, "url", return_value=QUrl("https://example.com/page")), patch.object(
+            self.window, "_load_preview"
+        ) as load_preview_mock:
+            self.window._update_back_button_state()
+            self.assertTrue(self.window.back_btn.isEnabled())
+            self.window._go_back_document()
+
+        load_preview_mock.assert_called_once_with(second.resolve())
+        self.assertEqual(self.window._previous_document_path, first.resolve())
+
+    def test_external_preview_enables_back_without_markdown_history(self) -> None:
+        first = self.root / "first.md"
+        first.write_text("# First\n", encoding="utf-8")
+
+        with patch.object(self.window._render_pool, "start"):
+            self.window._load_preview(first)
+        self.assertIsNone(self.window._previous_document_path)
+
+        with patch.object(self.window.preview, "url", return_value=QUrl("https://example.com")):
+            self.window._update_back_button_state()
+            self.assertTrue(self.window.back_btn.isEnabled())
 
 
 if __name__ == "__main__":

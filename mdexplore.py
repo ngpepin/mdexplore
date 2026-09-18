@@ -5089,7 +5089,8 @@ class MdExploreWindow(QMainWindow):
         )
 
     def _on_preview_url_changed(self, url: QUrl) -> None:
-        """Handle hash-based preview actions emitted from injected marker JS."""
+        """Handle preview navigation changes and hash-based marker actions."""
+        self._update_back_button_state()
         fragment = str(url.fragment() or "").strip()
         match = re.match(r"^mdexplore-view-(\d+)(?:-\d+)?$", fragment)
         if not match:
@@ -7289,11 +7290,23 @@ class MdExploreWindow(QMainWindow):
             return True
         return self._path_key(resolved_previous) != self._current_preview_path_key()
 
+    def _preview_is_external_page(self) -> bool:
+        """Return whether the embedded preview currently shows an external website."""
+        if self.current_file is None or not hasattr(self, "preview"):
+            return False
+        try:
+            scheme = str(self.preview.url().scheme() or "").strip().lower()
+        except Exception:
+            return False
+        return scheme in {"http", "https"}
+
     def _update_back_button_state(self) -> None:
-        """Enable Back only when one previous document is available."""
+        """Enable Back for an external preview page or one previous document."""
         if not hasattr(self, "back_btn"):
             return
-        self.back_btn.setEnabled(self._has_available_previous_document())
+        self.back_btn.setEnabled(
+            self._preview_is_external_page() or self._has_available_previous_document()
+        )
 
     def _set_previous_document_path(self, path: Path | None) -> None:
         """Store one previous markdown path and refresh Back button state."""
@@ -7303,7 +7316,16 @@ class MdExploreWindow(QMainWindow):
         self._update_back_button_state()
 
     def _go_back_document(self) -> None:
-        """Open the previously viewed markdown document once, then disable."""
+        """Return from an external page, otherwise open the previous markdown once."""
+        if self._preview_is_external_page() and isinstance(self.current_file, Path):
+            # External links navigate the embedded WebEngine view without changing
+            # current_file. Re-open that same Markdown document so Back returns to
+            # the document containing the link instead of consuming Markdown history.
+            origin_path = self._safe_resolve(self.current_file)
+            if self._safe_is_file(origin_path) and origin_path.suffix.lower() == ".md":
+                self._load_preview(origin_path)
+                return
+
         if not self._has_available_previous_document():
             self._set_previous_document_path(None)
             return
