@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 import mdexplore
 from mdexplore_app import runtime as runtime_helpers
@@ -147,6 +147,61 @@ class RecentRootHistoryTests(unittest.TestCase):
         }
         self.config_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
         self.assertTrue(self.window._load_copy_base64_toggle_from_config())
+
+    def test_note_dialog_size_is_reused_and_persisted(self) -> None:
+        opened_sizes: list[tuple[int, int]] = []
+
+        def fake_exec(dialog: QDialog) -> QDialog.DialogCode:
+            opened_sizes.append((dialog.width(), dialog.height()))
+            if len(opened_sizes) == 1:
+                dialog.resize(640, 420)
+            return QDialog.DialogCode.Rejected
+
+        with patch.object(QDialog, "exec", fake_exec):
+            self.window._run_preview_note_dialog()
+            self.window._run_preview_note_dialog(editing=True)
+
+        self.assertEqual(opened_sizes, [(420, 260), (640, 420)])
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload.get(self.window.CONFIG_NOTE_DIALOG_SIZE_KEY),
+            {"width": 640, "height": 420},
+        )
+        self.window._note_dialog_size = None
+        self.assertEqual(self.window._load_note_dialog_size_from_config(), (640, 420))
+
+    def test_note_specific_dialog_size_round_trips_through_sidecar(self) -> None:
+        markdown_path = self.initial_root / "note.md"
+        markdown_path.write_text("alpha beta gamma\n", encoding="utf-8")
+        path_key = self.window._path_key(markdown_path)
+        note = {
+            "id": "n-specific",
+            "start": 0,
+            "end": 5,
+            "kind": "note",
+            "text": "original",
+            "dialog_size": {"width": 610, "height": 390},
+        }
+        self.window._persist_notes_for_path_key(path_key, [note])
+        loaded = self.window._load_notes_for_path_key(path_key)
+        self.assertEqual(loaded[0]["dialog_size"], {"width": 610, "height": 390})
+
+        self.window._current_preview_notes = loaded
+        self.window._current_preview_path_key = lambda: path_key  # type: ignore[method-assign]
+        observed_sizes: list[tuple[int, int] | None] = []
+
+        def fake_dialog(*args, **kwargs):
+            observed_sizes.append(kwargs.get("preferred_size"))
+            self.window._last_note_dialog_size = (720, 510)
+            return "ok", "edited"
+
+        with patch.object(self.window, "_run_preview_note_dialog", side_effect=fake_dialog):
+            self.window._edit_preview_note("n-specific")
+
+        reloaded = self.window._load_notes_for_path_key(path_key)
+        self.assertEqual(observed_sizes, [(610, 390)])
+        self.assertEqual(reloaded[0]["text"], "edited")
+        self.assertEqual(reloaded[0]["dialog_size"], {"width": 720, "height": 510})
 
 
 class RuntimeConfigPayloadTests(unittest.TestCase):

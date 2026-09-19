@@ -300,7 +300,10 @@ class PdfExploreHighlightPersistenceTests(unittest.TestCase):
         captured = []
         self.window.current_file = self.root / "doc.pdf"
         self.window.current_file.write_bytes(b"%PDF-1.4\n%stub\n")
-        self.window._run_preview_note_dialog = lambda *args, **kwargs: ("ok", "memo")  # type: ignore[method-assign]
+        def fake_add_dialog(*args, **kwargs):
+            self.window._last_note_dialog_size = (630, 410)
+            return "ok", "memo"
+        self.window._run_preview_note_dialog = fake_add_dialog  # type: ignore[method-assign]
         original_transform = self.window._transform_notes_for_path_key
         def capture_transform(path_key, transform):
             result = original_transform(path_key, transform)
@@ -311,6 +314,37 @@ class PdfExploreHighlightPersistenceTests(unittest.TestCase):
         # the note lifecycle preserves that full range rather than the stale one.
         self.window._add_preview_note(live, cached["selectedText"])
         self.assertEqual((captured[-1]["start"], captured[-1]["end"]), (10, 80))
+        self.assertEqual(captured[-1]["dialog_size"], {"width": 630, "height": 410})
+
+    def test_note_specific_dialog_size_round_trips_and_is_restored_on_edit(self) -> None:
+        pdf_path = self.root / "specific-size.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")
+        path_key = self.window._path_key(pdf_path)
+        note = {
+            "id": "n-size",
+            "page": 1,
+            "start": 5,
+            "end": 15,
+            "kind": "note",
+            "text": "original",
+            "dialog_size": {"width": 650, "height": 430},
+        }
+        self.window._persist_notes_for_path_key(path_key, [note])
+        self.window.current_file = pdf_path
+        self.window._current_notes = self.window._load_notes_for_path_key(path_key)
+        observed_sizes: list[tuple[int, int] | None] = []
+
+        def fake_edit_dialog(*args, **kwargs):
+            observed_sizes.append(kwargs.get("preferred_size"))
+            self.window._last_note_dialog_size = (760, 520)
+            return "ok", "edited"
+
+        self.window._run_preview_note_dialog = fake_edit_dialog  # type: ignore[method-assign]
+        self.window._edit_preview_note("n-size")
+        reloaded = self.window._load_notes_for_path_key(path_key)
+        self.assertEqual(observed_sizes, [(650, 430)])
+        self.assertEqual(reloaded[0]["text"], "edited")
+        self.assertEqual(reloaded[0]["dialog_size"], {"width": 760, "height": 520})
 
     def test_note_edit_and_delete_lifecycle_persists(self) -> None:
         pdf_path = self.root / "doc.pdf"

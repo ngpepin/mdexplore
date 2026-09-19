@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from pdfexplore.app import PdfExploreWindow, _default_root_from_config
 
@@ -136,6 +136,28 @@ class PdfExploreRecentRootHistoryTests(unittest.TestCase):
         self.assertIsInstance(payload.get(self.window.CONFIG_RECENT_ROOTS_KEY), list)
         self.assertGreaterEqual(len(payload[self.window.CONFIG_RECENT_ROOTS_KEY]), 1)
         self.assertEqual(payload[self.window.CONFIG_RECENT_ROOTS_KEY][0], str(target))
+
+    def test_note_dialog_size_is_reused_and_persisted(self) -> None:
+        opened_sizes: list[tuple[int, int]] = []
+
+        def fake_exec(dialog: QDialog) -> QDialog.DialogCode:
+            opened_sizes.append((dialog.width(), dialog.height()))
+            if len(opened_sizes) == 1:
+                dialog.resize(680, 440)
+            return QDialog.DialogCode.Rejected
+
+        with patch.object(QDialog, "exec", fake_exec):
+            self.window._run_preview_note_dialog()
+            self.window._run_preview_note_dialog(editing=True)
+
+        self.assertEqual(opened_sizes, [(420, 260), (680, 440)])
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload.get(self.window.CONFIG_NOTE_DIALOG_SIZE_KEY),
+            {"width": 680, "height": 440},
+        )
+        self.window._note_dialog_size = None
+        self.assertEqual(self.window._load_note_dialog_size_from_config(), (680, 440))
 
     def test_active_aged_config_lock_is_not_unlinked(self) -> None:
         lock_path = self.window._config_lock_file_path()

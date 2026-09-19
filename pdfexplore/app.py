@@ -236,6 +236,8 @@ class PdfExploreWindow(QMainWindow):
     MIN_RECENT_ROOT_DWELL_SECONDS = float(_app_setting("min_recent_root_dwell_seconds", 30.0))
     CONFIG_DEFAULT_ROOT_KEY = str(_app_setting("config_default_root_key", "default_root"))
     CONFIG_RECENT_ROOTS_KEY = str(_app_setting("config_recent_roots_key", "recent_roots"))
+    CONFIG_NOTE_DIALOG_SIZE_KEY = "note_dialog_size"
+    NOTE_DIALOG_DEFAULT_SIZE = (420, 260)
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
     PDF_TEXT_CACHE_MAX_ENTRIES = int(_app_setting("pdf_text_cache_max_entries", 384))
@@ -317,6 +319,7 @@ class PdfExploreWindow(QMainWindow):
         self.config_path = config_path
         self.debug_mode = bool(debug_mode)
         self._recent_root_directories = self._load_recent_root_directories_from_config()
+        self._note_dialog_size = self._load_note_dialog_size_from_config()
         self._recent_root_events: list[Path] = []
         self._recent_active_root = self.root
         self._recent_root_entered_at = time.monotonic()
@@ -2531,12 +2534,33 @@ class PdfExploreWindow(QMainWindow):
         """Handle config lock file path."""
         return self.config_path.with_name(self.config_path.name + ".lock")
 
+    @staticmethod
+    def _coerce_note_dialog_size(value) -> tuple[int, int] | None:
+        """Normalize a persisted note-dialog size."""
+        if isinstance(value, dict):
+            width = value.get("width")
+            height = value.get("height")
+        elif isinstance(value, (list, tuple)) and len(value) == 2:
+            width, height = value
+        else:
+            return None
+        try:
+            width = int(width)
+            height = int(height)
+        except (TypeError, ValueError):
+            return None
+        if not (200 <= width <= 8192 and 120 <= height <= 8192):
+            return None
+        return width, height
+
     @classmethod
-    def _parse_config_payload_text(cls, text: str) -> tuple[str | None, list[str]]:
+    def _parse_config_payload_text(
+        cls, text: str
+    ) -> tuple[str | None, list[str], tuple[int, int] | None]:
         """Parse config payload text."""
         raw = text.strip()
         if not raw:
-            return None, []
+            return None, [], None
         try:
             parsed = json.loads(raw)
         except Exception:
@@ -2554,10 +2578,13 @@ class PdfExploreWindow(QMainWindow):
                 for entry in recent_roots:
                     if isinstance(entry, str) and entry.strip():
                         normalized_recent.append(entry.strip())
-            return normalized_default, normalized_recent
+            note_dialog_size = cls._coerce_note_dialog_size(
+                parsed.get(cls.CONFIG_NOTE_DIALOG_SIZE_KEY)
+            )
+            return normalized_default, normalized_recent, note_dialog_size
         if isinstance(parsed, str) and parsed.strip():
-            return parsed.strip(), []
-        return raw, []
+            return parsed.strip(), [], None
+        return raw, [], None
 
     @classmethod
     def _normalize_recent_root_directories(
@@ -2592,7 +2619,9 @@ class PdfExploreWindow(QMainWindow):
                 break
         return normalized
 
-    def _read_config_payload(self) -> tuple[Path | None, list[Path]]:
+    def _read_config_payload(
+        self,
+    ) -> tuple[Path | None, list[Path], tuple[int, int] | None]:
         """Handle read config payload."""
         raw = ""
         lock_path = self._config_lock_file_path()
@@ -2629,7 +2658,7 @@ class PdfExploreWindow(QMainWindow):
             except Exception:
                 raw = ""
 
-        default_root_raw, recent_roots_raw = self._parse_config_payload_text(raw)
+        default_root_raw, recent_roots_raw, note_dialog_size = self._parse_config_payload_text(raw)
         default_root: Path | None = None
         if default_root_raw:
             normalized_default = self._normalize_recent_root_directories(
@@ -2638,16 +2667,21 @@ class PdfExploreWindow(QMainWindow):
             if normalized_default:
                 default_root = normalized_default[0]
         recent_roots = self._normalize_recent_root_directories(recent_roots_raw)
-        return default_root, recent_roots
+        return default_root, recent_roots, note_dialog_size
 
     def _load_recent_root_directories_from_config(self) -> list[Path]:
         """Load recent root directories from config."""
-        default_root, recent_roots = self._read_config_payload()
+        default_root, recent_roots, _note_dialog_size = self._read_config_payload()
         merged: list[Path | str] = []
         if default_root is not None:
             merged.append(default_root)
         merged.extend(recent_roots)
         return self._normalize_recent_root_directories(merged)
+
+    def _load_note_dialog_size_from_config(self) -> tuple[int, int] | None:
+        """Load the most recently user-resized note-dialog dimensions."""
+        _default_root, _recent_roots, note_dialog_size = self._read_config_payload()
+        return note_dialog_size
 
     def _commit_recent_root_from_departure(
         self, departed_root: Path, elapsed_seconds: float
@@ -3541,6 +3575,14 @@ class PdfExploreWindow(QMainWindow):
                 self.CONFIG_DEFAULT_ROOT_KEY: str(resolved_scope),
                 self.CONFIG_RECENT_ROOTS_KEY: [str(path) for path in recent_roots],
             }
+            note_dialog_size = self._coerce_note_dialog_size(
+                getattr(self, "_note_dialog_size", None)
+            )
+            if note_dialog_size is not None:
+                payload[self.CONFIG_NOTE_DIALOG_SIZE_KEY] = {
+                    "width": note_dialog_size[0],
+                    "height": note_dialog_size[1],
+                }
             return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
         try:
@@ -3563,7 +3605,7 @@ class PdfExploreWindow(QMainWindow):
                 except Exception:
                     raw = ""
 
-                _on_disk_default, on_disk_recent = self._parse_config_payload_text(raw)
+                _on_disk_default, on_disk_recent, _on_disk_note_dialog_size = self._parse_config_payload_text(raw)
                 merged_recent = self._normalize_recent_root_directories(
                     list(on_disk_recent)
                 )
@@ -6361,9 +6403,9 @@ class PdfExploreWindow(QMainWindow):
         """Return the per-directory notes sidecar path."""
         return directory / NOTES_FILE_NAME
 
-    def _normalize_note_entries(self, raw_entries) -> list[dict[str, int | str]]:
+    def _normalize_note_entries(self, raw_entries) -> list[dict[str, object]]:
         """Normalize persisted PDF note ranges without merging overlaps."""
-        normalized: list[dict[str, int | str]] = []
+        normalized: list[dict[str, object]] = []
         if not isinstance(raw_entries, list):
             return normalized
         for item in raw_entries:
@@ -6378,7 +6420,7 @@ class PdfExploreWindow(QMainWindow):
             note_id = str(item.get("id", "")).strip()
             if page <= 0 or start < 0 or end <= start or not note_id:
                 continue
-            normalized.append({
+            entry: dict[str, object] = {
                 "id": note_id,
                 "page": page,
                 "start": start,
@@ -6386,7 +6428,14 @@ class PdfExploreWindow(QMainWindow):
                 "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
                 "text": str(item.get("text", "")),
                 "anchor_text": str(item.get("anchor_text", "")),
-            })
+            }
+            dialog_size = self._coerce_note_dialog_size(item.get("dialog_size"))
+            if dialog_size is not None:
+                entry["dialog_size"] = {
+                    "width": dialog_size[0],
+                    "height": dialog_size[1],
+                }
+            normalized.append(entry)
         normalized.sort(key=lambda item: (int(item["page"]), int(item["start"]), int(item["end"]), str(item["id"])))
         return normalized
 
@@ -6450,10 +6499,22 @@ class PdfExploreWindow(QMainWindow):
     def _new_note_id(self) -> str:
         return f"pdfnote-{uuid.uuid4().hex}"
 
-    def _run_preview_note_dialog(self, initial_text: str = "", *, editing: bool = False) -> tuple[str, str]:
+    def _run_preview_note_dialog(
+        self,
+        initial_text: str = "",
+        *,
+        editing: bool = False,
+        preferred_size: tuple[int, int] | None = None,
+    ) -> tuple[str, str]:
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit Note" if editing else "Add Note")
-        dialog.resize(420, 260)
+        note_size = self._coerce_note_dialog_size(preferred_size)
+        remembered_size = self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        )
+        opening_size = note_size or remembered_size or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
+        dialog.resize(*opening_size)
         dialog.setSizeGripEnabled(True)
         layout = QVBoxLayout(dialog)
         editor = QPlainTextEdit(dialog)
@@ -6476,6 +6537,11 @@ class PdfExploreWindow(QMainWindow):
             delete_button.clicked.connect(lambda: dialog.done(2))
         layout.addWidget(buttons)
         result = dialog.exec()
+        final_size = (dialog.width(), dialog.height())
+        self._last_note_dialog_size = final_size
+        if final_size != opening_size:
+            self._note_dialog_size = final_size
+            self._persist_effective_root()
         if result == 2:
             return "delete", editor.toPlainText()
         if result == QDialog.DialogCode.Accepted:
@@ -6497,9 +6563,16 @@ class PdfExploreWindow(QMainWindow):
         if page <= 0 or start < 0 or end <= start:
             self.statusBar().showMessage("Select text to add a note", 3000)
             return
+        opening_size = self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        ) or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
         action, note_text = self._run_preview_note_dialog()
         if action != "ok":
             return
+        dialog_size = self._coerce_note_dialog_size(
+            getattr(self, "_last_note_dialog_size", opening_size)
+        ) or opening_size
         selected_text = str(info.get("selectedText", "") or "").strip() or selected_text_hint
         entry = {
             "id": self._new_note_id(),
@@ -6509,6 +6582,7 @@ class PdfExploreWindow(QMainWindow):
             "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
             "text": note_text,
             "anchor_text": selected_text,
+            "dialog_size": {"width": dialog_size[0], "height": dialog_size[1]},
         }
         path_key = self._path_key(self.current_file)
         committed, saved = self._transform_notes_for_path_key(path_key, lambda latest: list(latest) + [entry])
@@ -6535,7 +6609,16 @@ class PdfExploreWindow(QMainWindow):
         target = next((entry for entry in self._current_notes if str(entry.get("id", "")) == note_id), None)
         if target is None:
             return
-        action, note_text = self._run_preview_note_dialog(str(target.get("text", "")), editing=True)
+        note_size = self._coerce_note_dialog_size(target.get("dialog_size"))
+        opening_size = note_size or self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        ) or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
+        action, note_text = self._run_preview_note_dialog(
+            str(target.get("text", "")),
+            editing=True,
+            preferred_size=note_size,
+        )
         if action == "delete":
             self._delete_preview_note(note_id)
             return
@@ -6548,6 +6631,13 @@ class PdfExploreWindow(QMainWindow):
                 copy = dict(entry)
                 if str(copy.get("id", "")) == note_id:
                     copy["text"] = note_text
+                    dialog_size = self._coerce_note_dialog_size(
+                        getattr(self, "_last_note_dialog_size", opening_size)
+                    ) or opening_size
+                    copy["dialog_size"] = {
+                        "width": dialog_size[0],
+                        "height": dialog_size[1],
+                    }
                 updated.append(copy)
             return updated
         committed, saved = self._transform_notes_for_path_key(path_key, _edit)
@@ -7346,7 +7436,7 @@ def _default_root_from_config() -> Path:
         if not config_path.exists():
             return fallback
         raw = config_path.read_text(encoding="utf-8", errors="replace")
-        default_root_raw, recent_roots_raw = PdfExploreWindow._parse_config_payload_text(
+        default_root_raw, recent_roots_raw, _note_dialog_size = PdfExploreWindow._parse_config_payload_text(
             raw
         )
         candidates: list[str] = []

@@ -1709,6 +1709,8 @@ class MdExploreWindow(QMainWindow):
     CONFIG_DEFAULT_ROOT_KEY = MDEXPLORE_CONFIG_DEFAULT_ROOT_KEY
     CONFIG_RECENT_ROOTS_KEY = MDEXPLORE_CONFIG_RECENT_ROOTS_KEY
     CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY = MDEXPLORE_CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY
+    CONFIG_NOTE_DIALOG_SIZE_KEY = "note_dialog_size"
+    NOTE_DIALOG_DEFAULT_SIZE = (420, 260)
     PREVIEW_HIGHLIGHT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_COLOR
     PREVIEW_NOTE_COLOR = PREVIEW_PERSISTENT_NOTE_COLOR
     PREVIEW_HIGHLIGHT_IMPORTANT_COLOR = PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR
@@ -1755,6 +1757,7 @@ class MdExploreWindow(QMainWindow):
         self.root = self._safe_resolve(root)
         self.config_path = config_path
         self._recent_root_directories = self._load_recent_root_directories_from_config()
+        self._note_dialog_size = self._load_note_dialog_size_from_config()
         self._recent_active_root: Path = self.root
         self._recent_root_entered_at = time.monotonic()
         self._session_top_visited_root: Path = self.root
@@ -3435,8 +3438,8 @@ class MdExploreWindow(QMainWindow):
         """Return the sidecar JSON path that stores preview notes."""
         return directory / self.NOTES_FILE_NAME
 
-    @staticmethod
-    def _normalize_preview_note_entries(raw_entries) -> list[dict[str, int | str]]:
+    @classmethod
+    def _normalize_preview_note_entries(cls, raw_entries) -> list[dict[str, object]]:
         """Sanitize persistent preview note ranges without merging distinct notes."""
         if not isinstance(raw_entries, list):
             return []
@@ -3461,13 +3464,19 @@ class MdExploreWindow(QMainWindow):
             note_text = item.get("text", "")
             if not isinstance(note_text, str):
                 note_text = str(note_text or "")
-            entry: dict[str, int | str] = {
+            entry: dict[str, object] = {
                 "id": note_id,
                 "start": start,
                 "end": end,
                 "text": note_text,
                 "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
             }
+            dialog_size = cls._coerce_note_dialog_size(item.get("dialog_size"))
+            if dialog_size is not None:
+                entry["dialog_size"] = {
+                    "width": dialog_size[0],
+                    "height": dialog_size[1],
+                }
             raw_anchor_text = item.get("anchor_text")
             if isinstance(raw_anchor_text, str):
                 anchor_text = re.sub(r"\s+", " ", raw_anchor_text).strip()
@@ -6964,14 +6973,33 @@ class MdExploreWindow(QMainWindow):
                 return False
         return None
 
+    @staticmethod
+    def _coerce_note_dialog_size(value) -> tuple[int, int] | None:
+        """Normalize a persisted note-dialog size."""
+        if isinstance(value, dict):
+            width = value.get("width")
+            height = value.get("height")
+        elif isinstance(value, (list, tuple)) and len(value) == 2:
+            width, height = value
+        else:
+            return None
+        try:
+            width = int(width)
+            height = int(height)
+        except (TypeError, ValueError):
+            return None
+        if not (200 <= width <= 8192 and 120 <= height <= 8192):
+            return None
+        return width, height
+
     @classmethod
     def _parse_config_payload_text(
         cls, raw_text: str
-    ) -> tuple[str | None, list[str], bool | None]:
-        """Parse cfg text into default-root, recent-root, and BASE64-toggle values."""
+    ) -> tuple[str | None, list[str], bool | None, tuple[int, int] | None]:
+        """Parse cfg text into root, history, toggle, and note-dialog size values."""
         text = str(raw_text or "").strip()
         if not text:
-            return None, [], None
+            return None, [], None, None
 
         parsed = None
         try:
@@ -6994,10 +7022,13 @@ class MdExploreWindow(QMainWindow):
             copy_base64_images_enabled = cls._coerce_config_bool(
                 parsed.get(cls.CONFIG_COPY_BASE64_IMAGES_ENABLED_KEY)
             )
-            return default_root, recent_roots, copy_base64_images_enabled
+            note_dialog_size = cls._coerce_note_dialog_size(
+                parsed.get(cls.CONFIG_NOTE_DIALOG_SIZE_KEY)
+            )
+            return default_root, recent_roots, copy_base64_images_enabled, note_dialog_size
         if isinstance(parsed, str) and parsed.strip():
-            return parsed.strip(), [], None
-        return text, [], None
+            return parsed.strip(), [], None, None
+        return text, [], None, None
 
     def _normalize_recent_root_directories(
         self, directories: list[Path | str]
@@ -7031,7 +7062,9 @@ class MdExploreWindow(QMainWindow):
                 break
         return normalized
 
-    def _read_config_payload(self) -> tuple[Path | None, list[Path], bool | None]:
+    def _read_config_payload(
+        self,
+    ) -> tuple[Path | None, list[Path], bool | None, tuple[int, int] | None]:
         """Read cfg payload with brief best-effort advisory locking."""
         raw = ""
         lock_path = self._config_lock_file_path()
@@ -7065,7 +7098,7 @@ class MdExploreWindow(QMainWindow):
             except Exception:
                 raw = ""
 
-        default_root_raw, recent_roots_raw, copy_base64_enabled = (
+        default_root_raw, recent_roots_raw, copy_base64_enabled, note_dialog_size = (
             self._parse_config_payload_text(raw)
         )
         default_root: Path | None = None
@@ -7074,11 +7107,11 @@ class MdExploreWindow(QMainWindow):
             if normalized_default:
                 default_root = normalized_default[0]
         recent_roots = self._normalize_recent_root_directories(recent_roots_raw)
-        return default_root, recent_roots, copy_base64_enabled
+        return default_root, recent_roots, copy_base64_enabled, note_dialog_size
 
     def _load_recent_root_directories_from_config(self) -> list[Path]:
         """Load and normalize recent roots from config (legacy/plain-text safe)."""
-        default_root, recent_roots, _copy_base64_enabled = self._read_config_payload()
+        default_root, recent_roots, _copy_base64_enabled, _note_dialog_size = self._read_config_payload()
         merged: list[Path | str] = []
         if default_root is not None:
             merged.append(default_root)
@@ -7087,8 +7120,13 @@ class MdExploreWindow(QMainWindow):
 
     def _load_copy_base64_toggle_from_config(self) -> bool:
         """Load persisted BASE64 toggle state (defaulting to disabled)."""
-        _default_root, _recent_roots, copy_base64_enabled = self._read_config_payload()
+        _default_root, _recent_roots, copy_base64_enabled, _note_dialog_size = self._read_config_payload()
         return bool(copy_base64_enabled)
+
+    def _load_note_dialog_size_from_config(self) -> tuple[int, int] | None:
+        """Load the most recently user-resized note-dialog dimensions."""
+        _default_root, _recent_roots, _copy_base64_enabled, note_dialog_size = self._read_config_payload()
+        return note_dialog_size
 
     def _commit_recent_root_from_departure(
         self, departed_root: Path, elapsed_seconds: float
@@ -9717,10 +9755,22 @@ class MdExploreWindow(QMainWindow):
             return
         self.preview.page().runJavaScript(js, _after_apply)
 
-    def _run_preview_note_dialog(self, initial_text: str = "", *, editing: bool = False) -> tuple[str, str]:
+    def _run_preview_note_dialog(
+        self,
+        initial_text: str = "",
+        *,
+        editing: bool = False,
+        preferred_size: tuple[int, int] | None = None,
+    ) -> tuple[str, str]:
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit Note" if editing else "Add Note")
-        dialog.resize(420, 260)
+        note_size = self._coerce_note_dialog_size(preferred_size)
+        remembered_size = self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        )
+        opening_size = note_size or remembered_size or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
+        dialog.resize(*opening_size)
         dialog.setSizeGripEnabled(True)
         layout = QVBoxLayout(dialog)
         editor = QPlainTextEdit(dialog)
@@ -9741,6 +9791,11 @@ class MdExploreWindow(QMainWindow):
             delete_button.clicked.connect(lambda: dialog.done(2))
         layout.addWidget(buttons)
         result = dialog.exec()
+        final_size = (dialog.width(), dialog.height())
+        self._last_note_dialog_size = final_size
+        if final_size != opening_size:
+            self._note_dialog_size = final_size
+            self._persist_effective_root()
         if result == 2:
             return "delete", editor.toPlainText()
         if result == QDialog.DialogCode.Accepted:
@@ -9751,10 +9806,17 @@ class MdExploreWindow(QMainWindow):
         if end <= start:
             self.statusBar().showMessage("Select text to add a note", 3000)
             return
+        opening_size = self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        ) or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
         action, text = self._run_preview_note_dialog()
         if action != "ok":
             return
-        entry = {"id": self._new_preview_note_id(), "start": int(start), "end": int(end), "text": text, "kind": PREVIEW_HIGHLIGHT_KIND_NOTE, "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW}
+        dialog_size = self._coerce_note_dialog_size(
+            getattr(self, "_last_note_dialog_size", opening_size)
+        ) or opening_size
+        entry = {"id": self._new_preview_note_id(), "start": int(start), "end": int(end), "text": text, "kind": PREVIEW_HIGHLIGHT_KIND_NOTE, "offset_space": PREVIEW_HIGHLIGHT_OFFSET_SPACE_PREVIEW, "dialog_size": {"width": dialog_size[0], "height": dialog_size[1]}}
         anchor = re.sub(r"\s+", " ", str(anchor_text or "")).strip()
         if anchor:
             entry["anchor_text"] = anchor[:480]
@@ -9829,7 +9891,16 @@ class MdExploreWindow(QMainWindow):
         target = next((item for item in self._current_preview_notes if str(item.get("id", "")) == note_id), None)
         if target is None:
             return
-        action, text = self._run_preview_note_dialog(str(target.get("text", "")), editing=True)
+        note_size = self._coerce_note_dialog_size(target.get("dialog_size"))
+        opening_size = note_size or self._coerce_note_dialog_size(
+            getattr(self, "_note_dialog_size", None)
+        ) or self.NOTE_DIALOG_DEFAULT_SIZE
+        self._last_note_dialog_size = opening_size
+        action, text = self._run_preview_note_dialog(
+            str(target.get("text", "")),
+            editing=True,
+            preferred_size=note_size,
+        )
         if action == "delete":
             self._delete_preview_note(note_id)
             return
@@ -9840,6 +9911,13 @@ class MdExploreWindow(QMainWindow):
             copy = dict(item)
             if str(copy.get("id", "")) == note_id:
                 copy["text"] = text
+                dialog_size = self._coerce_note_dialog_size(
+                    getattr(self, "_last_note_dialog_size", opening_size)
+                ) or opening_size
+                copy["dialog_size"] = {
+                    "width": dialog_size[0],
+                    "height": dialog_size[1],
+                }
             updated.append(copy)
         self._current_preview_notes = self._normalize_preview_note_entries(updated)
         self._persist_notes_for_path_key(self._current_preview_path_key(), self._current_preview_notes)
@@ -10817,6 +10895,14 @@ class MdExploreWindow(QMainWindow):
                     self._copy_base64_images_enabled
                 ),
             }
+            note_dialog_size = self._coerce_note_dialog_size(
+                getattr(self, "_note_dialog_size", None)
+            )
+            if note_dialog_size is not None:
+                payload[self.CONFIG_NOTE_DIALOG_SIZE_KEY] = {
+                    "width": note_dialog_size[0],
+                    "height": note_dialog_size[1],
+                }
             return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
         try:
@@ -10841,6 +10927,7 @@ class MdExploreWindow(QMainWindow):
                     _on_disk_default,
                     on_disk_recent,
                     _on_disk_copy_base64_enabled,
+                    _on_disk_note_dialog_size,
                 ) = self._parse_config_payload_text(raw)
                 merged: list[Path | str] = []
                 merged.extend(self._recent_root_directories)
