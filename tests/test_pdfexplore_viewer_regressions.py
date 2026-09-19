@@ -649,6 +649,103 @@ class PdfExploreViewerRegressionTests(unittest.TestCase):
         )
         self.assertLess(float(colors.get("importantAlpha", 1)), 0.5)
 
+    def test_note_overlay_excludes_underlying_highlight_and_double_click_requests_note(self) -> None:
+        self._open_and_wait_for_viewer(self.first_pdf)
+        requested_note_ids: list[str] = []
+        self.window._on_viewer_note_requested = requested_note_ids.append  # type: ignore[method-assign]
+        payload = [
+            {
+                "id": "normal-under-note",
+                "page": 1,
+                "start": 0,
+                "end": 70,
+                "kind": "normal",
+                "text": "underlying",
+            },
+            {
+                "id": "note-overlap",
+                "page": 1,
+                "start": 0,
+                "end": 50,
+                "kind": "note",
+            },
+        ]
+        self.run_current_viewer_js(
+            f"window.__pdfexploreBridge.setPersistentHighlights({json.dumps(payload)});"
+        )
+        self.wait_until(
+            lambda: self.run_current_viewer_js_json(
+                "({count: document.querySelectorAll("
+                "'.pdfexplore-highlight-rect.note[data-highlight-id=\\\"note-overlap\\\"]'"
+                ").length})"
+            ).get("count", 0)
+            > 0,
+            timeout_ms=12000,
+        )
+
+        geometry = self.run_current_viewer_js_json(
+            "(() => {"
+            " const noteNodes = Array.from(document.querySelectorAll("
+            "   '.pdfexplore-highlight-rect.note[data-highlight-id=\\\"note-overlap\\\"]'"
+            " ));"
+            " const normalNodes = Array.from(document.querySelectorAll("
+            "   '.pdfexplore-highlight-rect.normal[data-highlight-id=\\\"normal-under-note\\\"]'"
+            " ));"
+            " const noteRects = noteNodes.map((node) => node.getBoundingClientRect());"
+            " const normalRects = normalNodes.map((node) => node.getBoundingClientRect());"
+            " const overlapArea = (left, right) => Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left))"
+            "   * Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));"
+            " let crossOverlapCount = 0;"
+            " for (const noteRect of noteRects) {"
+            "   for (const normalRect of normalRects) {"
+            "     if (overlapArea(noteRect, normalRect) > 0.5) crossOverlapCount += 1;"
+            "   }"
+            " }"
+            " let noteSelfOverlapCount = 0;"
+            " for (let leftIndex = 0; leftIndex < noteRects.length; leftIndex += 1) {"
+            "   for (let rightIndex = leftIndex + 1; rightIndex < noteRects.length; rightIndex += 1) {"
+            "     if (overlapArea(noteRects[leftIndex], noteRects[rightIndex]) > 0.5) noteSelfOverlapCount += 1;"
+            "   }"
+            " }"
+            " const centers = noteRects.map((rect) => ({"
+            "   x: rect.left + rect.width / 2,"
+            "   y: rect.top + rect.height / 2"
+            " }));"
+            " return {"
+            "   noteCount: noteRects.length,"
+            "   normalCount: normalRects.length,"
+            "   crossOverlapCount,"
+            "   noteSelfOverlapCount,"
+            "   centers"
+            " };"
+            "})()"
+        )
+        self.assertGreater(int(geometry.get("noteCount", 0)), 1)
+        self.assertGreater(int(geometry.get("normalCount", 0)), 0)
+        self.assertEqual(int(geometry.get("crossOverlapCount", -1)), 0)
+        self.assertEqual(int(geometry.get("noteSelfOverlapCount", -1)), 0)
+
+        centers = list(geometry.get("centers", []))
+        self.assertGreater(len(centers), 1)
+        click_positions = [centers[0], centers[len(centers) // 2], centers[-1]]
+        for expected_count, position in enumerate(click_positions, start=1):
+            self.run_current_viewer_js(
+                "(() => {"
+                f" const x = {float(position.get('x', 0))};"
+                f" const y = {float(position.get('y', 0))};"
+                " const target = document.elementFromPoint(x, y) || document;"
+                " target.dispatchEvent(new MouseEvent('dblclick', {"
+                "   bubbles: true, cancelable: true, clientX: x, clientY: y"
+                " }));"
+                " return true;"
+                "})()"
+            )
+            self.wait_until(
+                lambda expected_count=expected_count: len(requested_note_ids) == expected_count,
+                timeout_ms=5000,
+            )
+        self.assertEqual(requested_note_ids, ["note-overlap"] * len(click_positions))
+
     def test_persistent_overlay_stays_stable_when_idle_scrolled_and_reapplied(self) -> None:
         self._open_and_wait_for_viewer(self.first_pdf)
         payload = [

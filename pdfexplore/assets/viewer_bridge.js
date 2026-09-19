@@ -2228,6 +2228,93 @@ html.pdfexplore-dark-mode .page .xfaLayer {
     return { start: startOffset, end: endOffset };
   }
 
+  function mergeSameLineRects(rects) {
+    const pending = Array.from(rects || [])
+      .map((rect) => ({
+        left: Number(rect.left || 0),
+        top: Number(rect.top || 0),
+        width: Number(rect.width || 0),
+        height: Number(rect.height || 0),
+      }))
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .sort((left, right) => left.top - right.top || left.left - right.left);
+    const merged = [];
+    for (const rect of pending) {
+      const rectRight = rect.left + rect.width;
+      let combined = false;
+      for (const existing of merged) {
+        const existingBottom = existing.top + existing.height;
+        const rectBottom = rect.top + rect.height;
+        const verticalOverlap = Math.min(existingBottom, rectBottom) - Math.max(existing.top, rect.top);
+        const sameLine = verticalOverlap >= Math.min(existing.height, rect.height) * 0.5;
+        const existingRight = existing.left + existing.width;
+        const horizontalOverlapOrTouch = rect.left <= existingRight + 0.5 && rectRight >= existing.left - 0.5;
+        if (!sameLine || !horizontalOverlapOrTouch) {
+          continue;
+        }
+        const left = Math.min(existing.left, rect.left);
+        const top = Math.min(existing.top, rect.top);
+        const right = Math.max(existingRight, rectRight);
+        const bottom = Math.max(existingBottom, rectBottom);
+        existing.left = left;
+        existing.top = top;
+        existing.width = right - left;
+        existing.height = bottom - top;
+        combined = true;
+        break;
+      }
+      if (!combined) {
+        merged.push(rect);
+      }
+    }
+    return merged;
+  }
+
+  function rangesExcludingNotes(entry, entries) {
+    const start = Number.parseInt(entry && entry.start, 10);
+    const end = Number.parseInt(entry && entry.end, 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return [];
+    }
+    if (String(entry && entry.kind || "").toLowerCase() === "note") {
+      return [{ start, end }];
+    }
+    const pageNum = Number.parseInt(entry && entry.page, 10);
+    const blockers = Array.from(entries || [])
+      .filter((candidate) => (
+        String(candidate && candidate.kind || "").toLowerCase() === "note"
+        && Number.parseInt(candidate && candidate.page, 10) === pageNum
+      ))
+      .map((candidate) => ({
+        start: Math.max(start, Number.parseInt(candidate.start, 10)),
+        end: Math.min(end, Number.parseInt(candidate.end, 10)),
+      }))
+      .filter((candidate) => (
+        Number.isFinite(candidate.start)
+        && Number.isFinite(candidate.end)
+        && candidate.end > candidate.start
+      ))
+      .sort((left, right) => left.start - right.start || left.end - right.end);
+    if (!blockers.length) {
+      return [{ start, end }];
+    }
+    const visible = [];
+    let cursor = start;
+    for (const blocker of blockers) {
+      if (blocker.start > cursor) {
+        visible.push({ start: cursor, end: blocker.start });
+      }
+      cursor = Math.max(cursor, blocker.end);
+      if (cursor >= end) {
+        break;
+      }
+    }
+    if (cursor < end) {
+      visible.push({ start: cursor, end });
+    }
+    return visible;
+  }
+
   function refreshPersistentHighlights() {
     clearOverlayClass("normal");
     clearOverlayClass("important");
@@ -2242,24 +2329,23 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       if (!pageEl) {
         continue;
       }
-      const start = Number.parseInt(entry.start, 10);
-      const end = Number.parseInt(entry.end, 10);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-        continue;
-      }
-      const range = rangeForOffsets(pageEl, start, end);
-      if (!range) {
-        continue;
-      }
+      const kind = String(entry.kind || "").toLowerCase() === "note"
+        ? "note"
+        : (String(entry.kind || "").toLowerCase() === "important" ? "important" : "normal");
       const host = ensureOverlayHost(pageEl);
-      paintRects(
-        pageEl,
-        rectsForRange(pageEl, range, host),
-        String(entry.kind || "").toLowerCase() === "note"
-          ? "note"
-          : (String(entry.kind || "").toLowerCase() === "important" ? "important" : "normal"),
-        String(entry.id || ""),
-      );
+      for (const visibleRange of rangesExcludingNotes(entry, entries)) {
+        const range = rangeForOffsets(pageEl, visibleRange.start, visibleRange.end);
+        if (!range) {
+          continue;
+        }
+        const rects = rectsForRange(pageEl, range, host);
+        paintRects(
+          pageEl,
+          kind === "note" ? mergeSameLineRects(rects) : rects,
+          kind,
+          String(entry.id || ""),
+        );
+      }
     }
     refreshPersistentHighlightIndicators();
   }
@@ -2367,7 +2453,13 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   }
 
   function locateClickedHighlightId(clientX, clientY) {
-    for (const node of Array.from(document.querySelectorAll(".pdfexplore-highlight-rect[data-highlight-id]"))) {
+    const allNodes = Array.from(document.querySelectorAll(".pdfexplore-highlight-rect[data-highlight-id]"));
+    const noteNodes = allNodes.filter((node) => node.classList.contains("note"));
+    const otherNodes = allNodes.filter((node) => !node.classList.contains("note"));
+    // Notes visually take precedence over ordinary highlights, so hit-testing
+    // must use the same precedence. Otherwise an overlapping purple highlight
+    // can consume the double-click/context-menu hit before the note is found.
+    for (const node of [...noteNodes, ...otherNodes]) {
       const rect = node.getBoundingClientRect();
       if (
         clientX >= rect.left &&

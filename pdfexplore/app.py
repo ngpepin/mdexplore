@@ -168,12 +168,13 @@ VIEWER_NOTE_REQUEST_CONSOLE_PREFIX = "__pdfexplore_note_request__:"
 
 
 class PdfPreviewPage(QWebEnginePage):
-    """WebEngine page that forwards throttled viewer activity to the window."""
+    """WebEngine page that forwards viewer activity and note requests."""
 
-    def __init__(self, activity_handler, parent=None) -> None:
-        """Initialize the page-level activity bridge."""
+    def __init__(self, activity_handler, note_handler=None, parent=None) -> None:
+        """Initialize the page-level activity and note bridges."""
         super().__init__(parent)
         self._activity_handler = activity_handler
+        self._note_handler = note_handler
 
     def javaScriptConsoleMessage(  # noqa: N802
         self,
@@ -193,11 +194,9 @@ class PdfPreviewPage(QWebEnginePage):
             return
         if message_text.startswith(VIEWER_NOTE_REQUEST_CONSOLE_PREFIX):
             note_id = message_text[len(VIEWER_NOTE_REQUEST_CONSOLE_PREFIX):].strip()
-            owner = getattr(self._activity_handler, "__self__", None)
-            handler = getattr(owner, "_on_viewer_note_requested", None)
-            if note_id and callable(handler):
+            if note_id and callable(self._note_handler):
                 try:
-                    handler(note_id)
+                    self._note_handler(note_id)
                 except Exception:
                     pass
             return
@@ -207,11 +206,11 @@ class PdfPreviewPage(QWebEnginePage):
 class PdfPreviewWebView(QWebEngineView):
     """WebEngine view that lets the app intercept hotkeys before pdf.js consumes them."""
 
-    def __init__(self, key_handler, activity_handler, parent=None) -> None:
+    def __init__(self, key_handler, activity_handler, note_handler=None, parent=None) -> None:
         """Initialize instance state."""
         super().__init__(parent)
         self._key_handler = key_handler
-        self.setPage(PdfPreviewPage(activity_handler, self))
+        self.setPage(PdfPreviewPage(activity_handler, note_handler, self))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Handle keyPressEvent."""
@@ -4353,6 +4352,7 @@ class PdfExploreWindow(QMainWindow):
         preview = PdfPreviewWebView(
             self._handle_custom_shortcut_key_event,
             lambda key=path_key: self._on_viewer_user_activity(key),
+            lambda note_id: self._on_viewer_note_requested(note_id),
         )
         preview.installEventFilter(self)
         preview.setProperty("pdfexplore_path_key", path_key)
