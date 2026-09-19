@@ -3,6 +3,7 @@
     "config_file_name": ".pdfexplore.cfg",
     "views_file_name": ".pdfexplore-views.json",
     "highlighting_file_name": ".pdfexplore-highlighting.json",
+    "notes_file_name": ".pdfexplore-notes.json",
     "search_highlighting_enabled": false,
     "viewer_html_relative": "vendor/pdfjs/web/viewer.html",
     "viewer_bridge_js_relative": "assets/viewer_bridge.js",
@@ -104,7 +105,9 @@
     "search_indicator_yield_every_batches": 3,
     "search_indicator_publish_interval_ms": 90,
     "persistent_highlight_fill_color": "rgba(102, 86, 178, 0.12)" ,
-    "persistent_highlight_important_fill_color": "rgba(102, 86, 178, 0.25)"
+    "persistent_highlight_important_fill_color": "rgba(102, 86, 178, 0.25)",
+    "persistent_note_fill_color": "rgba(120, 190, 135, 0.58)",
+    "persistent_note_marker_color": "rgba(104, 174, 119, 0.96)"
   },
   "tree": {
     "color_file_name": ".pdfexplore-colors.json",

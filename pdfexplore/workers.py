@@ -546,7 +546,7 @@ class PdfTreeMarkerScanWorkerSignals(QObject):
     - error text (empty on success)
     """
 
-    finished = Signal(int, str, object, object, str)
+    finished = Signal(int, str, object, object, object, str)
 
 
 class PdfTreeMarkerScanWorker(QRunnable):
@@ -558,6 +558,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
         request_id: int,
         views_file_name: str,
         highlighting_file_name: str,
+        notes_file_name: str,
     ) -> None:
         """Capture scan configuration for one request id."""
         super().__init__()
@@ -565,6 +566,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
         self.request_id = request_id
         self.views_file_name = views_file_name
         self.highlighting_file_name = highlighting_file_name
+        self.notes_file_name = notes_file_name
         self.signals = PdfTreeMarkerScanWorkerSignals()
 
     def run(self) -> None:
@@ -574,6 +576,7 @@ class PdfTreeMarkerScanWorker(QRunnable):
             root_key = str(resolved_root)
             multi_view_paths: set[str] = set()
             highlighted_paths: set[str] = set()
+            noted_paths: set[str] = set()
 
             def on_walk_error(_err) -> None:
                 """Handle walk error."""
@@ -602,17 +605,27 @@ class PdfTreeMarkerScanWorker(QRunnable):
                         if self._normalize_text_highlight_entries(entries):
                             highlighted_paths.add(str((directory / file_name).resolve()))
 
+                if self.notes_file_name in filenames:
+                    notes_by_file = self._load_directory_text_highlights(
+                        directory / self.notes_file_name
+                    )
+                    for file_name, entries in notes_by_file.items():
+                        if self._normalize_note_entries(entries):
+                            noted_paths.add(str((directory / file_name).resolve()))
+
             self.signals.finished.emit(
                 self.request_id,
                 root_key,
                 multi_view_paths,
                 highlighted_paths,
+                noted_paths,
                 "",
             )
         except Exception as exc:
             self.signals.finished.emit(
                 self.request_id,
                 str(self.root),
+                set(),
                 set(),
                 set(),
                 str(exc),
@@ -659,6 +672,26 @@ class PdfTreeMarkerScanWorker(QRunnable):
                 if file_name.lower().endswith(".pdf") and isinstance(raw_entries, list):
                     highlights_by_file[file_name] = raw_entries
         return highlights_by_file
+
+    @staticmethod
+    def _normalize_note_entries(raw_entries) -> list[dict[str, int | str]]:
+        normalized: list[dict[str, int | str]] = []
+        if not isinstance(raw_entries, list):
+            return normalized
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                page = int(item.get("page", 0))
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            note_id = str(item.get("id", "")).strip()
+            if page <= 0 or start < 0 or end <= start or not note_id:
+                continue
+            normalized.append({"id": note_id, "page": page, "start": start, "end": end})
+        return normalized
 
     @staticmethod
     def _session_has_multiple_views(session: dict | None) -> bool:

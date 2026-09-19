@@ -98,7 +98,16 @@
     "persistent_highlight_important_fill_color",
     "rgba(225, 214, 255, 0.36)"
   );
+  const PERSISTENT_NOTE_FILL_COLOR = configString(
+    "persistent_note_fill_color",
+    "rgba(120, 190, 135, 0.58)"
+  );
+  const PERSISTENT_NOTE_MARKER_COLOR = configString(
+    "persistent_note_marker_color",
+    "rgba(104, 174, 119, 0.96)"
+  );
   const HOST_ACTIVITY_CONSOLE_MESSAGE = "__pdfexplore_user_activity__";
+  const NOTE_REQUEST_CONSOLE_PREFIX = "__pdfexplore_note_request__:";
   const HOST_ACTIVITY_NOTIFY_INTERVAL_MS = 120;
 
   // Bridge runtime state. Search-indicator fields intentionally track both
@@ -668,6 +677,10 @@ html.pdfexplore-dark-mode .page .xfaLayer {
 .pdfexplore-highlight-rect.important {
   background: ${PERSISTENT_HIGHLIGHT_IMPORTANT_FILL_COLOR};
 }
+.pdfexplore-highlight-rect.note {
+  background: ${PERSISTENT_NOTE_FILL_COLOR};
+  z-index: 3;
+}
 .pdfexplore-search-indicator-rail {
   position: fixed;
   top: 0;
@@ -718,6 +731,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
 }
 .pdfexplore-highlight-indicator.important {
   background: ${PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR};
+}
+.pdfexplore-highlight-indicator.note {
+  background: ${PERSISTENT_NOTE_MARKER_COLOR};
 }
 .pdfexplore-highlight-indicator:hover {
   filter: brightness(1.1);
@@ -1076,9 +1092,11 @@ html.pdfexplore-dark-mode .page .xfaLayer {
         ratioEnd: Math.max(0, Math.min(1, ratioEnd)),
         pageNumber,
         highlightId,
-        kind: String(entry && entry.kind || "").toLowerCase() === "important"
-          ? "important"
-          : "normal",
+        kind: String(entry && entry.kind || "").toLowerCase() === "note"
+          ? "note"
+          : (String(entry && entry.kind || "").toLowerCase() === "important"
+            ? "important"
+            : "normal"),
       });
     }
     return indicatorEntries;
@@ -2213,6 +2231,7 @@ html.pdfexplore-dark-mode .page .xfaLayer {
   function refreshPersistentHighlights() {
     clearOverlayClass("normal");
     clearOverlayClass("important");
+    clearOverlayClass("note");
     const entries = Array.isArray(state.persistentEntries) ? state.persistentEntries : [];
     for (const entry of entries) {
       const pageNum = Number.parseInt(entry.page, 10);
@@ -2236,7 +2255,9 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       paintRects(
         pageEl,
         rectsForRange(pageEl, range, host),
-        String(entry.kind || "").toLowerCase() === "important" ? "important" : "normal",
+        String(entry.kind || "").toLowerCase() === "note"
+          ? "note"
+          : (String(entry.kind || "").toLowerCase() === "important" ? "important" : "normal"),
         String(entry.id || ""),
       );
     }
@@ -2428,6 +2449,18 @@ html.pdfexplore-dark-mode .page .xfaLayer {
       }, true);
       document.addEventListener("click", (event) => {
         state.lastClickedHighlightId = locateClickedHighlightId(event.clientX, event.clientY);
+      }, true);
+      document.addEventListener("dblclick", (event) => {
+        const noteId = locateClickedHighlightId(event.clientX, event.clientY);
+        if (!noteId) return;
+        const entry = (state.persistentEntries || []).find(
+          (candidate) => String(candidate && candidate.id || "") === noteId
+        );
+        if (!entry || String(entry.kind || "").toLowerCase() !== "note") return;
+        state.lastClickedHighlightId = noteId;
+        console.info(`${NOTE_REQUEST_CONSOLE_PREFIX}${noteId}`);
+        event.preventDefault();
+        event.stopPropagation();
       }, true);
       document.addEventListener("selectionchange", () => {
         const snapshot = getSelectionInfo(0, 0);

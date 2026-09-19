@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -74,6 +75,9 @@ from mdexplore_app.constants import (
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR,
     PREVIEW_PERSISTENT_HIGHLIGHT_MARKER_COLOR,
+    PREVIEW_HIGHLIGHT_KIND_NOTE,
+    PREVIEW_PERSISTENT_NOTE_COLOR,
+    PREVIEW_PERSISTENT_NOTE_MARKER_COLOR,
     PREVIEW_ZOOM_MAX,
     PREVIEW_ZOOM_MIN,
     PREVIEW_ZOOM_OVERLAY_TIMEOUT_MS,
@@ -144,6 +148,7 @@ VIEWS_FILE_NAME = str(_app_setting("views_file_name", ".pdfexplore-views.json"))
 HIGHLIGHTING_FILE_NAME = str(
     _app_setting("highlighting_file_name", ".pdfexplore-highlighting.json")
 )
+NOTES_FILE_NAME = str(_app_setting("notes_file_name", ".pdfexplore-notes.json"))
 VIEWER_HTML = _PROJECT_DIR / str(
     _app_setting("viewer_html_relative", "vendor/pdfjs/web/viewer.html")
 )
@@ -159,6 +164,7 @@ OKULAR_EDIT_LAUNCHER = Path(
     )
 )
 VIEWER_ACTIVITY_CONSOLE_MESSAGE = "__pdfexplore_user_activity__"
+VIEWER_NOTE_REQUEST_CONSOLE_PREFIX = "__pdfexplore_note_request__:"
 
 
 class PdfPreviewPage(QWebEnginePage):
@@ -177,12 +183,23 @@ class PdfPreviewPage(QWebEnginePage):
         source_id: str,
     ) -> None:
         """Consume the private activity sentinel emitted by the viewer bridge."""
-        if str(message).strip() == VIEWER_ACTIVITY_CONSOLE_MESSAGE:
+        message_text = str(message).strip()
+        if message_text == VIEWER_ACTIVITY_CONSOLE_MESSAGE:
             try:
                 if callable(self._activity_handler):
                     self._activity_handler()
             except Exception:
                 pass
+            return
+        if message_text.startswith(VIEWER_NOTE_REQUEST_CONSOLE_PREFIX):
+            note_id = message_text[len(VIEWER_NOTE_REQUEST_CONSOLE_PREFIX):].strip()
+            owner = getattr(self._activity_handler, "__self__", None)
+            handler = getattr(owner, "_on_viewer_note_requested", None)
+            if note_id and callable(handler):
+                try:
+                    handler(note_id)
+                except Exception:
+                    pass
             return
         super().javaScriptConsoleMessage(level, message, line_number, source_id)
 
@@ -347,9 +364,12 @@ class PdfExploreWindow(QMainWindow):
         self._document_view_sessions: dict[str, dict] = {}
         self._persisted_text_highlights_by_dir: dict[str, dict[str, list[dict]]] = {}
         self._current_text_highlights: list[dict[str, int | str]] = []
+        self._persisted_notes_by_dir: dict[str, dict[str, list[dict]]] = {}
+        self._current_notes: list[dict[str, int | str]] = []
         self._copy_destination_directory: Path | None = None
         self._tree_multi_view_marker_paths: set[str] = set()
         self._tree_highlight_marker_paths: set[str] = set()
+        self._tree_note_marker_paths: set[str] = set()
         self._active_view_tab_index = -1
         self._next_view_id = 1
         self._next_view_sequence = 1
@@ -369,6 +389,12 @@ class PdfExploreWindow(QMainWindow):
         viewer_bridge_settings.setdefault(
             "persistent_highlight_important_marker_color",
             PREVIEW_PERSISTENT_HIGHLIGHT_IMPORTANT_MARKER_COLOR,
+        )
+        viewer_bridge_settings.setdefault(
+            "persistent_note_fill_color", PREVIEW_PERSISTENT_NOTE_COLOR
+        )
+        viewer_bridge_settings.setdefault(
+            "persistent_note_marker_color", PREVIEW_PERSISTENT_NOTE_MARKER_COLOR
         )
         self._viewer_bridge_source = (
             f"window.__pdfexploreBridgeConfig = {json.dumps(viewer_bridge_settings, ensure_ascii=False)};\n"
@@ -2821,9 +2847,10 @@ class PdfExploreWindow(QMainWindow):
         self,
         multi_view_paths: set[str] | None = None,
         highlighted_paths: set[str] | None = None,
+        noted_paths: set[str] | None = None,
         *,
         root_key: str | None = None,
-    ) -> tuple[set[str], set[str]]:
+    ) -> tuple[set[str], set[str], set[str]]:
         """Merge marker state from scans with current live/in-memory state.
 
         This method protects marker continuity while background scans race with
@@ -2831,6 +2858,7 @@ class PdfExploreWindow(QMainWindow):
         """
         merged_multi_view = set(multi_view_paths or ())
         merged_highlighted = set(highlighted_paths or ())
+        merged_noted = set(noted_paths or ())
         if root_key is None:
             root = getattr(self, "root", None)
             if isinstance(root, Path):
@@ -2867,6 +2895,17 @@ class PdfExploreWindow(QMainWindow):
                 candidate_key = self._path_key_from_parts(directory_key, file_name)
                 merged_highlighted.add(candidate_key)
 
+        for directory_key, by_file in self._persisted_notes_by_dir.items():
+            if not isinstance(directory_key, str) or not isinstance(by_file, dict):
+                continue
+            if root_key and not self._path_key_is_under_root(directory_key, root_key):
+                continue
+            for file_name, entries in by_file.items():
+                if not isinstance(file_name, str) or not entries:
+                    continue
+                candidate_key = self._path_key_from_parts(directory_key, file_name)
+                merged_noted.add(candidate_key)
+
         current_path_key = self._current_preview_path_key()
         if (
             current_path_key
@@ -2874,8 +2913,14 @@ class PdfExploreWindow(QMainWindow):
             and (not root_key or self._path_key_is_under_root(current_path_key, root_key))
         ):
             merged_highlighted.add(current_path_key)
+        if (
+            current_path_key
+            and self._load_notes_for_path_key(current_path_key)
+            and (not root_key or self._path_key_is_under_root(current_path_key, root_key))
+        ):
+            merged_noted.add(current_path_key)
 
-        return merged_multi_view, merged_highlighted
+        return merged_multi_view, merged_highlighted, merged_noted
 
     def _start_tree_marker_scan(self) -> None:
         """Handle start tree marker scan."""
@@ -2883,6 +2928,7 @@ class PdfExploreWindow(QMainWindow):
         if not isinstance(root, Path) or not root.exists():
             self._tree_multi_view_marker_paths.clear()
             self._tree_highlight_marker_paths.clear()
+            self._tree_note_marker_paths.clear()
             self._tree_marker_cache_root_key = None
             self._sync_tree_markers_to_model()
             return
@@ -2894,6 +2940,7 @@ class PdfExploreWindow(QMainWindow):
             request_id,
             VIEWS_FILE_NAME,
             HIGHLIGHTING_FILE_NAME,
+            NOTES_FILE_NAME,
         )
         self._active_tree_marker_scan_workers.add(worker)
         worker.signals.finished.connect(self._on_tree_marker_scan_finished)
@@ -2905,6 +2952,7 @@ class PdfExploreWindow(QMainWindow):
         root_key: str,
         multi_view_paths,
         highlighted_paths,
+        noted_paths,
         error_text: str,
     ) -> None:
         """Handle tree marker scan finished."""
@@ -2943,13 +2991,20 @@ class PdfExploreWindow(QMainWindow):
             for path_key in (highlighted_paths or ())
             if isinstance(path_key, str)
         }
-        next_multi_view_paths, next_highlighted_paths = self._merge_live_tree_marker_state(
+        next_noted_paths = {
+            str(path_key)
+            for path_key in (noted_paths or ())
+            if isinstance(path_key, str)
+        }
+        next_multi_view_paths, next_highlighted_paths, next_noted_paths = self._merge_live_tree_marker_state(
             next_multi_view_paths,
             next_highlighted_paths,
+            next_noted_paths,
             root_key=current_root_key,
         )
         self._tree_multi_view_marker_paths = next_multi_view_paths
         self._tree_highlight_marker_paths = next_highlighted_paths
+        self._tree_note_marker_paths = next_noted_paths
         self._tree_marker_cache_root_key = current_root_key
         self._sync_tree_markers_to_model()
 
@@ -3602,6 +3657,7 @@ class PdfExploreWindow(QMainWindow):
             self._current_text_highlights = self._load_text_highlights_for_path_key(
                 active_path_key
             )
+            self._current_notes = self._load_notes_for_path_key(active_path_key)
             self._apply_persistent_text_highlights()
         selected_path: Path | None = None
         current_index = self.tree.currentIndex()
@@ -5480,6 +5536,7 @@ class PdfExploreWindow(QMainWindow):
         self.path_label.setToolTip(str(path))
         self._update_window_title()
         self._current_text_highlights = self._load_text_highlights_for_path_key(self._path_key(path))
+        self._current_notes = self._load_notes_for_path_key(self._path_key(path))
         path_key = self._path_key(path)
         if (
             previous_preview_path_key != path_key
@@ -5747,6 +5804,10 @@ class PdfExploreWindow(QMainWindow):
             self._tree_highlight_marker_paths.add(path_key)
         else:
             self._tree_highlight_marker_paths.discard(path_key)
+        if self._load_notes_for_path_key(path_key):
+            self._tree_note_marker_paths.add(path_key)
+        else:
+            self._tree_note_marker_paths.discard(path_key)
         open_counts: dict[str, int] = {}
         for index in range(self.view_tabs.count()):
             data = self._tab_data(index)
@@ -5774,13 +5835,20 @@ class PdfExploreWindow(QMainWindow):
             for path_key in self._tree_highlight_marker_paths
             if path_key == root_key or path_key.startswith(root_key + os.sep)
         }
-        next_multi, next_highlights = self._merge_live_tree_marker_state(
+        current_notes = {
+            path_key
+            for path_key in self._tree_note_marker_paths
+            if path_key == root_key or path_key.startswith(root_key + os.sep)
+        }
+        next_multi, next_highlights, next_notes = self._merge_live_tree_marker_state(
             current_multi,
             current_highlights,
+            current_notes,
             root_key=root_key,
         )
         self._tree_multi_view_marker_paths = next_multi
         self._tree_highlight_marker_paths = next_highlights
+        self._tree_note_marker_paths = next_notes
         self._sync_tree_markers_to_model()
         if self._tree_marker_cache_root_key != root_key:
             self._start_tree_marker_scan()
@@ -5803,6 +5871,27 @@ class PdfExploreWindow(QMainWindow):
         if (
             current_key
             and self._current_text_highlights
+            and self._path_key_is_under_root(current_key, root_key)
+        ):
+            known.add(current_key)
+        return known
+
+    def _known_note_marker_paths_for_root(self, root_key: str) -> set[str]:
+        """Return in-memory known note marker paths under the active root."""
+        known: set[str] = set()
+        for directory_key, by_file in self._persisted_notes_by_dir.items():
+            if not isinstance(directory_key, str) or not isinstance(by_file, dict):
+                continue
+            if root_key and not self._path_key_is_under_root(directory_key, root_key):
+                continue
+            for file_name, entries in by_file.items():
+                if not isinstance(file_name, str) or not entries:
+                    continue
+                known.add(self._path_key_from_parts(directory_key, file_name))
+        current_key = self._current_preview_path_key()
+        if (
+            current_key
+            and self._current_notes
             and self._path_key_is_under_root(current_key, root_key)
         ):
             known.add(current_key)
@@ -5841,10 +5930,18 @@ class PdfExploreWindow(QMainWindow):
             if self._path_key_is_under_root(path_key, root_key)
         }
         filtered_highlights.update(self._known_highlight_marker_paths_for_root(root_key))
+        filtered_notes = {
+            path_key
+            for path_key in self._tree_note_marker_paths
+            if self._path_key_is_under_root(path_key, root_key)
+        }
+        filtered_notes.update(self._known_note_marker_paths_for_root(root_key))
         self._tree_multi_view_marker_paths = filtered_multi
         self._tree_highlight_marker_paths = filtered_highlights
+        self._tree_note_marker_paths = filtered_notes
         self.model.set_multi_view_path_keys(filtered_multi)
         self.model.set_persistent_highlight_path_keys(filtered_highlights)
+        self.model.set_note_path_keys(filtered_notes)
         self.tree.viewport().update()
 
     def _directory_view_states(self, directory: Path) -> dict[str, dict]:
@@ -6260,6 +6357,208 @@ class PdfExploreWindow(QMainWindow):
         self._refresh_tree_marker_cache_for_path(path_key)
         return self._normalize_text_highlight_entries(committed_entry), saved
 
+    def _notes_file_path(self, directory: Path) -> Path:
+        """Return the per-directory notes sidecar path."""
+        return directory / NOTES_FILE_NAME
+
+    def _normalize_note_entries(self, raw_entries) -> list[dict[str, int | str]]:
+        """Normalize persisted PDF note ranges without merging overlaps."""
+        normalized: list[dict[str, int | str]] = []
+        if not isinstance(raw_entries, list):
+            return normalized
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                page = int(item.get("page", 0))
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            note_id = str(item.get("id", "")).strip()
+            if page <= 0 or start < 0 or end <= start or not note_id:
+                continue
+            normalized.append({
+                "id": note_id,
+                "page": page,
+                "start": start,
+                "end": end,
+                "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
+                "text": str(item.get("text", "")),
+                "anchor_text": str(item.get("anchor_text", "")),
+            })
+        normalized.sort(key=lambda item: (int(item["page"]), int(item["start"]), int(item["end"]), str(item["id"])))
+        return normalized
+
+    def _directory_notes(self, directory: Path) -> dict[str, list[dict]]:
+        key = self._directory_key(directory)
+        cached = self._persisted_notes_by_dir.get(key)
+        if cached is not None:
+            return cached
+        notes_by_file: dict[str, list[dict]] = {}
+        payload = load_files_payload(self._notes_file_path(directory))
+        for file_name, raw_entries in payload.items():
+            if isinstance(file_name, str):
+                entries = self._normalize_note_entries(raw_entries)
+                if entries:
+                    notes_by_file[file_name] = entries
+        self._persisted_notes_by_dir[key] = notes_by_file
+        return notes_by_file
+
+    def _load_notes_for_path_key(self, path_key: str | None) -> list[dict]:
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return []
+        directory, file_name = resolved
+        return list(self._directory_notes(directory).get(file_name, []))
+
+    def _transform_notes_for_path_key(self, path_key: str | None, transform) -> tuple[list[dict], bool]:
+        resolved = self._path_directory_and_name(path_key)
+        if resolved is None:
+            return [], False
+        directory, file_name = resolved
+        file_path = self._notes_file_path(directory)
+
+        def _apply(raw_entries):
+            latest = self._normalize_note_entries(raw_entries)
+            updated = self._normalize_note_entries(transform(latest))
+            return updated if updated else None
+
+        try:
+            committed_entry, committed_map = transform_files_sidecar_entry(file_path, file_name, _apply)
+        except Exception:
+            committed_map = load_files_payload(file_path)
+            committed_entry = committed_map.get(file_name)
+            saved = False
+        else:
+            saved = True
+        committed_by_file: dict[str, list[dict]] = {}
+        for committed_name, raw_entries in committed_map.items():
+            entries = self._normalize_note_entries(raw_entries)
+            if entries:
+                committed_by_file[committed_name] = entries
+        self._persisted_notes_by_dir[self._directory_key(directory)] = committed_by_file
+        self._refresh_tree_marker_cache_for_path(path_key)
+        return self._normalize_note_entries(committed_entry), saved
+
+    def _persist_notes_for_path_key(self, path_key: str | None, entries: list[dict]) -> None:
+        normalized = self._normalize_note_entries(entries)
+        committed, _saved = self._transform_notes_for_path_key(path_key, lambda _latest: normalized)
+        if path_key and self._current_preview_path_key() == path_key:
+            self._current_notes = committed
+
+    def _new_note_id(self) -> str:
+        return f"pdfnote-{uuid.uuid4().hex}"
+
+    def _run_preview_note_dialog(self, initial_text: str = "", *, editing: bool = False) -> tuple[str, str]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Note" if editing else "Add Note")
+        dialog.resize(420, 260)
+        dialog.setSizeGripEnabled(True)
+        layout = QVBoxLayout(dialog)
+        editor = QPlainTextEdit(dialog)
+        editor.setPlainText(initial_text or "")
+        preview = self._current_preview_widget()
+        if preview is not None:
+            try:
+                editor.setFont(preview.font())
+            except Exception:
+                pass
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(dialog)
+        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        delete_button = buttons.addButton("Delete", QDialogButtonBox.ButtonRole.DestructiveRole) if editing else None
+        if not editing:
+            buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if delete_button is not None:
+            delete_button.clicked.connect(lambda: dialog.done(2))
+        layout.addWidget(buttons)
+        result = dialog.exec()
+        if result == 2:
+            return "delete", editor.toPlainText()
+        if result == QDialog.DialogCode.Accepted:
+            return "ok", editor.toPlainText()
+        return "cancel", initial_text or ""
+
+    def _add_preview_note(self, info: dict, selected_text_hint: str = "") -> None:
+        if self.current_file is None:
+            return
+        if info.get("multiPageSelection"):
+            self.statusBar().showMessage("Notes must stay within one PDF page", 3000)
+            return
+        try:
+            page = int(info.get("page", 0))
+            start = int(info.get("start", -1))
+            end = int(info.get("end", -1))
+        except Exception:
+            page, start, end = 0, -1, -1
+        if page <= 0 or start < 0 or end <= start:
+            self.statusBar().showMessage("Select text to add a note", 3000)
+            return
+        action, note_text = self._run_preview_note_dialog()
+        if action != "ok":
+            return
+        selected_text = str(info.get("selectedText", "") or "").strip() or selected_text_hint
+        entry = {
+            "id": self._new_note_id(),
+            "page": page,
+            "start": start,
+            "end": end,
+            "kind": PREVIEW_HIGHLIGHT_KIND_NOTE,
+            "text": note_text,
+            "anchor_text": selected_text,
+        }
+        path_key = self._path_key(self.current_file)
+        committed, saved = self._transform_notes_for_path_key(path_key, lambda latest: list(latest) + [entry])
+        self._current_notes = committed
+        self._apply_persistent_text_highlights()
+        self.statusBar().showMessage("Note added" if saved else "Note could not be saved", 3000)
+
+    def _delete_preview_note(self, note_id: str) -> None:
+        if self.current_file is None:
+            return
+        note_id = str(note_id or "").strip()
+        if not note_id:
+            return
+        path_key = self._path_key(self.current_file)
+        committed, saved = self._transform_notes_for_path_key(
+            path_key, lambda latest: [entry for entry in latest if str(entry.get("id", "")) != note_id]
+        )
+        self._current_notes = committed
+        self._apply_persistent_text_highlights()
+        self.statusBar().showMessage("Note deleted" if saved else "Note deletion could not be saved", 3000)
+
+    def _edit_preview_note(self, note_id: str) -> None:
+        note_id = str(note_id or "").strip()
+        target = next((entry for entry in self._current_notes if str(entry.get("id", "")) == note_id), None)
+        if target is None:
+            return
+        action, note_text = self._run_preview_note_dialog(str(target.get("text", "")), editing=True)
+        if action == "delete":
+            self._delete_preview_note(note_id)
+            return
+        if action != "ok" or self.current_file is None:
+            return
+        path_key = self._path_key(self.current_file)
+        def _edit(latest):
+            updated = []
+            for entry in latest:
+                copy = dict(entry)
+                if str(copy.get("id", "")) == note_id:
+                    copy["text"] = note_text
+                updated.append(copy)
+            return updated
+        committed, saved = self._transform_notes_for_path_key(path_key, _edit)
+        self._current_notes = committed
+        self._apply_persistent_text_highlights()
+        if not saved:
+            self.statusBar().showMessage("Note could not be saved", 3000)
+
+    def _on_viewer_note_requested(self, note_id: str) -> None:
+        self._edit_preview_note(note_id)
+
     def _on_preview_load_finished(self, path_key: str, ok: bool) -> None:
         """Handle preview load finished."""
         if not ok:
@@ -6313,8 +6612,14 @@ class PdfExploreWindow(QMainWindow):
         self._run_viewer_js(js, _on_ready)
 
     def _apply_persistent_text_highlights(self) -> None:
-        """Handle apply persistent text highlights."""
+        """Apply highlights and notes, painting notes last so green always wins."""
         payload = self._normalize_text_highlight_entries(self._current_text_highlights)
+        for note in self._normalize_note_entries(self._current_notes):
+            payload_note = dict(note)
+            payload_note.pop("text", None)
+            payload_note.pop("anchor_text", None)
+            payload_note["kind"] = PREVIEW_HIGHLIGHT_KIND_NOTE
+            payload.append(payload_note)
         self._run_viewer_js(
             "window.__pdfexploreBridge && window.__pdfexploreBridge.setPersistentHighlights && "
             f"window.__pdfexploreBridge.setPersistentHighlights({json.dumps(payload)});"
@@ -6458,11 +6763,23 @@ class PdfExploreWindow(QMainWindow):
             self._normalize_text_highlight_entries(self._current_text_highlights)
         )
 
+        clicked_note_id = ""
+        if clicked_highlight_id and any(
+            str(entry.get("id", "")) == clicked_highlight_id
+            for entry in self._current_notes
+        ):
+            clicked_note_id = clicked_highlight_id
+
         highlight_action = None
         highlight_important_action = None
+        add_note_action = None
+        delete_note_action = None
         if has_selection and not multi_up_active:
             highlight_action = menu.addAction("Highlight")
             highlight_important_action = menu.addAction("Highlight Important")
+            add_note_action = menu.addAction("Add Note")
+        if clicked_note_id and not multi_up_active:
+            delete_note_action = menu.addAction("Delete Note")
 
         remove_action = None
         if (clicked_highlight_id or has_selection or has_existing_persistent_highlights) and not multi_up_active:
@@ -6493,6 +6810,25 @@ class PdfExploreWindow(QMainWindow):
                 ),
             )
 
+        def _run_note_with_live_selection() -> None:
+            if click_x is None or click_y is None:
+                self._add_preview_note(selection_snapshot, selected_text_hint)
+                return
+            def _use_live(live_info) -> None:
+                live = live_info if isinstance(live_info, dict) else {}
+                # Critical: a valid live DOM range always wins over the cached
+                # context-menu snapshot, especially for full/multiline selections.
+                if _has_valid_range(live):
+                    candidate = dict(live)
+                    if not str(candidate.get("selectedText", "") or "").strip():
+                        candidate["selectedText"] = selected_text_hint or selected_text
+                    self._add_preview_note(candidate, selected_text_hint)
+                    return
+                self._add_preview_note(selection_snapshot, selected_text_hint)
+            self._request_preview_context_menu_selection_info(
+                int(click_x), int(click_y), selected_text_hint, _use_live
+            )
+
         chosen = menu.exec(preview.mapToGlobal(pos))
         if chosen is None:
             return
@@ -6513,6 +6849,12 @@ class PdfExploreWindow(QMainWindow):
                     selected_text_hint=selected_text_hint,
                 )
             )
+            return
+        if add_note_action is not None and chosen == add_note_action:
+            _run_note_with_live_selection()
+            return
+        if delete_note_action is not None and chosen == delete_note_action:
+            self._delete_preview_note(clicked_note_id)
             return
         if remove_action is not None and chosen == remove_action:
             _run_with_fresh_context_info(self._remove_persistent_preview_highlight)
