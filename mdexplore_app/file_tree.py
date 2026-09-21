@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QModelIndex, QPoint, QRect, QSize, QSortFilterProxyModel, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -25,9 +25,10 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTreeView,
 )
 
-from .file_coordination import update_files_sidecar
+from .file_coordination import atomic_write_text, update_files_sidecar
 from .icons import load_svg_icon, ui_asset_path
 from .runtime import search_hit_count_font_family
 
@@ -1084,6 +1085,233 @@ class ColorizedExtensionModel(QFileSystemModel):
         return decorated
 
 
+class DirectorySortProxyModel(QSortFilterProxyModel):
+    """Sort direct file children independently for every directory."""
+
+    def __init__(
+        self,
+        source_model: ColorizedExtensionModel,
+        sort_file_name: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._sort_file_name = str(sort_file_name)
+        self._sort_descending_cache: dict[str, bool] = {}
+        self.setSourceModel(source_model)
+        self.setDynamicSortFilter(True)
+        # Keep the proxy itself ascending. lessThan() reverses only file/file
+        # comparisons whose *immediate parent* is configured descending.
+        self.sort(0, Qt.SortOrder.AscendingOrder)
+
+    def __getattr__(self, name: str):
+        """Expose QFileSystemModel-specific API used throughout both apps."""
+        source = self.sourceModel()
+        if source is not None and hasattr(source, name):
+            return getattr(source, name)
+        raise AttributeError(name)
+
+    def _source_index(self, index: QModelIndex) -> QModelIndex:
+        source = self.sourceModel()
+        if source is None or not index.isValid():
+            return QModelIndex()
+        if index.model() is self:
+            return self.mapToSource(index)
+        if index.model() is source:
+            return index
+        return QModelIndex()
+
+    def index(self, *args):
+        """Support both proxy row indexes and QFileSystemModel index(path)."""
+        if args and isinstance(args[0], (str, os.PathLike)):
+            source = self.sourceModel()
+            if source is None:
+                return QModelIndex()
+            source_index = source.index(str(args[0]), *args[1:])
+            return self.mapFromSource(source_index)
+        return super().index(*args)
+
+    def setRootPath(self, path: str) -> QModelIndex:
+        source = self.sourceModel()
+        if source is None:
+            return QModelIndex()
+        return self.mapFromSource(source.setRootPath(path))
+
+    def rootPath(self) -> str:
+        source = self.sourceModel()
+        return source.rootPath() if source is not None else ""
+
+    def filePath(self, index: QModelIndex) -> str:
+        source = self.sourceModel()
+        if source is None:
+            return ""
+        return source.filePath(self._source_index(index))
+
+    def fileInfo(self, index: QModelIndex):
+        source = self.sourceModel()
+        return source.fileInfo(self._source_index(index)) if source is not None else None
+
+    def isDir(self, index: QModelIndex) -> bool:
+        source = self.sourceModel()
+        return bool(source is not None and source.isDir(self._source_index(index)))
+
+    @staticmethod
+    def _directory_key(directory: Path) -> str:
+        try:
+            return str(directory.resolve())
+        except Exception:
+            return str(directory.absolute())
+
+    def _sort_sidecar_path(self, directory: Path) -> Path:
+        return directory / self._sort_file_name
+
+    def directory_sort_descending(self, directory: Path | str) -> bool:
+        directory_path = Path(directory)
+        key = self._directory_key(directory_path)
+        if key in self._sort_descending_cache:
+            return self._sort_descending_cache[key]
+        descending = False
+        try:
+            payload = json.loads(
+                self._sort_sidecar_path(directory_path).read_text(encoding="utf-8")
+            )
+            descending = bool(
+                isinstance(payload, dict)
+                and str(payload.get("order", "")).strip().lower() == "descending"
+            )
+        except Exception:
+            descending = False
+        self._sort_descending_cache[key] = descending
+        return descending
+
+    def set_directory_sort_descending(
+        self,
+        directory: Path | str,
+        descending: bool,
+    ) -> None:
+        directory_path = Path(directory)
+        key = self._directory_key(directory_path)
+        value = bool(descending)
+        atomic_write_text(
+            self._sort_sidecar_path(directory_path),
+            json.dumps(
+                {"order": "descending" if value else "ascending"},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        self._sort_descending_cache[key] = value
+        self.invalidate()
+        self.sort(0, Qt.SortOrder.AscendingOrder)
+
+    def toggle_directory_sort(self, directory: Path | str) -> bool:
+        descending = not self.directory_sort_descending(directory)
+        self.set_directory_sort_descending(directory, descending)
+        return descending
+
+    def invalidate_directory_sort_cache(self) -> None:
+        self._sort_descending_cache.clear()
+        self.invalidate()
+        self.sort(0, Qt.SortOrder.AscendingOrder)
+
+    @staticmethod
+    def _name_key(name: str) -> tuple[str, str]:
+        text = str(name)
+        return text.casefold(), text
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        source = self.sourceModel()
+        if source is None:
+            return super().lessThan(left, right)
+        left_is_dir = bool(source.isDir(left))
+        right_is_dir = bool(source.isDir(right))
+        if left_is_dir != right_is_dir:
+            # Directories remain ahead of files regardless of file sort order.
+            return left_is_dir
+        left_key = self._name_key(source.fileName(left))
+        right_key = self._name_key(source.fileName(right))
+        if left_is_dir:
+            # A parent's toggle never recursively changes child-directory order.
+            return left_key < right_key
+        parent_path = Path(source.filePath(left.parent()))
+        if self.directory_sort_descending(parent_path):
+            return left_key > right_key
+        return left_key < right_key
+
+
+class DirectorySortTreeView(QTreeView):
+    """Tree view that paints/clicks per-directory sort controls at far right."""
+
+    SORT_ICON_SIZE = 16
+    SORT_ICON_RIGHT_MARGIN = 3
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._sort_ascending_icon = QIcon(str(ui_asset_path("sort-ascending.svg")))
+        self._sort_descending_icon = QIcon(str(ui_asset_path("sort-descending.svg")))
+
+    def sort_icon_rect(self, index: QModelIndex) -> QRect:
+        row_rect = self.visualRect(index)
+        if not row_rect.isValid():
+            return QRect()
+        size = self.SORT_ICON_SIZE
+        return QRect(
+            max(0, self.viewport().width() - self.SORT_ICON_RIGHT_MARGIN - size),
+            row_rect.y() + max(0, (row_rect.height() - size) // 2),
+            size,
+            size,
+        )
+
+    def drawRow(self, painter: QPainter, options, index: QModelIndex) -> None:
+        super().drawRow(painter, options, index)
+        model = self.model()
+        if model is None or not hasattr(model, "isDir") or not model.isDir(index):
+            return
+        path = Path(model.filePath(index))
+        descending = bool(model.directory_sort_descending(path))
+        icon = self._sort_descending_icon if descending else self._sort_ascending_icon
+        if icon.isNull():
+            return
+        icon.paint(
+            painter,
+            self.sort_icon_rect(index),
+            Qt.AlignmentFlag.AlignCenter,
+            QIcon.Mode.Normal,
+            QIcon.State.Off,
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            position = event.position().toPoint()
+            index = self.indexAt(position)
+            # The sort control is anchored to the viewport's extreme right and
+            # may therefore sit beyond column 0 when the tree is wider than its
+            # filename column. Resolve the row again at a safe x-coordinate so
+            # the icon remains clickable regardless of column width.
+            if not index.isValid():
+                probe_x = max(
+                    0,
+                    min(
+                        self.viewport().width() - 1,
+                        self.columnViewportPosition(0) + self.columnWidth(0) - 1,
+                    ),
+                )
+                index = self.indexAt(QPoint(probe_x, position.y()))
+            model = self.model()
+            if (
+                index.isValid()
+                and model is not None
+                and hasattr(model, "isDir")
+                and model.isDir(index)
+                and self.sort_icon_rect(index).contains(position)
+            ):
+                model.toggle_directory_sort(Path(model.filePath(index)))
+                self.viewport().update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class ExtensionTreeItemDelegate(QStyledItemDelegate):
     """Paint filename-only highlight backgrounds for target-extension rows."""
 
@@ -1097,7 +1325,7 @@ class ExtensionTreeItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option, index) -> None:
         model = index.model()
-        if not isinstance(model, ColorizedExtensionModel):
+        if not isinstance(model, (ColorizedExtensionModel, DirectorySortProxyModel)):
             super().paint(painter, option, index)
             return
 

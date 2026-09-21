@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtGui import QIcon
 
-from .file_tree import ColorizedExtensionModel, ExtensionTreeItemDelegate
+from .file_tree import (
+    ColorizedExtensionModel,
+    DirectorySortProxyModel,
+    DirectorySortTreeView,
+    ExtensionTreeItemDelegate,
+)
 from .icons import build_markdown_icon
 
 
@@ -21,6 +26,17 @@ class ColorizedMarkdownModel(ColorizedExtensionModel):
 
     def supports_symlink_primary_icon(self) -> bool:
         return True
+
+
+class MarkdownDirectorySortProxyModel(DirectorySortProxyModel):
+    """Per-directory direct-child sorting for Markdown files."""
+
+    def __init__(self, source_model: ColorizedMarkdownModel, parent=None) -> None:
+        super().__init__(source_model, ".mdexplore-sort.json", parent)
+
+
+class MarkdownTreeView(DirectorySortTreeView):
+    """Markdown tree with far-right per-directory sort controls."""
 
 
 class MarkdownTreeItemDelegate(ExtensionTreeItemDelegate):

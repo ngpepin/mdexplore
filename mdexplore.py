@@ -211,7 +211,12 @@ from mdexplore_app.runtime import (
     search_hit_count_font_family as _search_hit_count_font_family,
 )
 from mdexplore_app.tabs import ViewTabBar
-from mdexplore_app.tree import ColorizedMarkdownModel, MarkdownTreeItemDelegate
+from mdexplore_app.tree import (
+    ColorizedMarkdownModel,
+    MarkdownDirectorySortProxyModel,
+    MarkdownTreeItemDelegate,
+    MarkdownTreeView,
+)
 from mdexplore_app.workers import (
     InlineDataImageMaterializeWorker,
     PdfExportWorker,
@@ -2066,16 +2071,17 @@ class MdExploreWindow(QMainWindow):
 
         # Use a custom QFileSystemModel so highlight colors render directly
         # in the tree and persist beside files in each directory.
-        self.model = ColorizedMarkdownModel(self)
-        self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
-        self.model.setNameFilters(["*.md"])
-        self.model.setNameFilterDisables(False)
-        self.model.directoryLoaded.connect(self._on_tree_model_structure_changed)
+        self._source_model = ColorizedMarkdownModel(self)
+        self._source_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
+        self._source_model.setNameFilters(["*.md"])
+        self._source_model.setNameFilterDisables(False)
+        self.model = MarkdownDirectorySortProxyModel(self._source_model, self)
+        self._source_model.directoryLoaded.connect(self._on_tree_model_structure_changed)
         self.model.rowsInserted.connect(self._on_tree_model_structure_changed)
         self.model.rowsRemoved.connect(self._on_tree_model_structure_changed)
         self.model.modelReset.connect(self._on_tree_model_structure_changed)
 
-        self.tree = QTreeView()
+        self.tree = MarkdownTreeView()
         self.tree.setModel(self.model)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setItemDelegate(MarkdownTreeItemDelegate(self.tree))
@@ -2460,7 +2466,7 @@ class MdExploreWindow(QMainWindow):
         self._set_root_directory(self.root)
         self._update_pdf_button_state()
         self._add_shortcuts()
-        self.model.directoryLoaded.connect(self._maybe_apply_initial_split)
+        self._source_model.directoryLoaded.connect(self._maybe_apply_initial_split)
         QTimer.singleShot(0, self._maybe_apply_initial_split)
 
     def _apply_compact_toolbar_button_width(
@@ -7719,7 +7725,9 @@ class MdExploreWindow(QMainWindow):
 
         expanded_paths = self._expanded_directory_paths()
 
-        # Force QFileSystemModel to re-scan root by toggling root path.
+        # Reload per-directory sort sidecars as part of a manual refresh, then
+        # force QFileSystemModel to re-scan root by toggling root path.
+        self.model.invalidate_directory_sort_cache()
         self.model.setRootPath("")
         root_index = self.model.setRootPath(str(self.root))
         self.tree.setRootIndex(root_index)

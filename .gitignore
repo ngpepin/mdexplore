@@ -10,8 +10,9 @@ __pycache__/
 venv/
 env/
 
-# Test, lint, and type-check caches
+# Test, lint, type-check, and gateway-local validation caches
 .pytest_cache/
+.work/
 .mypy_cache/
 .ruff_cache/
 .coverage

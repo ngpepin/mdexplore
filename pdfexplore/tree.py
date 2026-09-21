@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from mdexplore_app.file_tree import ColorizedExtensionModel, ExtensionTreeItemDelegate
+from mdexplore_app.file_tree import (
+    ColorizedExtensionModel,
+    DirectorySortProxyModel,
+    DirectorySortTreeView,
+    ExtensionTreeItemDelegate,
+)
 
 from .settings import TREE_SETTINGS
 
@@ -19,6 +24,17 @@ class ColorizedPdfModel(ColorizedExtensionModel):
     TARGET_EXTENSION = _tree_setting("target_extension", ".pdf")
     PRIMARY_ICON_NAME = _tree_setting("primary_icon_name", "pdf.svg")
     PRIMARY_ICON_COLOR = _tree_setting("primary_icon_color", "#e86060")
+
+
+class PdfDirectorySortProxyModel(DirectorySortProxyModel):
+    """Per-directory direct-child sorting for PDF files."""
+
+    def __init__(self, source_model: ColorizedPdfModel, parent=None) -> None:
+        super().__init__(source_model, ".pdfexplore-sort.json", parent)
+
+
+class PdfTreeView(DirectorySortTreeView):
+    """PDF tree with far-right per-directory sort controls."""
 
 
 class PdfTreeItemDelegate(ExtensionTreeItemDelegate):

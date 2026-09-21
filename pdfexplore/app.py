@@ -99,7 +99,12 @@ from mdexplore_app.search import (
 from mdexplore_app.tabs import ViewTabBar
 
 from .settings import APP_SETTINGS, VIEWER_BRIDGE_SETTINGS
-from .tree import ColorizedPdfModel, PdfTreeItemDelegate
+from .tree import (
+    ColorizedPdfModel,
+    PdfDirectorySortProxyModel,
+    PdfTreeItemDelegate,
+    PdfTreeView,
+)
 from .workers import (
     BACKGROUND_LEASE_BUSY,
     GlobalActivityHeartbeatWorker,
@@ -547,13 +552,14 @@ class PdfExploreWindow(QMainWindow):
         self.setWindowIcon(app_icon)
         self.resize(1848, 980)
 
-        self.model = ColorizedPdfModel(self)
-        self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
-        self.model.setNameFilters(["*.pdf"])
-        self.model.setNameFilterDisables(False)
-        self.model.directoryLoaded.connect(self._on_model_directory_loaded)
+        self._source_model = ColorizedPdfModel(self)
+        self._source_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
+        self._source_model.setNameFilters(["*.pdf"])
+        self._source_model.setNameFilterDisables(False)
+        self.model = PdfDirectorySortProxyModel(self._source_model, self)
+        self._source_model.directoryLoaded.connect(self._on_model_directory_loaded)
 
-        self.tree = QTreeView()
+        self.tree = PdfTreeView()
         self.tree.setModel(self.model)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setItemDelegate(PdfTreeItemDelegate(self.tree))
@@ -3682,6 +3688,7 @@ class PdfExploreWindow(QMainWindow):
         self._persisted_view_sessions_by_dir.clear()
         self._persisted_text_highlights_by_dir.clear()
         self.model.invalidate_persisted_color_cache()
+        self.model.invalidate_directory_sort_cache()
         active_path_key = (
             self._path_key(self.current_file)
             if self.current_file is not None

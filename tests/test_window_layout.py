@@ -588,6 +588,81 @@ class WindowLayoutTests(unittest.TestCase):
         self.assertTrue(index.isValid(), f"Tree index did not load for {path}")
         return index
 
+    def test_directory_sort_control_is_per_directory_and_persisted(self) -> None:
+        root = Path(self._tempdir.name)
+        nested = root / "nested"
+        nested.mkdir()
+        for path in (root / "alpha.md", root / "zeta.md", nested / "alpha.md", nested / "zeta.md"):
+            path.write_text(path.stem, encoding="utf-8")
+
+        self.window._refresh_directory_view()
+        QApplication.processEvents()
+        for path in (root / "alpha.md", root / "zeta.md", nested, nested / "alpha.md", nested / "zeta.md"):
+            self._wait_for_tree_index(path)
+
+        model = self.window.model
+        root_index = model.index(str(root))
+        nested_index = model.index(str(nested))
+
+        def direct_file_names(parent_index):
+            names = []
+            for row in range(model.rowCount(parent_index)):
+                child = model.index(row, 0, parent_index)
+                if child.isValid() and not model.isDir(child):
+                    names.append(Path(model.filePath(child)).name)
+            return names
+
+        def direct_directory_names(parent_index):
+            names = []
+            for row in range(model.rowCount(parent_index)):
+                child = model.index(row, 0, parent_index)
+                if child.isValid() and model.isDir(child):
+                    names.append(Path(model.filePath(child)).name)
+            return names
+
+        self.assertFalse(model.directory_sort_descending(root))
+        self.assertFalse((root / ".mdexplore-sort.json").exists())
+        self.assertEqual(direct_file_names(root_index), ["alpha.md", "zeta.md"])
+        self.assertEqual(direct_file_names(nested_index), ["alpha.md", "zeta.md"])
+
+        model.toggle_directory_sort(root)
+        QApplication.processEvents()
+        self.assertTrue(model.directory_sort_descending(root))
+        self.assertEqual(direct_file_names(root_index), ["zeta.md", "alpha.md"])
+        self.assertEqual(direct_directory_names(root_index), sorted(direct_directory_names(root_index), key=str.casefold))
+        self.assertEqual(
+            direct_file_names(nested_index),
+            ["alpha.md", "zeta.md"],
+            "Parent sorting must not recurse into child directories",
+        )
+        self.assertEqual(
+            json.loads((root / ".mdexplore-sort.json").read_text(encoding="utf-8"))["order"],
+            "descending",
+        )
+
+        model.invalidate_directory_sort_cache()
+        self.assertTrue(model.directory_sort_descending(root))
+
+        self.window.tree.scrollTo(nested_index)
+        QApplication.processEvents()
+        icon_rect = self.window.tree.sort_icon_rect(nested_index)
+        self.assertTrue(icon_rect.isValid())
+        self.assertEqual(icon_rect.right(), self.window.tree.viewport().width() - 4)
+        self.assertFalse(self.window.tree._sort_ascending_icon.isNull())
+        self.assertFalse(self.window.tree._sort_descending_icon.isNull())
+        QTest.mouseClick(
+            self.window.tree.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=icon_rect.center(),
+        )
+        QApplication.processEvents()
+        self.assertTrue(model.directory_sort_descending(nested))
+        self.assertEqual(direct_file_names(nested_index), ["zeta.md", "alpha.md"])
+        self.assertEqual(
+            json.loads((nested / ".mdexplore-sort.json").read_text(encoding="utf-8"))["order"],
+            "descending",
+        )
+
     def test_directory_context_menu_make_root_uses_selected_folder(self) -> None:
         root = Path(self._tempdir.name)
         target = root / "nested-root"

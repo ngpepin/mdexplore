@@ -14,6 +14,11 @@ APT_PACKAGES=(
   python3-venv
   python3-pip
   build-essential
+  libxkbcommon-x11-0
+  libxcb-icccm4
+  libxcb-keysyms1
+  libxcb-xkb1
+  libxcb-cursor0
   poppler-utils
   tesseract-ocr
   antiword
