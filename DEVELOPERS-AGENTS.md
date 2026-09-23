@@ -190,6 +190,7 @@ if changed, it must re-render instead of showing stale cached HTML.
 - PlantUML rendering jobs must run off the UI thread to keep the window responsive.
 - Fenced `svg` blocks and standalone raw `<svg>...</svg>` Markdown blocks must render as SVG images rather than visible source markup. Their normalized, sanitized data URIs are cached in-process by source hash so revisiting an unchanged document avoids repeated SVG parsing/encoding; changing the SVG source must naturally produce a new cache entry.
 - Raw SVG inside ordinary fenced code blocks must remain literal code and must not be converted.
+- Ordinary fenced code blocks are syntax-colored with Pygments when their declared language is recognized. Unlabeled fences are highlighted only when conservative code heuristics identify a language or establish that the block is clearly code; ambiguous prose/text fences must retain their prior plain rendering.
 - Embedded SVG images must not execute SVG scripts/event handlers or `javascript:` links.
 - PlantUML blocks should not block markdown preview; show placeholders first,  
 then progressively replace each diagram as local render jobs complete.

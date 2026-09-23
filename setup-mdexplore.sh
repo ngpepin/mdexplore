@@ -96,6 +96,7 @@ required = [
     "PySide6.QtWebEngineWidgets",
     "pypdf",
     "reportlab.pdfgen.canvas",
+    "pygments",
 ]
 
 missing = []

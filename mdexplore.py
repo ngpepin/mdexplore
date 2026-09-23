@@ -33,6 +33,12 @@ from typing import Callable
 
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
+from pygments import highlight as _pygments_highlight
+from pygments.formatters import HtmlFormatter as _PygmentsHtmlFormatter
+from pygments.lexers import get_lexer_by_name as _pygments_get_lexer_by_name
+from pygments.lexers import guess_lexer as _pygments_guess_lexer
+from pygments.lexers.special import TextLexer as _PygmentsTextLexer
+from pygments.util import ClassNotFound as _PygmentsClassNotFound
 from PySide6.QtCore import (
     QDir,
     QEventLoop,
@@ -245,6 +251,18 @@ _PREVIEW_EXECUTABLE_SCRIPT_TAG_RE = re.compile(
     r"</?script\b[^>]*>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_SYNTAX_HIGHLIGHT_PLAIN_LANGUAGE_NAMES = frozenset(
+    {"text", "txt", "plain", "plaintext", "none"}
+)
+_SYNTAX_HIGHLIGHT_PROSE_LEXER_NAMES = frozenset(
+    {
+        "text only",
+        "markdown",
+        "md",
+        "restructuredtext",
+        "rst",
+    }
+)
 _PREVIEW_INLINE_DATA_IMAGE_MIME_EXTENSION_OVERRIDES = {
     "image/svg+xml": ".svg",
     "image/jpeg": ".jpg",
@@ -442,6 +460,7 @@ class MarkdownRenderer:
         self._md.renderer.rules["math_inline"] = custom_math_inline
         self._md.renderer.rules["math_block"] = custom_math_block
         self._md.renderer.renderToken = custom_render_token
+        self._syntax_formatter = _PygmentsHtmlFormatter(nowrap=True)
 
     @staticmethod
     def _prepare_markdown_for_render(markdown_text: str) -> str:
@@ -570,6 +589,173 @@ class MarkdownRenderer:
             if lowered.startswith("language-") and len(lowered) > len("language-"):
                 return lowered[len("language-") :]
         return ""
+
+    @staticmethod
+    def _code_signal_score(code: str) -> int:
+        """Return a conservative score estimating whether an unlabeled block is code."""
+        text = str(code or "").strip()
+        if len(text) < 8:
+            return 0
+
+        score = 0
+        strong_patterns = (
+            r"(?m)^\s*(?:def|class|async\s+def|from\s+\S+\s+import|import\s+\S+)",
+            r"(?m)^\s*(?:const|let|var|function|export|interface|type)\b",
+            r"(?m)^\s*(?:package\s+main|func\s+\w+|fn\s+\w+|use\s+std::)",
+            r"(?m)^\s*(?:public|private|protected|static)\s+(?:class|void|int|string|bool)\b",
+            r"(?m)^\s*#\s*include\s*[<\"]",
+            r"(?mi)^\s*(?:select\b.+\bfrom\b|insert\s+into\b|update\b.+\bset\b|create\s+table\b)",
+            r"(?m)^\s*#!\s*/.*(?:python|bash|sh|zsh|ruby|perl|node)\b",
+        )
+        for pattern in strong_patterns:
+            if re.search(pattern, text):
+                score += 4
+
+        if re.search(r"=>|::|:=|===|!==|\b(?:None|True|False|null|true|false)\b", text):
+            score += 2
+        if re.search(r"(?m)^\s*(?:if|for|while|switch|catch)\s*\([^\n]*\)", text):
+            score += 2
+        if re.search(r"(?m)[;{}]\s*(?://.*)?$", text):
+            score += 2
+        if re.search(r"(?m)^\s*[A-Za-z_$][\w$]*\s*=\s*[^=]", text):
+            score += 1
+        if re.search(r"(?m)^\s*</?[A-Za-z][^>]*>\s*$", text):
+            score += 2
+        return score
+
+    @staticmethod
+    def _explicit_auto_detect_language(code: str) -> str | None:
+        """Return a strongly indicated language name for common unlabeled code."""
+        text = str(code or "").strip()
+        if not text:
+            return None
+
+        try:
+            parsed_json = json.loads(text)
+        except Exception:
+            parsed_json = None
+        if isinstance(parsed_json, (dict, list)):
+            return "json"
+
+        checks = (
+            ("python", r"(?m)^\s*(?:def|class|async\s+def|from\s+\S+\s+import|import\s+\S+)\b"),
+            ("bash", r"(?m)^(?:\s*#!\s*/.*(?:bash|sh|zsh)\b|\s*(?:for|while)\b.*;\s*do\s*$|\s*(?:fi|done)\s*$)"),
+            ("javascript", r"(?m)^\s*(?:const|let|var|function|export)\b|=>|\bconsole\.log\s*\("),
+            ("typescript", r"(?m)^\s*(?:interface|type)\s+[A-Za-z_$]|:\s*(?:string|number|boolean)\b"),
+            ("rust", r"(?m)^\s*(?:fn\s+\w+|use\s+std::|let\s+mut\b)"),
+            ("go", r"(?m)^\s*(?:package\s+main|func\s+\w+\s*\()"),
+            ("java", r"(?m)^\s*(?:public\s+static\s+void\s+main|public\s+class\s+\w+)"),
+            ("cpp", r"(?m)^\s*#\s*include\s*[<\"]|\bstd::\w+"),
+            ("sql", r"(?mi)^\s*(?:select\b.+\bfrom\b|insert\s+into\b|update\b.+\bset\b|create\s+table\b)"),
+            ("html", r"(?is)^\s*(?:<!doctype\s+html\b|<html\b|<div\b|<section\b|<article\b)"),
+        )
+        for language, pattern in checks:
+            if re.search(pattern, text):
+                return language
+        return None
+
+    def _detect_code_lexer(self, code: str):
+        """Return a Pygments lexer only when an unlabeled block looks confidently like code."""
+        text = str(code or "")
+        if self._code_signal_score(text) < 3:
+            return None
+
+        explicit_language = self._explicit_auto_detect_language(text)
+        if explicit_language:
+            try:
+                return _pygments_get_lexer_by_name(explicit_language)
+            except _PygmentsClassNotFound:
+                return None
+
+        try:
+            lexer = _pygments_guess_lexer(text)
+        except _PygmentsClassNotFound:
+            return None
+        if isinstance(lexer, _PygmentsTextLexer):
+            return None
+        lexer_name = str(getattr(lexer, "name", "") or "").strip().casefold()
+        lexer_aliases = {
+            str(alias).strip().casefold()
+            for alias in (getattr(lexer, "aliases", ()) or ())
+            if str(alias).strip()
+        }
+        if lexer_name in _SYNTAX_HIGHLIGHT_PROSE_LEXER_NAMES:
+            return None
+        if lexer_aliases & _SYNTAX_HIGHLIGHT_PROSE_LEXER_NAMES:
+            return None
+        return lexer
+
+    @staticmethod
+    def _lexer_display_name(lexer) -> str:
+        aliases = list(getattr(lexer, "aliases", ()) or ())
+        if aliases:
+            return str(aliases[0]).strip().lower()
+        return str(getattr(lexer, "name", "code") or "code").strip().lower()
+
+    def _syntax_highlight_code_blocks(self, html_body: str) -> str:
+        """Colorize recognized code blocks while leaving ambiguous text untouched."""
+
+        def _replace(match: re.Match[str]) -> str:
+            pre_open = str(match.group("pre_open") or "<pre>")
+            code_attrs = str(match.group("code_attrs") or "")
+            escaped_code = str(match.group("code") or "")
+            code_text = html.unescape(escaped_code)
+            language = self._extract_code_language_from_attrs(code_attrs)
+            if not language:
+                language = self._extract_pre_language_from_attrs(pre_open)
+
+            if language in _SYNTAX_HIGHLIGHT_PLAIN_LANGUAGE_NAMES:
+                return match.group(0)
+
+            lexer = None
+            detected = False
+            if language:
+                try:
+                    lexer = _pygments_get_lexer_by_name(language)
+                except _PygmentsClassNotFound:
+                    return match.group(0)
+            else:
+                lexer = self._detect_code_lexer(code_text)
+                detected = lexer is not None
+
+            if lexer is None:
+                return match.group(0)
+
+            highlighted = _pygments_highlight(
+                code_text,
+                lexer,
+                self._syntax_formatter,
+            )
+            detected_language = self._lexer_display_name(lexer)
+            existing_classes = re.search(
+                r'class\s*=\s*(?:"(?P<dq>[^"]*)"|\'(?P<sq>[^\']*)\')',
+                code_attrs,
+                flags=re.IGNORECASE,
+            )
+            if existing_classes is not None:
+                class_value = existing_classes.group("dq") or existing_classes.group("sq") or ""
+                class_tokens = class_value.split()
+                if "mdexplore-syntax-highlight" not in class_tokens:
+                    class_tokens.append("mdexplore-syntax-highlight")
+                replacement = f'class="{html.escape(" ".join(class_tokens), quote=True)}"'
+                code_attrs = (
+                    code_attrs[: existing_classes.start()]
+                    + replacement
+                    + code_attrs[existing_classes.end() :]
+                )
+            else:
+                code_attrs = f'{code_attrs} class="mdexplore-syntax-highlight"'
+            if detected:
+                code_attrs = (
+                    f'{code_attrs} data-mdexplore-detected-language="'
+                    f'{html.escape(detected_language, quote=True)}"'
+                )
+            return f"{pre_open}<code{code_attrs}>{highlighted}</code></pre>"
+
+        try:
+            return _CMARK_CODE_BLOCK_RE.sub(_replace, str(html_body or ""))
+        except Exception:
+            return html_body
 
     def _rewrite_cmark_special_fences(self, html_body: str, env: dict[str, object]) -> str:
         """Replace cmark-rendered Mermaid/PlantUML/SVG fences with mdexplore blocks."""
@@ -1609,6 +1795,7 @@ class MarkdownRenderer:
             body = self._render_body_with_cmark(prepared_markdown, env)
         if body is None:
             body = self._md.render(prepared_markdown, env)
+        body = self._syntax_highlight_code_blocks(body)
         body = self._neutralize_executable_script_tags(body)
         if isinstance(env.get("mermaid_pdf_svg_by_hash"), dict):
             self._last_mermaid_pdf_svg_by_hash = dict(

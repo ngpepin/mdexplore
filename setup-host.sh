@@ -227,6 +227,7 @@ required = [
     "PySide6.QtWebEngineWidgets",
     "pypdf",
     "reportlab.pdfgen.canvas",
+    "pygments",
 ]
 for name in required:
     importlib.import_module(name)

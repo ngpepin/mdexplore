@@ -90,6 +90,58 @@ class TemplateAssetTests(unittest.TestCase):
         self.assertNotIn("__ESCAPED_TITLE__", rendered)
         self.assertNotIn("__BODY_HTML__", rendered)
 
+    def test_markdown_renderer_highlights_explicit_python_fence(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "```python\ndef greet(name):\n    return f\"Hello {name}\"\n```\n"
+        rendered = renderer.render_document(source, "Python")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn("<span", main_html)
+        self.assertIn("return", main_html)
+
+    def test_markdown_renderer_auto_detects_unlabeled_python_code(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "```\ndef greet(name):\n    print(name)\n```\n"
+        rendered = renderer.render_document(source, "Detected Python")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn('data-mdexplore-detected-language="python"', main_html)
+
+    def test_markdown_renderer_auto_detects_unlabeled_javascript_code(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "```\nconst add = (a, b) => a + b;\nconsole.log(add(2, 3));\n```\n"
+        rendered = renderer.render_document(source, "Detected JavaScript")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn('data-mdexplore-detected-language="javascript"', main_html)
+
+    def test_markdown_renderer_leaves_unrecognized_prose_fence_plain(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            "```\n"
+            "This is an ordinary paragraph of English prose.\n"
+            "It should remain a plain code block rather than being guessed as code.\n"
+            "```\n"
+        )
+        rendered = renderer.render_document(source, "Plain prose")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertNotIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn("ordinary paragraph", main_html)
+
+    def test_markdown_renderer_respects_explicit_text_fence(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "```text\ndef this_looks_like_code():\n    but_should_stay_plain = True\n```\n"
+        rendered = renderer.render_document(source, "Explicit text")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertNotIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn('lang="text"', main_html)
+
+    def test_preview_template_contains_syntax_highlight_palette(self) -> None:
+        source = get_template_asset("preview/document.html")
+        self.assertIn(".mdexplore-syntax-highlight .k", source)
+        self.assertIn(".mdexplore-syntax-highlight .s", source)
+        self.assertIn("prefers-color-scheme: dark", source)
+
     def test_markdown_renderer_neutralizes_raw_script_tags_in_prose(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         source = (
