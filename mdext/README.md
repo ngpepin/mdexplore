@@ -1,11 +1,11 @@
 # mdExt
 
-`mdExt` is a Visual Studio Code Markdown preview extension derived from the rendering ideas in **mdexplore**. It provides a real read-only custom editor for `.md` and `.markdown` files.
+`mdExt` is a Visual Studio Code Markdown preview extension derived from the rendering ideas in **mdexplore**. It provides a Markdown preview for `.md` and `.markdown` files. Content stays read-only except for explicitly tagged fillable form regions; see [Fillable Markdown](MARKDOWN-FORMS.md).
 
 ## Features
 
-- **Editor toolbar preview toggle:** from the built-in Text Editor, click the mdExt preview button to open Text Editor on the left and mdExt on the right; click it again to return to the single Text Editor pane. From a single mdExt read-only editor, the button places Text Editor over the original mdExt tab on the left and opens a temporary mdExt preview on the right; the next click closes that temporary preview and the Text Editor, revealing the original rendered mdExt editor again.
-- **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown (Read-only)**.
+- **Editor toolbar preview toggle:** from the built-in Text Editor, click the mdExt preview button to open Text Editor on the left and mdExt on the right; click it again to return to the single Text Editor pane. From a single mdExt preview editor, the button places Text Editor over the original mdExt tab on the left and opens a temporary mdExt preview on the right; the next click closes that temporary preview and the Text Editor, revealing the original rendered mdExt editor again.
+- **Open With support:** right-click a Markdown tab or file, choose **Reopen Editor With…**, then choose **mdExt Markdown Preview**.
 - **Edit from preview:** the `Edit` button immediately to the right of `Search` always reopens the previewed document in VS Code's built-in Text Editor. mdExt deliberately does not route editing through the newer Markdown Editor or Markdown Preview.
 - **Comfortable default zoom:** preview text starts two font-size steps larger than VS Code's editor font. `Alt++` and `Alt+-` still adjust it one pixel at a time.
 - **Per-document zoom memory:** font-size adjustments are stored in VS Code workspace storage for each Markdown document and restored when it is previewed again. Stale zoom records are periodically garbage-collected, with a bounded retained history.
@@ -49,7 +49,7 @@ For PDF export, mdExt needs a Python runtime containing PySide6 Qt WebEngine. Fr
 - `mdExt: Refresh Preview`
 - `mdExt: Open Markdown Source`
 
-The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown resource is active. mdExt interoperates with VS Code's built-in Text Editor: if the Markdown resource is currently shown in Markdown Preview, the newer Markdown Editor/Hybrid Markdown Editor, or another custom editor, mdExt first reopens it in the built-in Text Editor and then opens the read-only mdExt preview to the right.
+The default preview shortcut is `Ctrl+Shift+V` (`Cmd+Shift+V` on macOS) while a Markdown resource is active. mdExt interoperates with VS Code's built-in Text Editor: if the Markdown resource is currently shown in Markdown Preview, the newer Markdown Editor/Hybrid Markdown Editor, or another custom editor, mdExt first reopens it in the built-in Text Editor and then opens the mdExt preview to the right.
 
 ## Settings
 
@@ -69,3 +69,9 @@ Preview HTML is sanitized before it enters the webview. The webview uses a restr
 ## License
 
 MIT. Bundled third-party components retain their own upstream licenses.
+
+## Fillable forms (0.1.18)
+
+Gray fields opt in through hidden `mdform` HTML comments. Click to edit text or toggle a designated checkbox; saves update the original and retain its first `.preedit.md` backup. Local files in trusted workspaces only; save/discard any unsaved source-editor changes first. See the [syntax, backup contract and acceptance test](MARKDOWN-FORMS.md). Reload VS Code after installing this version.
+
+Select ordinary preview text and right-click **Add text field** or **Add checkbox**. Within a table cell, matching **in new column** actions insert a column immediately to the right. Labels can be changed before adding; defaults are **Click to fill in** and **Done**. The selected text is preserved. Empty-field text is two points smaller.

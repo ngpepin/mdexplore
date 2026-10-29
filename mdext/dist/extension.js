@@ -321,6 +321,262 @@ ${text}
   }
 });
 
+// src/formInsertion.js
+var require_formInsertion = __commonJS({
+  "src/formInsertion.js"(exports2, module2) {
+    "use strict";
+    var crypto = require("node:crypto");
+    var { hash, parseFields, codeRanges } = require_formFields();
+    var punctuation = /[\\`*_{}\[\]<>()#+.!|~$>\-]/;
+    var escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    function cells(line) {
+      const cuts = [];
+      for (let i = 0; i < line.length; i++) if (line[i] === "|") {
+        let slashes = 0;
+        for (let j = i - 1; j >= 0 && line[j] === "\\"; j--) slashes++;
+        if (slashes % 2 === 0) cuts.push(i);
+      }
+      if (!cuts.length) return [];
+      const bounds = [-1, ...cuts, line.length], result = bounds.slice(1).map((b, i) => [bounds[i] + 1, b]);
+      if (!line.slice(0, cuts[0]).trim()) result.shift();
+      if (!line.slice(cuts.at(-1) + 1).trim()) result.pop();
+      return result;
+    }
+    function applyInsert(source, request) {
+      if (request.revision !== hash(source)) throw new Error("The file changed. Refresh before inserting a field.");
+      const kind = request.kind;
+      let label = request.label ?? (kind === "check" ? "Done" : "Click to fill in");
+      if (!["field", "check"].includes(kind) || typeof label !== "string" || label.length > 200 || /[\r\n\x00]|<!--|-->|mdform:/i.test(label)) throw new Error("Use a single-line label of up to 200 characters without form markers.");
+      label = label.trim() || (kind === "check" ? "Done" : "Click to fill in");
+      const selection = request.selection || {}, text = selection.text;
+      if (typeof text !== "string" || !text.trim() || text.length > 2e4) throw new Error("Select text in one paragraph or table cell first.");
+      const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
+      const { startLine: start, endLine: end } = selection;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || !(0 <= start && start < end && end <= lines.length)) throw new Error("Cannot locate this selection in Markdown. Select a shorter text span.");
+      const sumTo = (n) => lines.slice(0, n).join("").length;
+      let offset = sumTo(start), segment = lines.slice(start, end).join(""), tableRows = null, header, top, row, column, selectedRow;
+      if (selection.table != null) {
+        ({ startLine: top, row, column } = selection.table);
+        if ([top, row, column].some((n) => !Number.isInteger(n) || n < 0) || top + 1 >= lines.length) throw new Error("Cannot locate the selected Markdown table.");
+        header = cells(lines[top].replace(/[\r\n]+$/, ""));
+        const sep = lines[top + 1].replace(/[\r\n]+$/, ""), separators = cells(sep);
+        if (!header.length || header.length !== separators.length || column >= header.length || separators.some(([a2, b2]) => !/^\s*:?-+:?\s*$/.test(sep.slice(a2, b2)))) throw new Error("Only ordinary pipe tables support column insertion.");
+        tableRows = [top, top + 1];
+        let i = top + 2;
+        while (i < lines.length && lines[i].trim() && cells(lines[i].replace(/[\r\n]+$/, "")).length) tableRows.push(i++);
+        selectedRow = row === 0 ? top : top + row + 1;
+        if (!tableRows.includes(selectedRow) || selectedRow === top + 1) throw new Error("The selected table row is not present in the source.");
+        const bounds = cells(lines[selectedRow].replace(/[\r\n]+$/, ""));
+        if (bounds.length !== header.length) throw new Error("Normalize ragged table rows in the source before inserting.");
+        const [a, b] = bounds[column];
+        offset = sumTo(selectedRow) + a;
+        segment = lines[selectedRow].slice(a, b);
+      }
+      const pattern = Array.from(text, (c) => (punctuation.test(c) ? "\\\\?" : "") + escapeRegex(c)).join("");
+      const matches = [...segment.matchAll(new RegExp(pattern, "g"))];
+      const occurrence = selection.occurrence ?? 0, total = selection.occurrences ?? 1;
+      if (!Number.isInteger(occurrence) || matches.length !== total || occurrence < 0 || occurrence >= matches.length) throw new Error("Selection cannot be mapped unambiguously. Select a shorter plain-text span within one cell or paragraph.");
+      const match = matches[occurrence], begin = offset + match.index, finish = begin + match[0].length;
+      const fields = parseFields(source);
+      if (codeRanges(source).some(([a, b]) => a < finish && b > begin) || fields.some((f) => f.start < finish && f.end > begin)) throw new Error("Choose ordinary text outside code and existing form controls.");
+      const id = "field-" + crypto.randomBytes(8).toString("hex");
+      const encoded = Array.from(label, (c) => punctuation.test(c) ? "\\" + c : c).join("");
+      const element = kind === "field" ? `<!-- mdform:field id="${id}" placeholder="${escapeHtml(label).replace(/\|/g, "&#124;").replace(/`/g, "&#96;")}" -->____<!-- /mdform -->` : `<!-- mdform:check id="${id}" -->[ ] ${encoded}<!-- /mdform -->`;
+      let updated;
+      if (!request.newColumn) updated = source.slice(0, finish) + " " + element + source.slice(finish);
+      else {
+        if (!tableRows) throw new Error("Select text within one table cell to add a column.");
+        for (const index of [...tableRows].reverse()) {
+          const bounds = cells(lines[index].replace(/[\r\n]+$/, ""));
+          if (bounds.length !== header.length) throw new Error("Normalize ragged table rows in the source before inserting.");
+          const pos = bounds[column][1], value = index === top + 1 ? "---" : index === selectedRow ? element : "";
+          lines[index] = lines[index].slice(0, pos) + " | " + value + " " + lines[index].slice(pos);
+        }
+        updated = lines.join("");
+      }
+      parseFields(updated);
+      return updated;
+    }
+    module2.exports = { applyInsert, cells };
+  }
+});
+
+// src/formFields.js
+var require_formFields = __commonJS({
+  "src/formFields.js"(exports2, module2) {
+    "use strict";
+    var fs = require("node:fs");
+    var path = require("node:path");
+    var crypto = require("node:crypto");
+    var { TextDecoder } = require("node:util");
+    var hash = (text) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
+    var escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    var punctuation = /[\\`*_{}\[\]<>()#+.!|~$>-]/g;
+    var decode = (s) => s.replace(/\\([\\`*_{}\[\]<>()#+.!|~$>-])/g, "$1");
+    function decodeEntities(s) {
+      return s.replace(/&(?:amp|lt|gt|quot|apos|#39|#x27|#124|#96);/g, (c) => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&#39;": "'", "&#x27;": "'", "&#124;": "|", "&#96;": "`" })[c]);
+    }
+    function codeRanges(source) {
+      const ranges = [];
+      let fence = null;
+      let offset = 0;
+      for (const line of source.match(/[^\n]*\n|[^\n]+$/g) || []) {
+        const m2 = /^( {0,3})(`{3,}|~{3,})(.*)/.exec(line);
+        if (fence) {
+          if (m2 && m2[2][0] === fence.char && m2[2].length >= fence.length && !m2[3].trim()) {
+            ranges.push([fence.start, offset + line.length]);
+            fence = null;
+          }
+        } else if (m2) fence = { start: offset, char: m2[2][0], length: m2[2].length };
+        else if (/^(?: {4}|\t)/.test(line)) ranges.push([offset, offset + line.length]);
+        offset += line.length;
+      }
+      if (fence) ranges.push([fence.start, source.length]);
+      const ticks = /(?<!\\)(`+)[\s\S]*?(?<!\\)\1/g;
+      let m;
+      while (m = ticks.exec(source)) ranges.push([m.index, ticks.lastIndex]);
+      return ranges;
+    }
+    function parseFields(source) {
+      if (!source.includes("mdform")) return [];
+      const ranges = codeRanges(source);
+      const fields = [];
+      const ids = /* @__PURE__ */ new Set();
+      let active = null;
+      const marker = /<!--\s*(?:mdform:(field|text|check)\s+id="([A-Za-z][A-Za-z0-9_-]{0,63})"(?:\s+placeholder="([^"<>]*)")?\s*|\/mdform\s*)-->/g;
+      let m;
+      while (m = marker.exec(source)) {
+        if (ranges.some(([a, b]) => m.index >= a && m.index < b)) continue;
+        if (m[1]) {
+          if (active || ids.has(m[2])) throw new Error("Nested or duplicate mdform markers. Fix the source before editing.");
+          active = { id: m[2], kind: m[1], start: m.index, placeholder: decodeEntities(m[3] || "Click to fill in"), valueStart: marker.lastIndex };
+          ids.add(m[2]);
+        } else {
+          if (!active) throw new Error("Unmatched mdform closing marker.");
+          const raw = source.slice(active.valueStart, m.index);
+          let value;
+          if (active.kind === "check") {
+            const check = /^(\s*(?:- +)?\[)([ xX])(\][^\r\n]*\s*)$/.exec(raw);
+            if (!check) throw new Error("A check region must contain one [ ] or [x] checkbox, optionally a task-list item.");
+            value = check[2].toLowerCase() === "x";
+            active.label = decode(check[3].slice(1).trim()) || active.id;
+            active.checkOffset = active.valueStart + check[1].length;
+          } else {
+            if (active.kind === "field" && /[\r\n]/.test(raw)) throw new Error("Use mdform:text for multiline fields.");
+            value = decode(raw.trim());
+            if (value === "____") value = "";
+          }
+          fields.push({ ...active, valueEnd: m.index, end: marker.lastIndex, value });
+          active = null;
+        }
+      }
+      if (active) throw new Error("Unclosed mdform marker.");
+      return fields;
+    }
+    function applyField(source, request) {
+      if (!request || request.revision !== hash(source)) throw new Error("The file changed. Refresh and review your draft before saving again.");
+      const f = parseFields(source).find((f2) => f2.id === request.id);
+      if (!f) throw new Error("This is not a designated editable field.");
+      if (f.kind === "check") {
+        if (typeof request.value !== "boolean") throw new Error("Checkbox value must be true or false.");
+        return source.slice(0, f.checkOffset) + (request.value ? "x" : " ") + source.slice(f.checkOffset + 1);
+      }
+      if (typeof request.value !== "string" || request.value.length > 2e4 || /\x00|<!--|-->|mdform:/i.test(request.value)) throw new Error("Invalid field text (limit 20,000 characters; form markers are not allowed).");
+      let value = request.value.replace(/\r\n?/g, "\n");
+      if (f.kind === "field" && value.includes("\n")) throw new Error("This field accepts a single line.");
+      value = value.replace(punctuation, "\\$&") || "____";
+      if (f.kind === "text") {
+        const eol = source.includes("\r\n") ? "\r\n" : "\n";
+        value = eol + value.replace(/\n/g, eol) + eol;
+      }
+      return source.slice(0, f.valueStart) + value + source.slice(f.valueEnd);
+    }
+    function prepareForms(source) {
+      let fields;
+      try {
+        fields = parseFields(source);
+      } catch (error) {
+        return { source, fields: [], error: error.message };
+      }
+      const token = "MDFORM" + crypto.randomBytes(12).toString("hex");
+      let prepared = source;
+      for (let i = fields.length - 1; i >= 0; i--) {
+        const f = fields[i];
+        f.token = token + i + "END";
+        prepared = prepared.slice(0, f.start) + f.token + "\n".repeat((source.slice(f.start, f.end).match(/\n/g) || []).length) + prepared.slice(f.end);
+      }
+      return { source: prepared, fields, revision: hash(source) };
+    }
+    function finishForms(body, forms) {
+      for (const f of forms.fields) {
+        const data = `data-mdform-id="${f.id}" data-mdform-kind="${f.kind}" data-mdform-value="${escapeHtml(String(f.value))}" data-mdform-placeholder="${escapeHtml(f.placeholder)}"`;
+        const emptyClass = f.value ? "" : " mdform-empty";
+        const control = f.kind === "check" ? `<label class="mdform-region"><input type="checkbox" ${data} ${f.value ? "checked" : ""}> ${escapeHtml(f.label)}</label>` : `<button type="button" class="mdform-region mdform-${f.kind}${emptyClass}" ${data} aria-label="Edit ${f.id}">${escapeHtml(f.value || f.placeholder)}</button>`;
+        body = body.replace(f.token, control);
+      }
+      return body;
+    }
+    async function documentRevision(file, renderedSource) {
+      const bytes = await fs.promises.readFile(file);
+      const raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      return hash(raw.replace(/^\uFEFF/, "") === renderedSource.replace(/^\uFEFF/, "") ? raw : renderedSource);
+    }
+    function saveField(file, request, guard = () => {
+    }) {
+      const resolved = fs.realpathSync(file);
+      if (!/\.(md|markdown)$/i.test(resolved) || /\.preedit\.md$/i.test(resolved)) throw new Error("Only original local Markdown documents can be edited.");
+      const lock = resolved + ".mdform.lock";
+      let fd;
+      let temp;
+      try {
+        fd = fs.openSync(lock, "wx", 384);
+        guard();
+        const bytes = fs.readFileSync(resolved);
+        const source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        const next = request.operation === "insert" ? require_formInsertion().applyInsert(source, request) : applyField(source, request);
+        if (next === source) return { text: source, revision: hash(source), unchanged: true };
+        const backup = resolved.replace(/\.(md|markdown)$/i, ".preedit.md");
+        try {
+          fs.copyFileSync(resolved, backup, fs.constants.COPYFILE_EXCL);
+        } catch (e) {
+          if (e.code !== "EEXIST") throw e;
+          const st = fs.lstatSync(backup);
+          if (!st.isFile() || st.isSymbolicLink()) throw new Error("Backup path is not a regular file.");
+        }
+        guard();
+        if (!fs.readFileSync(resolved).equals(bytes)) throw new Error("The file changed during save. Nothing was overwritten.");
+        temp = path.join(path.dirname(resolved), "." + path.basename(resolved) + ".mdform-" + crypto.randomBytes(8).toString("hex"));
+        const out = fs.openSync(temp, "wx", fs.statSync(resolved).mode & 511);
+        try {
+          fs.fchmodSync(out, fs.statSync(resolved).mode & 511);
+          fs.writeFileSync(out, next, "utf8");
+          fs.fsyncSync(out);
+        } finally {
+          fs.closeSync(out);
+        }
+        if (!fs.readFileSync(resolved).equals(bytes)) throw new Error("The file changed during save. Nothing was overwritten.");
+        fs.renameSync(temp, resolved);
+        temp = null;
+        return { text: next, revision: hash(next), backup };
+      } catch (e) {
+        if (e.code === "EEXIST") throw new Error("Another form save is in progress (.mdform.lock). Retry shortly.");
+        throw e;
+      } finally {
+        if (temp) try {
+          fs.unlinkSync(temp);
+        } catch {
+        }
+        if (fd !== void 0) {
+          fs.closeSync(fd);
+          fs.unlinkSync(lock);
+        }
+      }
+    }
+    module2.exports = { codeRanges, hash, parseFields, applyField, prepareForms, finishForms, saveField, documentRevision };
+  }
+});
+
 // src/searchQuery.js
 var require_searchQuery = __commonJS({
   "src/searchQuery.js"(exports2, module2) {
@@ -68446,6 +68702,7 @@ var require_renderer = __commonJS({
   "src/renderer.js"(exports2, module2) {
     "use strict";
     var MarkdownIt = require_index_cjs4();
+    var { prepareForms, finishForms } = require_formFields();
     var taskLists = require_markdown_it_task_lists();
     var hljs = require_lib2();
     var sanitizeHtml = require_sanitize_html();
@@ -68650,7 +68907,8 @@ var require_renderer = __commonJS({
         }
         return defaultLinkOpen(tokens, index, options, env, self);
       };
-      let body = md.render(String(markdown || ""));
+      const forms = prepareForms(String(markdown || ""));
+      let body = md.render(forms.source);
       body = transformCallouts(body);
       for (const embeddedSvg of embeddedSvgs) {
         const result = typeof diagramRenderers?.renderEmbeddedSvg === "function" ? diagramRenderers.renderEmbeddedSvg(embeddedSvg.source) : { dataUri: "", error: "Embedded SVG renderer is unavailable." };
@@ -68684,7 +68942,8 @@ var require_renderer = __commonJS({
         const placeholder = `<div class="mdext-diagram-placeholder" data-diagram-placeholder="${diagram.id}"></div>`;
         body = body.replace(placeholder, diagramShell(diagram));
       }
-      return { body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
+      body = finishForms(body, forms);
+      return { formFieldCount: forms.fields.length, formRevision: forms.revision, formError: forms.error, body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
     }
     module2.exports = {
       renderMarkdown,
@@ -68871,6 +69130,7 @@ var require_webview = __commonJS({
     }
     function getWebviewHtml(webview, context) {
       const scriptNonce = nonce();
+      const formScript = resourceUri(webview, context, "media", "formFields.js");
       const previewScript = resourceUri(webview, context, "media", "preview.js");
       const searchCompatScript = resourceUri(webview, context, "media", "searchCompat.js");
       const highlightCompatScript = resourceUri(webview, context, "media", "highlightCompat.js");
@@ -68950,6 +69210,10 @@ var require_webview = __commonJS({
     </section>
   </main>
   <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-add-field" role="menuitem">Add text field</button>
+    <button id="context-add-check" role="menuitem">Add checkbox</button>
+    <button id="context-add-field-column" role="menuitem">Add text field in new column</button>
+    <button id="context-add-check-column" role="menuitem">Add checkbox in new column</button>
     <button id="context-copy-rendered-button" role="menuitem">Copy Rendered Text</button>
     <button id="context-copy-source-button" role="menuitem">Copy Source Markdown</button>
     <button id="context-highlight-button" role="menuitem">Highlight</button>
@@ -68958,6 +69222,7 @@ var require_webview = __commonJS({
   <div id="render-status" role="status" aria-live="polite"></div>
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>
+  <script nonce="${scriptNonce}" src="${formScript}"></script>
   <script nonce="${scriptNonce}" src="${previewScript}"></script>
 </body>
 </html>`;
@@ -68971,6 +69236,7 @@ var require_previewCoordinator = __commonJS({
   "src/previewCoordinator.js"(exports2, module2) {
     "use strict";
     var path = require("node:path");
+    var { saveField, documentRevision } = require_formFields();
     var vscode2 = require("vscode");
     var { SEARCH_CLOSE_WORD_GAP, extractSearchTerms, extractNearTermGroups } = require_searchQuery();
     var {
@@ -69119,7 +69385,9 @@ var require_previewCoordinator = __commonJS({
       attachMessages(surface) {
         surface.webview.onDidReceiveMessage(async (message) => {
           const type = String(message?.type || "");
-          if (type === "refresh") {
+          if (type === "saveFormField") {
+            await this.saveFormField(surface, message);
+          } else if (type === "refresh") {
             await this.renderSurface(surface);
           } else if (type === "edit") {
             await this.editPreviewedDocument(surface.uri);
@@ -69156,6 +69424,22 @@ var require_previewCoordinator = __commonJS({
             await this.revealSourceLine(surface.uri, Number(message.line));
           }
         });
+      }
+      async saveFormField(surface, message) {
+        try {
+          const uri = surface.uri;
+          if (!uri || uri.scheme !== "file" || !vscode2.workspace.isTrusted) throw new Error("Form editing requires a trusted workspace and a local file.");
+          if (message.documentKey !== uri.toString() || message.revision !== surface.formRevision) throw new Error("The preview changed. Refresh before saving.");
+          const guard = () => {
+            const open = (vscode2.workspace.textDocuments || []).find((doc) => doc.uri.toString() === uri.toString());
+            if (open?.isDirty) throw new Error("The source editor has unsaved changes. Save or discard those changes first.");
+          };
+          const outcome = saveField(uri.fsPath, message, guard);
+          surface.formRevision = outcome.revision;
+          surface.webview.postMessage({ type: "formSaved", ok: true, revision: outcome.revision, unchanged: outcome.unchanged === true });
+        } catch (error) {
+          surface.webview.postMessage({ type: "formSaved", ok: false, error: String(error.message || error) });
+        }
       }
       currentMarkdownUri(preferredUri = null) {
         const rememberIfMarkdown = (candidate) => {
@@ -69415,18 +69699,26 @@ var require_previewCoordinator = __commonJS({
             }
             return surface.webview.asWebviewUri(vscode2.Uri.file(resolvedPath)).toString();
           };
+          const markdown = document2.getText();
           const result = await renderMarkdown({
-            markdown: document2.getText(),
+            markdown,
             documentPath: document2.uri.fsPath,
             resolveAsset,
             diagramRenderers: this.diagramRenderers
           });
+          if (document2.uri.scheme === "file") {
+            result.formRevision = await documentRevision(document2.uri.fsPath, markdown);
+          }
           const persistentHighlights = await loadHighlightEntries(document2.uri.fsPath);
           const scrollLine = this.clampDocumentLine(document2, this.anchorLineForUri(document2.uri));
           if (surface.disposed || this.renderGeneration.get(surface) !== generation) {
             return;
           }
+          surface.formRevision = result.formRevision;
           surface.webview.postMessage({
+            formRevision: result.formRevision,
+            formError: result.formError,
+            documentKey: document2.uri.toString(),
             type: "render",
             body: result.body,
             title: path.basename(document2.uri.fsPath || document2.uri.path),

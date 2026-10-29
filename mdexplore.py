@@ -53,6 +53,7 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import (
     QAction,
@@ -77,6 +78,7 @@ from PySide6.QtWebEngineCore import (
     QWebEngineProfile,
     QWebEngineSettings,
 )
+from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -189,8 +191,15 @@ from mdexplore_app.fast_base64 import (
     b64decode_loose as _b64decode_loose,
     b64encode_ascii as _b64encode_ascii,
 )
+from mdexplore_app.form_fields import (
+    prepare_forms as _prepare_forms,
+    finish_forms as _finish_forms,
+    revision as _form_revision,
+    save_field as _save_form_field,
+)
 from mdexplore_app.js import (
     preload_js_assets as _preload_js_assets,
+    get_js_asset as _get_js_asset,
     render_js_asset as _render_js_asset,
 )
 
@@ -472,6 +481,7 @@ class MarkdownRenderer:
         prepared = list(lines)
         standalone_dollar_lines: list[int] = []
         writing_wrapper_open = False
+        exported_user_callout = False
         fence_char = ""
         fence_length = 0
 
@@ -482,6 +492,31 @@ class MarkdownRenderer:
         for index, line in enumerate(lines):
             content = line.rstrip("\r\n")
             stripped = content.strip()
+
+            # ChatGPT exports wrap User messages in a Markdown callout. A literal
+            # leading `>` from pasted terminal continuation prompts therefore
+            # arrives as `> > ...`, which Markdown otherwise parses as a nested
+            # blockquote. Escape only that inner marker for exporter-tagged User
+            # callouts so the pasted text remains literal and line numbers stay
+            # unchanged.
+            is_quoted_line = bool(re.match(r"^[ \t]{0,3}>", content))
+            if exported_user_callout:
+                if not is_quoted_line:
+                    exported_user_callout = False
+                else:
+                    rewritten = re.sub(
+                        r"^([ \t]{0,3}>[ \t]?)>(?=[ \t]|$)",
+                        r"\1\\>",
+                        content,
+                        count=1,
+                    )
+                    if rewritten != content:
+                        line_ending = line[len(content) :]
+                        content = rewritten
+                        prepared[index] = rewritten + line_ending
+                        stripped = content.strip()
+            if is_quoted_line and "cgpt-user-callout-marker" in content:
+                exported_user_callout = True
 
             fence_match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", content)
             if fence_char:
@@ -1776,6 +1811,8 @@ class MarkdownRenderer:
         total_lines: int | None = None,
         plantuml_resolver=None,
         has_math_hint: bool | None = None,
+        form_source: str | None = None,
+        form_document_key: str = "",
     ) -> str:
         # `env` is passed through markdown-it and lets fence renderers call back
         # into window-level async PlantUML orchestration when available.
@@ -1786,6 +1823,8 @@ class MarkdownRenderer:
         if callable(plantuml_resolver):
             env["plantuml_resolver"] = plantuml_resolver
             env["plantuml_index"] = 0
+        form_revision = _form_revision(form_source if form_source is not None else markdown_text)
+        markdown_text, form_fields, form_error = _prepare_forms(markdown_text)
         prepared_markdown = self._prepare_markdown_for_render(markdown_text)
         prepared_markdown = self._rewrite_raw_embedded_svg_blocks(prepared_markdown)
         body: str | None = None
@@ -1812,7 +1851,7 @@ class MarkdownRenderer:
         total_source_lines_json = json.dumps(
             max(1, int(total_lines or (markdown_text.count("\n") + 1)))
         )
-        return _render_template_asset(
+        document_html = _render_template_asset(
             "preview/document.html",
             {
                 "__ESCAPED_TITLE__": escaped_title,
@@ -1837,10 +1876,38 @@ class MarkdownRenderer:
                 ),
                 "__MERMAID_CACHE_TOKEN_JSON__": json.dumps(mermaid_cache_token),
                 "__DIAGRAM_VIEW_STATE_TOKEN_JSON__": json.dumps(diagram_state_token),
-                "__BODY_HTML__": body,
+                "__BODY_HTML__": _finish_forms(body, form_fields),
             },
         )
+        if form_error:
+            notice = '<p role="alert">Form editing unavailable: ' + html.escape(form_error) + "</p>"
+            document_html = document_html.replace("</body>", notice + "</body>")
+        if form_fields or form_document_key:
+            config = json.dumps({"revision": form_revision, "documentKey": form_document_key}).replace("<", "\\u003c")
+            form_js = _get_js_asset("preview/form_fields.js")
+            bootstrap = (
+                "new QWebChannel(qt.webChannelTransport, channel => {"
+                "window.MdForm.configure(Object.assign(" + config + ", {"
+                "send: p => channel.objects.mdformHost.save(JSON.stringify(p)),"
+                "editing: active => channel.objects.mdformHost.editing(active)"
+                "})); window.MdForm.disableOrdinaryCheckboxes();});"
+            )
+            document_html = document_html.replace("</body>", '<script src="qrc:///qtwebchannel/qwebchannel.js"></script><script>' + form_js + bootstrap + "</script></body>")
+        return document_html
 
+
+class MarkdownFormBridge(QObject):
+    """Narrow transport; the host still validates every requested field save."""
+    saveRequested = Signal(str)
+    editingChanged = Signal(bool)
+
+    @Slot(str)
+    def save(self, payload):
+        self.saveRequested.emit(payload)
+
+    @Slot(bool)
+    def editing(self, active):
+        self.editingChanged.emit(active)
 
 
 class PreviewPage(QWebEnginePage):
@@ -2320,6 +2387,14 @@ class MdExploreWindow(QMainWindow):
             self._on_preview_relative_markdown_link_requested
         )
         self._preview_page.noteRequested.connect(self._on_preview_note_requested)
+        self._form_edit_active = False
+        self._form_refresh_pending = False
+        self._form_bridge = MarkdownFormBridge(self._preview_page)
+        self._form_channel = QWebChannel(self._preview_page)
+        self._form_channel.registerObject("mdformHost", self._form_bridge)
+        self._preview_page.setWebChannel(self._form_channel)
+        self._form_bridge.saveRequested.connect(self._on_form_save_requested)
+        self._form_bridge.editingChanged.connect(self._on_form_editing_changed)
 
         self.view_tabs = ViewTabBar()
         self.view_tabs.setDocumentMode(True)
@@ -4556,7 +4631,8 @@ class MdExploreWindow(QMainWindow):
         """Render one markdown file to HTML and return side metadata for the UI thread."""
         stat = resolved.stat()
         cache_key = str(resolved)
-        markdown_text = resolved.read_text(encoding="utf-8", errors="replace")
+        form_source = resolved.read_bytes().decode("utf-8", errors="replace")
+        markdown_text = form_source.replace("\r\n", "\n").replace("\r", "\n")
         markdown_text = self._normalize_markdown_inline_image_data_uris_for_preview(
             markdown_text
         )
@@ -4589,6 +4665,8 @@ class MdExploreWindow(QMainWindow):
             total_lines=total_lines,
             plantuml_resolver=plantuml_resolver,
             has_math_hint=has_math,
+            form_source=form_source,
+            form_document_key=str(resolved.resolve()),
         )
         progressive_display_html, progressive_pending_sources = (
             self._prepare_inline_data_image_placeholders(html_doc)
@@ -5607,6 +5685,37 @@ class MdExploreWindow(QMainWindow):
                 remaining,
                 show_loading_placeholder=False,
             ),
+        )
+
+    def _on_form_editing_changed(self, active: bool) -> None:
+        self._form_edit_active = active
+        if not active and self._form_refresh_pending:
+            self._form_refresh_pending = False
+            self._refresh_current_preview(reason="form changes")
+
+    def _on_form_save_requested(self, payload: str) -> None:
+        try:
+            request = json.loads(payload)
+            if not isinstance(request, dict) or self.current_file is None:
+                raise ValueError("No active form document.")
+            if request.get("documentKey") != str(self.current_file.resolve()):
+                raise ValueError("The preview changed. Refresh before saving.")
+            result = _save_form_field(self.current_file, request)
+            response = {"ok": True, "revision": result["revision"], "unchanged": result.get("unchanged", False), "reload": request.get("operation") == "insert" or result.get("lineDelta", 0) != 0}
+            # MdForm updates the one rendered control directly. Avoid a full
+            # preview reload, which can move the user's reading position, and
+            # advance the watcher baseline so our own atomic save is not
+            # mistaken for an external edit.
+            resolved = self.current_file.resolve()
+            stat = resolved.stat()
+            self._set_current_preview_signature(
+                str(resolved), int(stat.st_mtime_ns), int(stat.st_size)
+            )
+            self._form_refresh_pending = request.get("operation") == "insert" or result.get("lineDelta", 0) != 0
+        except Exception as error:
+            response = {"ok": False, "error": str(error)}
+        self.preview.page().runJavaScript(
+            "window.MdForm && window.MdForm.result(" + json.dumps(response) + ");"
         )
 
     def _on_preview_relative_markdown_link_requested(self, raw_target: str) -> None:
@@ -9118,20 +9227,21 @@ class MdExploreWindow(QMainWindow):
                 image_media_url = ""
         click_x = int(pos.x())
         click_y = int(pos.y())
-        # Show the menu immediately. For custom actions, run an async probe
-        # after the user picks the action so native image actions remain intact.
-        if self._current_preview_notes:
-            self._request_preview_context_menu_selection_info(
-                click_x, click_y, selected_text_hint,
-                lambda info: self._show_preview_context_menu_with_cached_selection(
-                    pos, info if isinstance(info, dict) else {}, selected_text_hint, standard_menu,
-                    click_x=click_x, click_y=click_y, image_media_url=image_media_url
+        def present(info):
+            self.preview.page().runJavaScript(
+                "JSON.stringify(window.MdForm ? window.MdForm.selectionContext() : null)",
+                lambda context: self._show_preview_context_menu_with_cached_selection(
+                    pos, dict(info or {}, formSelection=json.loads(context or "null")), selected_text_hint,
+                    standard_menu, click_x=click_x, click_y=click_y,
+                    image_media_url=image_media_url,
                 ),
             )
-            return
-        self._show_preview_context_menu_with_cached_selection(
-            pos, {}, selected_text_hint, standard_menu, click_x=click_x, click_y=click_y, image_media_url=image_media_url
-        )
+        if self._current_preview_notes:
+            self._request_preview_context_menu_selection_info(
+                click_x, click_y, selected_text_hint, present,
+            )
+        else:
+            present({})
 
     @staticmethod
     def _preview_image_png_filename(media_url: str) -> str:
@@ -9391,6 +9501,18 @@ class MdExploreWindow(QMainWindow):
             f"offsets={self._selection_offsets_from_info(selection_info)}"
         )
 
+        form_actions = {}
+        form_selection = selection_info.get("formSelection") if isinstance(selection_info, dict) else None
+        if form_selection:
+            for label, kind, new_column in (
+                ("Add text field", "field", False), ("Add checkbox", "check", False),
+                ("Add text field in new column", "field", True),
+                ("Add checkbox in new column", "check", True),
+            ):
+                if not new_column or form_selection.get("table"):
+                    form_actions[menu.addAction(label)] = (kind, new_column)
+            menu.addSeparator()
+
         highlight_action: QAction | None = None
         highlight_important_action: QAction | None = None
         remove_highlight_action: QAction | None = None
@@ -9449,6 +9571,13 @@ class MdExploreWindow(QMainWindow):
             )
 
         chosen = menu.exec(self.preview.mapToGlobal(pos))
+        if chosen in form_actions:
+            kind, new_column = form_actions[chosen]
+            arguments = ",".join(json.dumps(v) for v in (kind, new_column, form_selection))
+            self.preview.page().runJavaScript("window.MdForm.openInsert(" + arguments + ")")
+            standard_menu.deleteLater()
+            menu.deleteLater()
+            return
         if highlight_action is not None and chosen == highlight_action:
             self._debug_log("preview-menu action=Highlight")
             _run_with_fresh_context_info(
@@ -11156,6 +11285,10 @@ class MdExploreWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if getattr(self, "_form_edit_active", False):
+            self.statusBar().showMessage("Save or cancel the open form field before closing.")
+            event.ignore()
+            return
         self._stop_restore_overlay_monitor()
         self._cancel_pending_search_scan()
         self._search_scan_pool.waitForDone()
@@ -12333,6 +12466,9 @@ class MdExploreWindow(QMainWindow):
             current_key = str(self.current_file)
         if current_key != path_key:
             return
+        if getattr(self, "_form_edit_active", False):
+            self._form_refresh_pending = True
+            return
 
         display_html = html_doc
         if error_text:
@@ -12989,6 +13125,9 @@ class MdExploreWindow(QMainWindow):
         apply_batch(0)
 
     def _load_preview(self, path: Path) -> None:
+        if getattr(self, "_form_edit_active", False):
+            self.statusBar().showMessage("Save or cancel the open form field before navigating.")
+            return
         # Render markdown quickly with async PlantUML placeholders so the
         # document appears immediately while diagrams render in background.
         self._stop_restore_overlay_monitor()
@@ -13209,6 +13348,9 @@ class MdExploreWindow(QMainWindow):
         self, _checked: bool = False, *, reason: str | None = None
     ) -> None:
         """Force re-render of the currently selected file."""
+        if getattr(self, "_form_edit_active", False):
+            self._form_refresh_pending = True
+            return
         if self.current_file is None:
             return
         try:

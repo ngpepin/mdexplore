@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { saveField, documentRevision } = require('./formFields');
 const vscode = require('vscode');
 const { SEARCH_CLOSE_WORD_GAP, extractSearchTerms, extractNearTermGroups } = require('./searchQuery');
 const {
@@ -166,7 +167,9 @@ class PreviewCoordinator {
   attachMessages(surface) {
     surface.webview.onDidReceiveMessage(async (message) => {
       const type = String(message?.type || '');
-      if (type === 'refresh') {
+      if (type === 'saveFormField') {
+        await this.saveFormField(surface, message);
+      } else if (type === 'refresh') {
         await this.renderSurface(surface);
       } else if (type === 'edit') {
         await this.editPreviewedDocument(surface.uri);
@@ -203,6 +206,25 @@ class PreviewCoordinator {
         await this.revealSourceLine(surface.uri, Number(message.line));
       }
     });
+  }
+
+  async saveFormField(surface, message) {
+    try {
+      const uri = surface.uri;
+      if (!uri || uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Form editing requires a trusted workspace and a local file.');
+      if (message.documentKey !== uri.toString() || message.revision !== surface.formRevision) throw new Error('The preview changed. Refresh before saving.');
+      const guard = () => {
+        const open = (vscode.workspace.textDocuments || []).find(doc => doc.uri.toString() === uri.toString());
+        if (open?.isDirty) throw new Error('The source editor has unsaved changes. Save or discard those changes first.');
+      };
+      const outcome = saveField(uri.fsPath, message, guard);
+      surface.formRevision = outcome.revision;
+      surface.webview.postMessage({type:'formSaved',ok:true,revision:outcome.revision,unchanged:outcome.unchanged === true});
+      // VS Code's watcher reloads clean open documents; never invoke save hooks
+      // that could rewrite unmarked content or save unrelated dirty buffers.
+    } catch (error) {
+      surface.webview.postMessage({type:'formSaved',ok:false,error:String(error.message || error)});
+    }
   }
 
   currentMarkdownUri(preferredUri = null) {
@@ -511,18 +533,26 @@ class PreviewCoordinator {
         }
         return surface.webview.asWebviewUri(vscode.Uri.file(resolvedPath)).toString();
       };
+      const markdown = document.getText();
       const result = await renderMarkdown({
-        markdown: document.getText(),
+        markdown,
         documentPath: document.uri.fsPath,
         resolveAsset,
         diagramRenderers: this.diagramRenderers,
       });
+      if (document.uri.scheme === 'file') {
+        result.formRevision = await documentRevision(document.uri.fsPath, markdown);
+      }
       const persistentHighlights = await loadHighlightEntries(document.uri.fsPath);
       const scrollLine = this.clampDocumentLine(document, this.anchorLineForUri(document.uri));
       if (surface.disposed || this.renderGeneration.get(surface) !== generation) {
         return;
       }
+      surface.formRevision = result.formRevision;
       surface.webview.postMessage({
+        formRevision: result.formRevision,
+        formError: result.formError,
+        documentKey: document.uri.toString(),
         type: 'render',
         body: result.body,
         title: path.basename(document.uri.fsPath || document.uri.path),

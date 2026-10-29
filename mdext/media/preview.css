@@ -483,3 +483,5 @@ body.mdext-pdf-export-mode {
   .diagram-button { min-width: 1.75rem; padding-inline: 0.3rem; }
   .diagram-zoom-label { width: 100%; margin-left: 0; text-align: left; }
 }
+
+.preview-context-menu button[hidden] { display: none; }

@@ -1,6 +1,7 @@
 'use strict';
 
 const MarkdownIt = require('markdown-it');
+const { prepareForms, finishForms } = require('./formFields');
 const taskLists = require('markdown-it-task-lists');
 const hljs = require('highlight.js');
 const sanitizeHtml = require('sanitize-html');
@@ -238,7 +239,8 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
     return defaultLinkOpen(tokens, index, options, env, self);
   };
 
-  let body = md.render(String(markdown || ''));
+  const forms = prepareForms(String(markdown || ''));
+  let body = md.render(forms.source);
   body = transformCallouts(body);
 
   for (const embeddedSvg of embeddedSvgs) {
@@ -279,7 +281,8 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
     body = body.replace(placeholder, diagramShell(diagram));
   }
 
-  return { body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
+  body = finishForms(body, forms);
+  return { formFieldCount: forms.fields.length, formRevision: forms.revision, formError: forms.error, body, diagramCount: diagrams.length, embeddedSvgCount: embeddedSvgs.length };
 }
 
 module.exports = {

@@ -140,7 +140,25 @@ class TemplateAssetTests(unittest.TestCase):
         source = get_template_asset("preview/document.html")
         self.assertIn(".mdexplore-syntax-highlight .k", source)
         self.assertIn(".mdexplore-syntax-highlight .s", source)
+        self.assertIn(".mdexplore-syntax-highlight .n,", source)
+        self.assertIn(".mdexplore-syntax-highlight .nd", source)
+        self.assertIn(".mdexplore-syntax-highlight .se,", source)
+        self.assertIn(".mdexplore-syntax-highlight .p", source)
+        self.assertIn("color: #1d4ed8", source)
+        self.assertIn("color: #b45309", source)
         self.assertIn("prefers-color-scheme: dark", source)
+        self.assertIn("color: #bfdbfe", source)
+        self.assertIn("color: #fbbf24", source)
+        self.assertIn("color: #f0abfc", source)
+
+    def test_highlighted_python_emits_colored_name_and_keyword_tokens(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "```python\nfor item in values:\n    print(item)\n```\n"
+        rendered = renderer.render_document(source, "Colorful Python")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertIn("mdexplore-syntax-highlight", main_html)
+        self.assertIn('class="k"', main_html)
+        self.assertIn('class="n"', main_html)
 
     def test_markdown_renderer_neutralizes_raw_script_tags_in_prose(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
@@ -327,6 +345,32 @@ class TemplateAssetTests(unittest.TestCase):
         self.assertNotIn("\n:::\n", prepared)
         self.assertIn("# Heading", prepared)
         self.assertIn("Body", prepared)
+
+    def test_markdown_renderer_preserves_exported_user_terminal_prompts(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '> [!warning] User\n'
+            '> <span class="cgpt-user-callout-marker" style="display:none;"></span>\n'
+            '> command \\\n'
+            '> >   continued \\\n'
+            '> >   && echo "managed-runtime verifier: OK"\n'
+            '> managed-runtime verifier: OK\n'
+        )
+        prepared = renderer._prepare_markdown_for_render(source)
+        self.assertEqual(prepared.count("\n"), source.count("\n"))
+        self.assertIn('> \\>   continued \\\n', prepared)
+        self.assertIn('> \\>   && echo "managed-runtime verifier: OK"\n', prepared)
+
+        rendered = renderer.render_document(source, "Exported User callout")
+        main_html = rendered.split("<main>", 1)[1].split("</main>", 1)[0]
+        self.assertEqual(main_html.count("<blockquote"), 1)
+        self.assertIn("&gt;   continued", main_html)
+        self.assertIn("managed-runtime verifier: OK", main_html)
+
+    def test_markdown_renderer_leaves_regular_nested_blockquotes_unchanged(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = "> ordinary quote\n> > nested quote\n"
+        self.assertEqual(renderer._prepare_markdown_for_render(source), source)
 
     def test_markdown_normalization_ignores_code_fences(self) -> None:
         renderer = mdexplore.MarkdownRenderer()

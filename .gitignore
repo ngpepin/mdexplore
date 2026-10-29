@@ -84,3 +84,14 @@ mdext/.tmp
 mdext/prior-versions
 node-compile-cache
 .npm/
+
+# Retain opt-in form regression tests alongside the extension.
+!mdext/test/
+mdext/test/*
+!mdext/test/formFields.test.js
+!mdext/test/manifest.test.js
+!mdext/test/integration/
+!mdext/test/integration/forms.js
+
+!mdext/test/formInsertion.test.js
+!mdext/test/integration/insertionWebview.js

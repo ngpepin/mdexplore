@@ -1878,3 +1878,7 @@ ownership changes.
 - Multi-tab editing or embedded text editor.
 - Background file watching/auto-reload loops.
 - Cross-platform polish outside Linux desktop behavior.
+
+## Opt-in Markdown forms
+
+See [MARKDOWN-FORMS.md](MARKDOWN-FORMS.md) for authoring, backup behavior and acceptance testing. Existing value edits are limited to explicit `mdform:field`, `mdform:text` and `mdform:check` regions. User-invoked preview context-menu actions may insert a new region after selected text or add a column immediately to the right in a rectangular pipe table; preserve all existing text and use the same backup/stale-source controls. New text fields default to the placeholder “Click to fill in”; new checkboxes default to “Done”; both labels are configurable in the insertion popup. Maintain parity between the Python and Node parsers/writers; keep the shared browser UI in `assets/js/preview/form_fields.js` and regenerate its mdext copy through `npm run build`. Saves retain the first `.preedit.md` snapshot, reject stale/dirty source and preserve unmarked content. Do not enable general preview editing.

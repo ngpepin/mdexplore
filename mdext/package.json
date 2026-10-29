@@ -2,7 +2,7 @@
   "name": "mdext",
   "displayName": "mdExt",
   "description": "A high-fidelity Markdown preview editor for Visual Studio Code, based on mdexplore.",
-  "version": "0.1.16",
+  "version": "0.1.18",
   "publisher": "mdexplore",
   "license": "MIT",
   "icon": "media/mdexplor-icon.png",
@@ -49,7 +49,7 @@
     "customEditors": [
       {
         "viewType": "mdExt.markdownEditor",
-        "displayName": "mdExt Markdown (Read-only)",
+        "displayName": "mdExt Markdown Preview",
         "selector": [
           {
             "filenamePattern": "*.md"
@@ -120,10 +120,10 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.js --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
+    "build": "node -e \"require('fs').copyFileSync('../assets/js/preview/form_fields.js', 'media/formFields.js');require('fs').copyFileSync('../MARKDOWN-FORMS.md', 'MARKDOWN-FORMS.md')\" && esbuild src/extension.js --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check src/extension.js && node --check src/previewCoordinator.js && node --check src/pdfExporter.js && node --check src/searchQuery.js && node --check src/highlightStore.js && node --check src/renderer.js && node --check src/diagramRenderers.js && node --check src/webview.js && node --check media/preview.js && node --check media/searchCompat.js && node --check media/highlightCompat.js && npm run build && node --check dist/extension.js",
-    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository"
+    "check": "node --check src/extension.js && node --check src/previewCoordinator.js && node --check src/pdfExporter.js && node --check src/searchQuery.js && node --check src/highlightStore.js && node --check src/renderer.js && node --check src/diagramRenderers.js && node --check src/webview.js && node --check src/formFields.js && node --check src/formInsertion.js && node --check ../assets/js/preview/form_fields.js && node --check media/preview.js && node --check media/searchCompat.js && node --check media/highlightCompat.js && npm run build && node --check dist/extension.js",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links"
   },
   "devDependencies": {
     "@vscode/vsce": "3.6.0",

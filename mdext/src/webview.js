@@ -11,6 +11,7 @@ function resourceUri(webview, context, ...parts) {
 
 function getWebviewHtml(webview, context) {
   const scriptNonce = nonce();
+  const formScript = resourceUri(webview, context, 'media', 'formFields.js');
   const previewScript = resourceUri(webview, context, 'media', 'preview.js');
   const searchCompatScript = resourceUri(webview, context, 'media', 'searchCompat.js');
   const highlightCompatScript = resourceUri(webview, context, 'media', 'highlightCompat.js');
@@ -91,6 +92,10 @@ function getWebviewHtml(webview, context) {
     </section>
   </main>
   <div id="preview-context-menu" class="preview-context-menu" role="menu" hidden>
+    <button id="context-add-field" role="menuitem">Add text field</button>
+    <button id="context-add-check" role="menuitem">Add checkbox</button>
+    <button id="context-add-field-column" role="menuitem">Add text field in new column</button>
+    <button id="context-add-check-column" role="menuitem">Add checkbox in new column</button>
     <button id="context-copy-rendered-button" role="menuitem">Copy Rendered Text</button>
     <button id="context-copy-source-button" role="menuitem">Copy Source Markdown</button>
     <button id="context-highlight-button" role="menuitem">Highlight</button>
@@ -99,6 +104,7 @@ function getWebviewHtml(webview, context) {
   <div id="render-status" role="status" aria-live="polite"></div>
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>
+  <script nonce="${scriptNonce}" src="${formScript}"></script>
   <script nonce="${scriptNonce}" src="${previewScript}"></script>
 </body>
 </html>`;

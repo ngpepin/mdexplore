@@ -1086,6 +1086,7 @@ async function typesetMath(revision) {
 }
 
 async function applyRender(message) {
+  if (window.MdForm?.deferRender(() => applyRender(message))) return;
   const revision = ++renderRevision;
   const previousTop = window.scrollY;
   const previousLine = approximateTopVisibleLine();
@@ -1103,6 +1104,8 @@ async function applyRender(message) {
   }
   window.MathJax?.typesetClear?.([content]);
   content.innerHTML = String(message.body || '');
+  window.MdForm?.configure({revision:message.formRevision,documentKey:message.documentKey,send:payload=>vscode.postMessage({type:'saveFormField',...payload})});
+  window.MdForm?.disableOrdinaryCheckboxes(content);
   titleNode.textContent = String(message.title || 'Markdown');
   pathNode.textContent = String(message.path || '');
   document.title = `${message.title || 'Markdown'} — mdExt`;
@@ -1124,13 +1127,16 @@ async function applyRender(message) {
     } else {
       window.scrollTo({ top: previousTop, behavior: 'auto' });
     }
-    setStatus('Preview updated');
+    window.MdForm?.restoreScrollAnchor(content);
+    setStatus(message.formError ? `Form editing unavailable: ${message.formError}` : 'Preview updated', Boolean(message.formError));
   }
 }
 
 window.addEventListener('message', (event) => {
   const message = event.data || {};
-  if (message.type === 'renderStarted') {
+  if (message.type === 'formSaved') {
+    window.MdForm?.result(message);
+  } else if (message.type === 'renderStarted') {
     setStatus('Rendering…', true);
   } else if (message.type === 'render') {
     applyRender(message);
@@ -1198,7 +1204,23 @@ content.addEventListener('click', (event) => {
   vscode.postMessage({ type: 'openLink', href: anchor.getAttribute('data-mdext-href') || '' });
 });
 
+let formInsertionSelection = null;
+const formInsertionActions = [
+  ['context-add-field','field',false], ['context-add-check','check',false],
+  ['context-add-field-column','field',true], ['context-add-check-column','check',true],
+];
+for (const [id,kind,newColumn] of formInsertionActions) {
+  document.getElementById(id)?.addEventListener('click', () => {
+    hideContextMenu();
+    window.MdForm?.openInsert(kind,newColumn,formInsertionSelection);
+  });
+}
 content.addEventListener('contextmenu', (event) => {
+  formInsertionSelection = window.MdForm?.selectionContext();
+  for (const [id,kind,newColumn] of formInsertionActions) {
+    const button = document.getElementById(id);
+    if (button) button.hidden = !formInsertionSelection || (newColumn && !formInsertionSelection.table);
+  }
   refreshSelectionState();
   if (!latestSelectionInfo.hasSelection) {
     hideContextMenu();
