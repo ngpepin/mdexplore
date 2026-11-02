@@ -85,6 +85,24 @@ mdext/prior-versions
 node-compile-cache
 .npm/
 
+# Per-directory user state written next to the user's documents.
+# These name private files and can contain note/highlight text, so they must
+# never be committed. Patterns are unanchored to match at any depth.
+.mdexplore-views.json
+.pdfexplore-views.json
+.mdexplore.cfg
+.pdfexplore.cfg
+.mdexplore-test.cfg
+.mdexplore-views.json.lock
+.mdexplore.cfg.lock
+.pdfexplore.cfg.lock
+*.preedit.md
+copilot_exports/
+
+# Playwright/browser scratch profiles and artifacts
+playwright_chromiumdev_profile-*
+playwright-artifacts-*
+
 # Retain opt-in form regression tests alongside the extension.
 !mdext/test/
 mdext/test/*
@@ -95,3 +113,6 @@ mdext/test/*
 
 !mdext/test/formInsertion.test.js
 !mdext/test/integration/insertionWebview.js
+SECURITY.md
+ISSUES-RESOLUTIONS.md
+ISSUES-RESOLUTIONS.md
