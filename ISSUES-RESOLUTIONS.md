@@ -894,4 +894,195 @@ If only five changes are made, make these:
 The architectural work (ARCH-01/02) is the largest item but is explicitly incremental: it
 should follow the gates, not block them.
 
+## 13. Public-repository exposure (privacy, identity, and disclosure)
+
+**Context.** `origin` is `https://github.com/ngpepin/mdexplore` and the repository is
+**already public** (GitHub renders the repo page: MIT license, 206 commits, 1 star).
+Everything below is therefore already published unless explicitly marked otherwise.
+This section audits what the *repository* discloses about its author and its users —
+not what the *running application* transmits.
+
+### PUB-01 — Maintainer home paths hard-coded in tracked sources and docs
+**Severity:** High · **Verified**
+
+16 occurrences of `/home/npepin/...` across 5 tracked files (`git grep -c '/home/npepin'`):
+
+| File | Hits | Example |
+| --- | --- | --- |
+| `README.md` | 11 | `[USER-GUIDE.md](/home/npepin/Projects/mdexplore/USER-GUIDE.md)` |
+| `DEVELOPERS-AGENTS.md` | 2 | ``Use these commands from the project root (`/home/npepin/Projects/mdexplore`)`` |
+| `pdfexplore.settings.json` | 1 | `"okular_edit_launcher": "/home/npepin/.local/share/applications-scripts/run-okular.sh"` |
+| `pdfexplore/README.md` | 1 | same launcher path documented in a table |
+| `pdfexplore/app.py` | 1 | same launcher path used as a fallback constant (line 167) |
+
+Impact: publishes the OS username, directory layout and helper-script naming. Every
+absolute markdown link renders as a dead `/home/npepin/...` URL on GitHub. The
+`pdfexplore/app.py` fallback is also a functional bug for anyone who is not `npepin`.
+
+Fix: make in-document links relative (`USER-GUIDE.md`, `pdfexplore/README.md`, …);
+replace the command example with `$PWD`; move the Okular launcher to configuration only
+(`os.path.expanduser("~/.local/share/...")` or a `null` default).
+
+### PUB-02 — Committed PDFs re-publish the same paths, and old PDF blobs stay fetchable
+**Severity:** High · **Verified (partially)**
+
+`DEVELOPERS-AGENTS.pdf` contains 2 extractable hits (`/home/npepin/Projects/mdexplore`,
+`/home/npepin/.cargo/bin/mmdr`); `README.pdf`, `COURSE.pdf`, `USER-GUIDE.pdf` and
+`UML.pdf` are clean. A scan of every distinct `*.pdf` blob in history found at least
+**20 earlier revisions** whose extracted text also contains `npepin` or `/home/<user>`.
+
+Because the PDFs are build outputs of the Markdown, fixing PUB-01 without re-exporting
+and without history rewriting leaves the leak live: deleted PDF blobs remain reachable
+by SHA and via `git log --all -- <path>`. PDF text is also trivially indexed.
+
+Fix: regenerate the PDFs after PUB-01; stop committing generated PDFs (publish them as
+release assets); rewrite history only if removal is genuinely required.
+
+### PUB-03 — Commit identity exposes a work email and real name
+**Severity:** High (cheap to fix going forward) · **Verified**
+
+All 206 commits are authored and committed by `npepin@umiquity.com`
+(`Nicolas Pepin` / `ngpepin`). The same address and name are embedded in test fixtures:
+`tests/test_hfind_cli.py:457` (`"email npepin@umiquity.com is far away"`),
+`tests/test_hfind_cli.py:577,591,932,983` and `tests/test_preview_regressions.py:72,76`
+(`"Nicolas Pepin"`), `tests/test_search_query_module.py:90`,
+`tests/test_search_query_syntax.py:158`.
+
+Impact: a personal/employer email plus legal name permanently attached to a public
+repository, harvestable by scrapers and mapped to the employer domain `umiquity.com`.
+
+Fix: set `user.email` to the GitHub noreply address
+(`<id>+ngpepin@users.noreply.github.com`) and enable *Keep my email addresses private*
+plus *Block command line pushes that expose my email* in GitHub settings; replace the
+e-mail literal in the test fixture with `user@example.com`. History rewriting is
+optional — `.mailmap` cannot hide the raw commit objects.
+
+### PUB-04 — `.gitignore` misses the sidecars that hold private document content
+**Severity:** Medium-High · **Verified** (`git check-ignore`)
+
+The application writes per-directory sidecars and per-user config that name the user's
+documents and carry note/highlight text. Only two of them are ignored today:
+
+| Path | Ignored? | Content disclosed if committed |
+| --- | --- | --- |
+| `.mdexplore-highlighting.json` | yes (`*.gitignore:80`) | notes/highlights |
+| `.mdexplore-colors.json` | yes | filenames |
+| `.mdexplore-views.json` | **no** | filenames + saved scroll positions/tabs |
+| `.pdfexplore-views.json` | **no** | same, for PDFs |
+| `.mdexplore.cfg` / `.pdfexplore.cfg` | **no** | `recent_roots` (absolute private paths), `default_root` |
+| `*.preedit.md` | **no** | full first snapshot of an edited document body |
+| `copilot_exports/` | **no** (currently empty) | exported AI conversation text |
+
+A single `git add .` inside a notes directory publishes document titles, highlight text
+and complete document snapshots. This is the highest-probability leak in the repo
+because the app creates these files automatically next to the user's content.
+
+Fix: add `.mdexplore-views.json`, `.pdfexplore-views.json`, `.mdexplore.cfg`,
+`.pdfexplore.cfg`, `*.preedit.md` and `copilot_exports/` to `.gitignore` as
+path-agnostic patterns; add a pre-commit hook using the already-vendored
+`@secretlint/secretlint-rule-preset-recommend`.
+
+### PUB-05 — No credentials in tracked content or history (verified negative)
+**Severity:** Informational · **Verified**
+
+Targeted scans found no live secrets:
+
+- `git grep` for `AKIA[0-9A-Z]{16}`, `gh[pousr]_…`, `xox[baprs]-…`,
+  `sk-…`, `-----BEGIN … PRIVATE KEY-----` over tracked non-vendor files: **no matches**.
+- The same scan of the working tree (including `.venv*`, `mdext/node_modules`) only hits
+  deliberate vendor fixtures (`AKIAIOSFODNN7EXAMPLE` in secretlint's own rule pack,
+  `AKIAAQAAAAAABAAHAM0A` in Pillow's `ImageFont.py`) — both are non-secrets.
+- The single historical `AKIA` commit match (`105f8ad`, `407d30e`,
+  `mdext/media/vendor/html2pdf.bundle.min.js`, since deleted) re-checked at blob level:
+  `AKIA[0-9A-Z]{16}` count is **0**; the `-S` hit came from base64/identifier noise.
+- The accidentally committed `tmp8bb_e6i8cacert.pem` (deleted in `ca6cab5`) is a stock
+  137-certificate public CA bundle with **no** private-key material and no private CA.
+- No `.env`, `*.pem`, `*.key`, `*.p12` or credential file is tracked.
+
+Residual risk: nothing prevents future pasted tokens in `.md` fixtures. The vendored
+`secretlint` rule pack makes a pre-commit scan nearly free.
+
+### PUB-06 — Build output, vendored blobs and scratch pages are tracked
+**Severity:** Medium · **Verified**
+
+- `mdext/dist/extension.js` (2.4 MB) and duplicated vendor bundles
+  (`vendor/mermaid/dist/mermaid.min.js` == `mdext/media/vendor/mermaid.min.js`,
+  `vendor/mathjax/es5/tex-svg.js` == `mdext/media/vendor/tex-svg.js`) are committed.
+- `mdext/.tmp/mdext-uml-preview.html` (686 KB) is tracked **and** matched by the
+  `mdext/.tmp` ignore rule — a rendered preview of `UML.md` containing full document text
+  and BASE64 diagram sources (`data-source-b64`). It is the only file in both states.
+- `vendor/fastbase64/benchmarkscript.sh` is likewise tracked while ignored by its own
+  pattern. `fastbase64-adaptive.json` is tracked but rewritten at runtime (see PERF-01),
+  so every developer's benchmark numbers become a public diff.
+- `vendor/plantuml/plantuml.jar` (17.5 MB) has no adjacent `LICENSE`/`NOTICE` file in
+  that directory, unlike `vendor/fastbase64/LICENSE`.
+- Largest tracked binaries: 17.5 MB jar, then four PDFs totalling ~12.6 MB, so clone
+  size is dominated by generated artifacts (`.git` = 44 MB, 39.4 MB packed).
+
+Fix: untrack `mdext/dist`, `mdext/.tmp`, duplicate vendor copies and generated PDFs;
+produce them in CI/release. Add the PlantUML license and a `THIRD-PARTY-NOTICES.md`
+covering PlantUML, Mermaid, MathJax, fastbase64 and the vendored Tampermonkey script.
+
+### PUB-07 — Third-party content redistributed without attribution
+**Severity:** Medium · **Verified**
+
+- `assets/Tampermonkey/ChatGPT Exporter-2.30.0_increased-export-max.user.js` (856 KB) is
+  a modified copy of `pionxzh/chatgpt-exporter` (MIT). The header retains upstream
+  `@author`/`@license`, but the repository has no `LICENSE` copy for it and the
+  modification ("increased-export-max") is undocumented. MIT requires the copyright and
+  permission notice to accompany copies.
+- `vendor/plantuml/plantuml.jar` is GPL-2.0-or-later; shipping it in an MIT-licensed
+  repository without a notice is a licensing-compatibility question the project should
+  document explicitly (bundling vs. invoking).
+- `COURSE.md`/`COURSE.pdf` (59 pages) are original, but `bugs/` holds a 5.8 MB third-party
+  book export (`2026 - Vibe Engineering - …`) — currently ignored, so **not** published;
+  keep it that way and never let `bugs` be un-ignored.
+
+### PUB-08 — Repository metadata and history disclose more than the code
+**Severity:** Low-Medium · **Verified**
+
+- Every commit's *message body* is public. Three commits embed `/home/npepin/...` links
+  (`661a9e5`, `b5a3829`, `9b70f63`), so the path leak from PUB-01 is duplicated in the
+  log even after the files are fixed.
+- `.git/info/exclude` — **local only, never published** — hides
+  `playwright_chromiumdev_profile-*` and `playwright-artifacts-*`. These are correctly
+  hidden from `git status` in this clone, but a fresh clone sees them as untracked; the
+  patterns belong in `.gitignore` so the protection travels with the repo.
+- `mdexplore.code-workspace` is tracked and contains no absolute path (harmless), and the
+  `*.desktop.sample` files correctly use `/home/YOUR_USER/` placeholders — the pattern
+  the README and `pdfexplore/app.py` should follow.
+- `gh`-side metadata (description, topics) is generic and discloses nothing personal.
+
+### PUB-09 — This audit document is itself published
+**Severity:** Informational · **Verified**
+
+`ISSUES-RESOLUTIONS.md` is tracked, committed in `ff32881`, and already rendered on the
+public repo page. It contains one maintainer-relative path (`/workspace/Projects/mdexplore`)
+but no home path, e-mail, hostname or secret. Because it is public, the operational
+details it names (lock filenames, cache paths, sidecar names) should be treated as public
+disclosure and worded accordingly; do not add internal hostnames or customer data here.
+
+### Priority table for public exposure
+
+| ID | Issue | Severity | Effort | Needs history rewrite? |
+| --- | --- | --- | --- | --- |
+| PUB-04 | Sidecars/config/`*.preedit.md`/`copilot_exports` not ignored | Medium-High | XS | no |
+| PUB-01 | 16 `/home/npepin` hits across 5 tracked files | High | S | no |
+| PUB-03 | `npepin@umiquity.com` + real name in all 206 commits | High | S (forward) | optional |
+| PUB-02 | PDFs, plus 20+ older PDF blobs, re-publish the paths | High | S | yes, to erase |
+| PUB-06 | Build output, `.tmp` page, duplicate vendors tracked | Medium | S | no |
+| PUB-07 | Missing third-party license/attribution files | Medium | S | no |
+| PUB-08 | Paths in commit messages; local-only exclude rules | Low-Medium | XS | no |
+| PUB-05 | No live secrets found (negative result) | Info | — | — |
+| PUB-09 | This audit is public | Info | — | — |
+
+**Forward-only sequence (no rewrite required):** (1) add the `.gitignore` patterns from
+PUB-04 — this is the only finding that grows worse every day the app is used;
+(2) make README/DEVELOPERS-AGENTS links relative and drop the Okular absolute path;
+(3) switch the git identity to the GitHub noreply address and genericise the e-mail test
+fixture; (4) untrack `mdext/dist`, `mdext/.tmp`, duplicate vendor bundles and generated
+PDFs; (5) add `THIRD-PARTY-NOTICES.md`. Only PUB-02 and PUB-03 need `git filter-repo` if
+actual erasure — rather than mitigation — is required, and that must be coordinated with
+all clones and with GitHub's cached views and forks.
+
 <!-- AUDIT-END -->
