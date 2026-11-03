@@ -25,6 +25,19 @@ NON_INTERACTIVE=0
 # Set to true to pass --debug into mdexplore.py and enable mdexplore.log.
 DEBUG_MODE=false
 
+usage() {
+  echo "Usage: $(basename "$0") [--mermaid-backend js|rust] [PATH]"
+  echo "If PATH is omitted, mdexplore uses ~/.mdexplore.cfg or HOME."
+  echo "Debug logging can be toggled by editing DEBUG_MODE in this script."
+}
+
+# Help is non-mutating, even in noninteractive shells: handle it before the
+# logging/cache setup and before any runtime or dependency checks.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 trim_log_file() {
   local file_path="$1"
   local max_lines="$2"
@@ -100,17 +113,6 @@ trap 'on_error "$?" "$LINENO"' ERR
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] mdexplore.sh start args: $*"
 if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
   trim_log_file_inplace "${LOG_FILE}" "${MAX_LOG_LINES}"
-fi
-
-usage() {
-  echo "Usage: $(basename "$0") [--mermaid-backend js|rust] [PATH]"
-  echo "If PATH is omitted, mdexplore uses ~/.mdexplore.cfg or HOME."
-  echo "Debug logging can be toggled by editing DEBUG_MODE in this script."
-}
-
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
-  exit 0
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then

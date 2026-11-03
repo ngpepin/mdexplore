@@ -2,6 +2,7 @@
 
 const MarkdownIt = require('markdown-it');
 const { prepareForms, finishForms } = require('./formFields');
+const { normalizeDilMarkdown } = require('./dilMarkdown');
 const taskLists = require('markdown-it-task-lists');
 const hljs = require('highlight.js');
 const sanitizeHtml = require('sanitize-html');
@@ -168,6 +169,55 @@ function diagramShell({ id, kind, source, renderedSvg, renderer, error }) {
     `${errorNote}<div class="diagram-viewport" tabindex="0"><div class="diagram-canvas">${content}</div></div></section>`;
 }
 
+/** Extract standalone SVGs even inside a custom HTML wrapper such as <box>.
+ * Leave fenced source-code SVGs untouched. The normal rendering path then
+ * converts placeholders to sanitized SVG data URI images.
+ */
+function extractRawSvgBlocks(markdown, embeddedSvgs) {
+  const lines = String(markdown).match(/[^\n]*\n|[^\n]+$/g) || [];
+  const output = [];
+  let fenceChar = '';
+  let fenceLength = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const content = line.replace(/[\r\n]+$/, '');
+    const fence = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(content);
+    if (fenceChar) {
+      output.push(line);
+      if (fence && fence[1][0] === fenceChar && fence[1].length >= fenceLength && !fence[2].trim()) {
+        fenceChar = '';
+        fenceLength = 0;
+      }
+      continue;
+    }
+    if (fence) {
+      fenceChar = fence[1][0];
+      fenceLength = fence[1].length;
+      output.push(line);
+      continue;
+    }
+    if (!/^[ \t]{0,3}<svg\b/i.test(content)) {
+      output.push(line);
+      continue;
+    }
+    let end = i;
+    while (end < lines.length && !/<\/svg\s*>/i.test(lines[end])) end++;
+    if (end >= lines.length) {
+      output.push(line);
+      continue;
+    }
+    const source = lines.slice(i, end + 1).join('').trim();
+    const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+    embeddedSvgs.push({ id, source, lineStart: i, lineEnd: end + 1 });
+    output.push(`<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>\n`);
+    for (let consumed = i + 1; consumed <= end; consumed++) {
+      if (lines[consumed].endsWith('\n')) output.push('\n');
+    }
+    i = end;
+  }
+  return output.join('');
+}
+
 async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRenderers }) {
   const md = createMarkdownRenderer();
   addSourceLineMetadata(md);
@@ -240,7 +290,7 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
   };
 
   const forms = prepareForms(String(markdown || ''));
-  let body = md.render(forms.source);
+  let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(forms.source, embeddedSvgs)));
   body = transformCallouts(body);
 
   for (const embeddedSvg of embeddedSvgs) {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { compileDilSvg } = require('./dilSvg');
+
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -23,19 +25,37 @@ function sanitizeEmbeddedSvg(source) {
   const svg = normalized
     .replace(/^\s*<\?xml[\s\S]*?\?>\s*/i, '')
     .replace(/^\s*<!doctype[\s\S]*?>\s*/i, '');
-  if (!/^<svg\b/i.test(svg) || !/<\/svg\s*>\s*$/i.test(svg)) {
+  // Only a restricted, non-executable subset of exported DIL SVG is expanded.
+  let compiled;
+  try {
+    compiled = compileDilSvg(svg);
+  } catch (error) {
+    return { svg: '', error: `Unsupported ChatGPT DIL SVG template: ${error.message}` };
+  }
+  compiled = compiled.replace(/\bxmlns\s*=\s*"[^"\n]*"/g,
+    match => match.includes('w3.org/2000/svg') ? 'xmlns="http://www.w3.org/2000/svg"' : match);
+  if (/\{#(?:each|if|await)|\{\/(?:each|if|await)\}|\$\{/.test(compiled)) {
+    return { svg: '', error: 'Unsupported unexpanded ChatGPT DIL SVG template.' };
+  }
+  if (!/^<svg\b/i.test(compiled) || !/<\/svg\s*>\s*$/i.test(compiled)) {
     return { svg: '', error: 'Embedded SVG must have an <svg> root element.' };
   }
 
   // Embedded SVG is ultimately loaded through an <img> data URI rather than
   // injected as live SVG. Keep a defensive cleanup pass as well so source
   // markup cannot carry executable SVG constructs into the generated image.
-  const cleaned = svg
+  const cleaned = compiled
     .replace(/<(?:script|foreignObject|iframe|object|embed)\b[^>]*>[\s\S]*?<\/(?:script|foreignObject|iframe|object|embed)\s*>/gi, '')
     .replace(/\s+on[a-z0-9:_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*javascript:[^\s>]+/gi, '');
-  return { svg: cleaned, error: '' };
+  // An SVG loaded through <img> does not inherit CSS currentColor from the
+  // surrounding VS Code webview. Give standalone images a readable foreground
+  // in both editor themes without changing their explicit drawing colors.
+  const themed = /\bcurrentColor\b/i.test(cleaned)
+    ? cleaned.replace(/(<svg\b[^>]*>)/i, '$1<style>:root{color:#111827}@media (prefers-color-scheme:dark){:root{color:#f8fafc}}</style>')
+    : cleaned;
+  return { svg: themed, error: '' };
 }
 
 function runProcessWithInput(command, args, input, options = {}) {

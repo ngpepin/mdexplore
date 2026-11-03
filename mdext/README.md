@@ -31,14 +31,16 @@
 
 Open the `mdext` directory in Visual Studio Code and press `F5` to launch an Extension Development Host.
 
+For repeatable builds, use the idempotent compile script from this directory:
+
 ```bash
-npm install
-npm test
-npm run check
-npm run package
+./install-update.sh --check     # No changes: 0 ready, 2 needs rebuilding, 3 toolchain uncertain
+./install-update.sh             # Install locked npm dependencies if needed; test and compile
+./install-update.sh --package   # Also produce/update the versioned .vsix extension package
+./install-update.sh --force     # Force a fresh compilation
 ```
 
-The package command creates a `.vsix` file in this directory. Install it through **Extensions: Install from VSIX…**.
+Node.js 20+ and npm are required. Unchanged inputs and intact generated outputs are detected by hashes, so repeated runs skip unnecessary compilation. `--no-test` skips unit tests when a rebuild is needed. The script does not install the extension in VS Code; install a generated `.vsix` using **Extensions: Install from VSIX…**. For manual development, `npm test`, `npm run check`, and `npm run package` remain available.
 
 For PDF export, mdExt needs a Python runtime containing PySide6 Qt WebEngine. From the mdexplore repository root, run `./install-update.sh` once (or `./install-update.sh --check` to verify without changing anything). mdExt searches the project `.venv` automatically; `mdExt.pdfPythonPath` can point to another compatible Python executable when needed.
 

@@ -106,6 +106,8 @@ playwright-artifacts-*
 # Retain opt-in form regression tests alongside the extension.
 !mdext/test/
 mdext/test/*
+# Retain the SVG renderer regression suite.
+!mdext/test/renderer.test.js
 !mdext/test/formFields.test.js
 !mdext/test/manifest.test.js
 !mdext/test/integration/

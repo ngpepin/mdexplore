@@ -4,6 +4,124 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
+// src/dilSvg.js
+var require_dilSvg = __commonJS({
+  "src/dilSvg.js"(exports2, module2) {
+    "use strict";
+    function compileDilSvg(source) {
+      if (!source.includes("{#each") && !source.includes("{#if")) return source;
+      if (source.length > 1e5) throw new Error("DIL SVG template is too large.");
+      const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
+      const escape = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      function number(expr, i) {
+        const match = /^i(?:\s*\*\s*(\d+))?(?:\s*([+-])\s*(\d+))?$/.exec(expr.trim());
+        if (!match) throw new Error("Unsupported DIL SVG arithmetic expression.");
+        return i * Number(match[1] || 1) + (match[2] === "-" ? -1 : 1) * Number(match[3] || 0);
+      }
+      function predicate(expr, i) {
+        const clauses = expr.trim().split("||");
+        if (clauses.length > 4) throw new Error("Unsupported DIL SVG condition.");
+        return clauses.some((clause) => {
+          const match = /^\s*i\s*(===|==|<|<=|>|>=)\s*(\d+)\s*$/.exec(clause);
+          if (!match) throw new Error("Unsupported DIL SVG condition.");
+          const n = Number(match[2]);
+          switch (match[1]) {
+            case "===":
+            case "==":
+              return i === n;
+            case "<":
+              return i < n;
+            case "<=":
+              return i <= n;
+            case ">":
+              return i > n;
+            case ">=":
+              return i >= n;
+            default:
+              return false;
+          }
+        });
+      }
+      function expression(expr, i, label) {
+        expr = expr.trim();
+        if (expr === "label") return escape(label);
+        if (expr.startsWith("`") && expr.endsWith("`")) {
+          const inner = expr.slice(1, -1);
+          if (inner.includes("`")) throw new Error("Unsupported SVG template literal.");
+          return inner.replace(/\$\{([^{}]+)\}/g, (_m, value) => String(number(value, i)));
+        }
+        const ternary = /^(.+?)\s*\?\s*("[^"\n]*"|'[^'\n]*')\s*:\s*("[^"\n]*"|'[^'\n]*')$/.exec(expr);
+        if (ternary) {
+          const selected = predicate(ternary[1], i) ? ternary[2] : ternary[3];
+          return escape(selected.slice(1, -1));
+        }
+        return String(number(expr, i));
+      }
+      function interpolate(line, i, label) {
+        return line.replace(
+          /(\s+[A-Za-z][\w:.-]*)=\{(`[^`\n]*`|[^{}\n]*)\}/g,
+          (_m, name, value) => `${name}="${expression(value, i, label)}"`
+        ).replace(/\{([^{}\n]+)\}/g, (_m, value) => expression(value, i, label));
+      }
+      function block(start, stop, index, label) {
+        const output = [];
+        let size = 0;
+        for (let pos = start; pos < stop; ) {
+          const marker = lines[pos].trim();
+          const each = /^\{#each\s+(\[[^\n]*\])\s+as\s+label\s*,\s*i\s*\}$/.exec(marker);
+          const condition = /^\{#if\s+([^{}\n]+)\}$/.exec(marker);
+          if (each || condition) {
+            const closing = each ? "{/each}" : "{/if}";
+            const opening = each ? "{#each" : "{#if";
+            let end = pos + 1;
+            let depth = 1;
+            while (end < stop && depth) {
+              const current = lines[end].trim();
+              if (current.startsWith(opening)) depth++;
+              else if (current === closing) depth--;
+              end++;
+            }
+            if (depth) throw new Error("Unclosed DIL SVG directive.");
+            if (each) {
+              let labels;
+              try {
+                labels = JSON.parse(each[1]);
+              } catch {
+                throw new Error("Invalid literal SVG labels.");
+              }
+              if (!Array.isArray(labels) || labels.length > 32 || labels.some((x) => typeof x !== "string" || x.length >= 256)) {
+                throw new Error("Unsupported SVG label list.");
+              }
+              labels.forEach((newLabel, newIndex) => output.push(...block(pos + 1, end - 1, newIndex, newLabel)));
+            } else if (predicate(condition[1], index)) {
+              output.push(...block(pos + 1, end - 1, index, label));
+            }
+            pos = end;
+          } else {
+            if (/^\{[#/:]/.test(marker)) throw new Error("Unsupported DIL SVG directive.");
+            const line = interpolate(lines[pos++], index, label);
+            size += line.length;
+            if (size > 2e5) throw new Error("Expanded DIL SVG is too large.");
+            output.push(line);
+          }
+        }
+        return output;
+      }
+      let rendered = block(0, lines.length, 0, "").join("");
+      const namespace = ["http:", "", "www.w3.org", "2000", "svg"].join("/");
+      rendered = rendered.replace(
+        /\bxmlns\s*=\s*"[^"\n]*"/g,
+        (match) => match.includes("w3.org/2000/svg") ? `xmlns="${namespace}"` : match
+      );
+      const names = { fillOpacity: "fill-opacity", strokeOpacity: "stroke-opacity", strokeWidth: "stroke-width", strokeDasharray: "stroke-dasharray", textAnchor: "text-anchor", fontSize: "font-size" };
+      rendered = rendered.replace(/\b(fillOpacity|strokeOpacity|strokeWidth|strokeDasharray|textAnchor|fontSize)(?=\s*=)/g, (name) => names[name]);
+      if (/\{#(?:each|if)|\{\/(?:each|if)\}|\$\{/.test(rendered)) throw new Error("Unexpanded SVG template expression.");
+      return rendered;
+    }
+    module2.exports = { compileDilSvg };
+  }
+});
+
 // src/utils.js
 var require_utils = __commonJS({
   "src/utils.js"(exports2, module2) {
@@ -72,6 +190,7 @@ var require_utils = __commonJS({
 var require_diagramRenderers = __commonJS({
   "src/diagramRenderers.js"(exports2, module2) {
     "use strict";
+    var { compileDilSvg } = require_dilSvg();
     var fs = require("node:fs");
     var fsp = require("node:fs/promises");
     var os = require("node:os");
@@ -89,11 +208,25 @@ var require_diagramRenderers = __commonJS({
         return { svg: "", error: "Embedded SVG is empty." };
       }
       const svg = normalized.replace(/^\s*<\?xml[\s\S]*?\?>\s*/i, "").replace(/^\s*<!doctype[\s\S]*?>\s*/i, "");
-      if (!/^<svg\b/i.test(svg) || !/<\/svg\s*>\s*$/i.test(svg)) {
+      let compiled;
+      try {
+        compiled = compileDilSvg(svg);
+      } catch (error) {
+        return { svg: "", error: `Unsupported ChatGPT DIL SVG template: ${error.message}` };
+      }
+      compiled = compiled.replace(
+        /\bxmlns\s*=\s*"[^"\n]*"/g,
+        (match) => match.includes("w3.org/2000/svg") ? 'xmlns="http://www.w3.org/2000/svg"' : match
+      );
+      if (/\{#(?:each|if|await)|\{\/(?:each|if|await)\}|\$\{/.test(compiled)) {
+        return { svg: "", error: "Unsupported unexpanded ChatGPT DIL SVG template." };
+      }
+      if (!/^<svg\b/i.test(compiled) || !/<\/svg\s*>\s*$/i.test(compiled)) {
         return { svg: "", error: "Embedded SVG must have an <svg> root element." };
       }
-      const cleaned = svg.replace(/<(?:script|foreignObject|iframe|object|embed)\b[^>]*>[\s\S]*?<\/(?:script|foreignObject|iframe|object|embed)\s*>/gi, "").replace(/\s+on[a-z0-9:_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*javascript:[^\s>]+/gi, "");
-      return { svg: cleaned, error: "" };
+      const cleaned = compiled.replace(/<(?:script|foreignObject|iframe|object|embed)\b[^>]*>[\s\S]*?<\/(?:script|foreignObject|iframe|object|embed)\s*>/gi, "").replace(/\s+on[a-z0-9:_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, "").replace(/\s+(?:href|xlink:href|src)\s*=\s*javascript:[^\s>]+/gi, "");
+      const themed = /\bcurrentColor\b/i.test(cleaned) ? cleaned.replace(/(<svg\b[^>]*>)/i, "$1<style>:root{color:#111827}@media (prefers-color-scheme:dark){:root{color:#f8fafc}}</style>") : cleaned;
+      return { svg: themed, error: "" };
     }
     function runProcessWithInput(command, args, input, options = {}) {
       return new Promise((resolve, reject) => {
@@ -6491,6 +6624,95 @@ var require_index_cjs4 = __commonJS({
       return this.renderer.render(this.parseInline(src, env), this.options, env);
     };
     module2.exports = MarkdownIt;
+  }
+});
+
+// src/dilMarkdown.js
+var require_dilMarkdown = __commonJS({
+  "src/dilMarkdown.js"(exports2, module2) {
+    "use strict";
+    var { escapeHtml } = require_utils();
+    function normalizeDilMarkdown(markdown) {
+      const source = String(markdown || "");
+      if (!/<(?:box|row|grid|grid-item|CodeBlock|AsyncImage)\b/.test(source)) return source;
+      const converted = source.replace(/<CodeBlock\b([^>]*)>([\s\S]*?)<\/CodeBlock>/g, (_match, attrs, content) => {
+        const language = /\blanguage="([A-Za-z0-9_-]{1,32})"/.exec(attrs);
+        const lang = language ? language[1] : "text";
+        return `<pre><code class="language-${lang}">${escapeHtml(content)}</code></pre>`;
+      });
+      const lines = converted.match(/[^\n]*\n|[^\n]+$/g) || [];
+      const result = [];
+      let depth = 0;
+      let fenceChar = "";
+      let fenceLength = 0;
+      let inCodeBlock = false;
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i];
+        const content = raw.replace(/[\r\n]+$/, "");
+        const ending = raw.slice(content.length);
+        if (content.includes('<pre><code class="language-')) inCodeBlock = true;
+        if (inCodeBlock) {
+          result.push(raw);
+          if (content.includes("</code></pre>")) inCodeBlock = false;
+          continue;
+        }
+        const fence = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(content);
+        if (fenceChar) {
+          result.push(raw);
+          if (fence && fence[1][0] === fenceChar && fence[1].length >= fenceLength && !fence[2].trim()) {
+            fenceChar = "";
+            fenceLength = 0;
+          }
+          continue;
+        }
+        if (fence) {
+          if (depth && fence[1] === "```" && !fence[2].trim()) {
+            result.push(ending);
+          } else {
+            fenceChar = fence[1][0];
+            fenceLength = fence[1].length;
+            result.push(raw);
+          }
+          continue;
+        }
+        const loop = /^\s*\{#each\s+(\[[^\n]*\])\s+as\s+(\w+)\s*,\s*i\s*\}\s*$/.exec(content);
+        if (depth && loop) {
+          let end = i + 1;
+          while (end < lines.length && lines[end].trim() !== "{/each}") end++;
+          if (end < lines.length && end - i < 200) {
+            let labels;
+            try {
+              labels = JSON.parse(loop[1]);
+            } catch {
+              labels = null;
+            }
+            if (Array.isArray(labels) && labels.length <= 32 && labels.every((v) => typeof v === "string" && v.length < 256)) {
+              result.push(labels.map((label, n) => `${n + 1}. ${escapeHtml(label)}`).join(" \xB7 ") + ending);
+              for (let j = i + 1; j <= end; j++) result.push(lines[j].replace(/[^\r\n]/g, ""));
+              i = end;
+              continue;
+            }
+          }
+        }
+        let normalized = content.replace(/<Link\b([^>]*?)\/>/g, (_match, attrs) => {
+          const title = /\btitle="([^"]{0,500})"/.exec(attrs)?.[1] || "";
+          const rawUrl = /\burl="([^"]{0,2048})"/.exec(attrs)?.[1] || "";
+          const urls = rawUrl.match(/https?:\/\/[^\s<>"()\]]+/g) || [];
+          const url = urls[urls.length - 1] || "";
+          return url ? `[${title.replace(/[\[\]]/g, "")}](${url})` : title;
+        });
+        normalized = normalized.replace(/<(?:AsyncImage|icon)\b[^>]*?\/>/g, "");
+        normalized = normalized.replace(/<divider\b[^>]*?\/>/g, "---");
+        normalized = normalized.replace(/\\*<Cite\b[^>]*?\/>/g, "");
+        normalized = normalized.replace(/<\/?(?:box|row|grid|grid-item|text|caption)\b[^>]*>/gi, "");
+        const insideLayout = depth > 0 || /<(?:box|row|grid|grid-item)\b/.test(content);
+        depth = Math.max(0, depth + (content.match(/<(?:box|row|grid|grid-item)\b/g) || []).length - (content.match(/<\/(?:box|row|grid|grid-item)\s*>/g) || []).length);
+        if (insideLayout) normalized = normalized.trimStart();
+        result.push(normalized + ending);
+      }
+      return result.join("");
+    }
+    module2.exports = { normalizeDilMarkdown };
   }
 });
 
@@ -68703,6 +68925,7 @@ var require_renderer = __commonJS({
     "use strict";
     var MarkdownIt = require_index_cjs4();
     var { prepareForms, finishForms } = require_formFields();
+    var { normalizeDilMarkdown } = require_dilMarkdown();
     var taskLists = require_markdown_it_task_lists();
     var hljs = require_lib2();
     var sanitizeHtml = require_sanitize_html();
@@ -68841,6 +69064,51 @@ var require_renderer = __commonJS({
       const errorNote = error ? `<div class="diagram-notice" title="${escapeHtml(error)}">${escapeHtml(error)}</div>` : "";
       return `<section class="diagram-shell ${kind}-shell" data-diagram-id="${id}" data-kind="${kind}" data-renderer="${renderer}" data-source-b64="${sourceB64}" data-rust-svg-b64="${rustSvgB64}"><div class="diagram-toolbar">${toggle}<button class="diagram-button fit-button">Fit</button><button class="diagram-button zoom-out-button" aria-label="Zoom out">\u2212</button><button class="diagram-button zoom-in-button" aria-label="Zoom in">+</button><button class="diagram-button pan-left-button" aria-label="Pan left">\u2190</button><button class="diagram-button pan-right-button" aria-label="Pan right">\u2192</button><button class="diagram-button pan-up-button" aria-label="Pan up">\u2191</button><button class="diagram-button pan-down-button" aria-label="Pan down">\u2193</button><span class="diagram-zoom-label">100%</span></div>${errorNote}<div class="diagram-viewport" tabindex="0"><div class="diagram-canvas">${content}</div></div></section>`;
     }
+    function extractRawSvgBlocks(markdown, embeddedSvgs) {
+      const lines = String(markdown).match(/[^\n]*\n|[^\n]+$/g) || [];
+      const output = [];
+      let fenceChar = "";
+      let fenceLength = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const content = line.replace(/[\r\n]+$/, "");
+        const fence = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(content);
+        if (fenceChar) {
+          output.push(line);
+          if (fence && fence[1][0] === fenceChar && fence[1].length >= fenceLength && !fence[2].trim()) {
+            fenceChar = "";
+            fenceLength = 0;
+          }
+          continue;
+        }
+        if (fence) {
+          fenceChar = fence[1][0];
+          fenceLength = fence[1].length;
+          output.push(line);
+          continue;
+        }
+        if (!/^[ \t]{0,3}<svg\b/i.test(content)) {
+          output.push(line);
+          continue;
+        }
+        let end = i;
+        while (end < lines.length && !/<\/svg\s*>/i.test(lines[end])) end++;
+        if (end >= lines.length) {
+          output.push(line);
+          continue;
+        }
+        const source = lines.slice(i, end + 1).join("").trim();
+        const id = `svg-${embeddedSvgs.length}-${sha1(source).slice(0, 12)}`;
+        embeddedSvgs.push({ id, source, lineStart: i, lineEnd: end + 1 });
+        output.push(`<div class="mdext-svg-placeholder" data-svg-placeholder="${id}"></div>
+`);
+        for (let consumed = i + 1; consumed <= end; consumed++) {
+          if (lines[consumed].endsWith("\n")) output.push("\n");
+        }
+        i = end;
+      }
+      return output.join("");
+    }
     async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRenderers }) {
       const md = createMarkdownRenderer();
       addSourceLineMetadata(md);
@@ -68908,7 +69176,7 @@ var require_renderer = __commonJS({
         return defaultLinkOpen(tokens, index, options, env, self);
       };
       const forms = prepareForms(String(markdown || ""));
-      let body = md.render(forms.source);
+      let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(forms.source, embeddedSvgs)));
       body = transformCallouts(body);
       for (const embeddedSvg of embeddedSvgs) {
         const result = typeof diagramRenderers?.renderEmbeddedSvg === "function" ? diagramRenderers.renderEmbeddedSvg(embeddedSvg.source) : { dataUri: "", error: "Embedded SVG renderer is unavailable." };

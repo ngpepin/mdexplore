@@ -316,6 +316,40 @@ class TemplateAssetTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(renderer._embedded_svg_image_cache), 2)
 
+    def test_legacy_chatgpt_dil_svg_expands_into_renderable_image(self) -> None:
+        import base64
+        import xml.etree.ElementTree as ET
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '<svg viewBox="0 0 340 55" xmlns="http://www.w3.org/2000/svg">\n'
+            '  {#each ["Plan", "Build"] as label,i}\n'
+            '    <text x={i*86+38}>{label}</text>\n'
+            '  {/each}\n'
+            '</svg>'
+        )
+        uri, error = renderer._render_embedded_svg_data_uri(source)
+        self.assertIsNone(error)
+        self.assertIsNotNone(uri)
+        root = ET.fromstring(base64.b64decode(uri.split(',', 1)[1]))
+        self.assertEqual([item.text for item in root], ['Plan', 'Build'])
+        self.assertEqual([item.get('x') for item in root], ['38', '124'])
+        rendered = renderer.render_document(source, 'Legacy SVG')
+        self.assertIn('mdexplore-embedded-svg', rendered)
+        self.assertNotIn('mdexplore-svg-error', rendered)
+
+    def test_unsupported_chatgpt_dil_expression_rejected(self) -> None:
+        renderer = mdexplore.MarkdownRenderer()
+        source = (
+            '<svg viewBox="0 0 340 55">\n'
+            '  {#each ["Plan", "Build"] as label,i}\n'
+            '    <text x={eval("not safe")}>{label}</text>\n'
+            '  {/each}\n'
+            '</svg>'
+        )
+        uri, error = renderer._render_embedded_svg_data_uri(source)
+        self.assertIsNone(uri)
+        self.assertIn('Unsupported ChatGPT DIL', error or '')
+
     def test_embedded_svg_removes_executable_content(self) -> None:
         renderer = mdexplore.MarkdownRenderer()
         source = (

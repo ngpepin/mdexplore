@@ -105,6 +105,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mdexplore_app.dil_svg import DilSvgError, expand_dil_svg
+from mdexplore_app.dil_markdown import normalize_dil_markdown
 from mdexplore_app.constants import (
     CONFIG_FILE_NAME,
     DIAGRAM_VIEW_STATE_JSON_TOKEN,
@@ -1018,6 +1020,18 @@ class MarkdownRenderer:
         source = str(svg_markup or "").strip()
         if not source:
             return None, "Embedded SVG is empty"
+        # Legacy ChatGPT exports sometimes contain declarative DIL templates
+        # rather than already-rendered SVG. Expand only a safe, bounded subset.
+        try:
+            source = expand_dil_svg(source)
+        except DilSvgError as exc:
+            return None, f"Unsupported ChatGPT DIL SVG template: {exc}"
+        source = re.sub(
+            r'\bxmlns\s*=\s*"[^"\n]*"',
+            lambda match: 'xmlns="http://www.w3.org/2000/svg"'
+            if 'w3.org/2000/svg' in match.group(0) else match.group(0),
+            source,
+        )
         try:
             root = ET.fromstring(source)
         except ET.ParseError as exc:
@@ -1827,6 +1841,7 @@ class MarkdownRenderer:
         markdown_text, form_fields, form_error = _prepare_forms(markdown_text)
         prepared_markdown = self._prepare_markdown_for_render(markdown_text)
         prepared_markdown = self._rewrite_raw_embedded_svg_blocks(prepared_markdown)
+        prepared_markdown = normalize_dil_markdown(prepared_markdown)
         body: str | None = None
         if self._should_use_cmark_fast_path(
             prepared_markdown, has_math_hint=has_math_hint
