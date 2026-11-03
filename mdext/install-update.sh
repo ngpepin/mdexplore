@@ -22,8 +22,8 @@ Usage: ./install-update.sh [--check] [--force] [--package] [--no-test]
 Install missing/outdated locked npm dependencies, test changed sources, and
 compile mdExt. Repeated runs skip work when inputs and outputs are unchanged.
   --check, --dry-run  Report build readiness without writing or installing
-  --force             Recompile even when the cached build is up to date
-  --package           Also create/update the versioned .vsix package
+  --force             Run tests, bump the patch version, rebuild, and create a new .vsix
+  --package           Create/update the current-version .vsix without bumping its version
   --no-test           Skip unit tests when recompiling
   -h, --help          Show this help without modifying anything
 
@@ -41,6 +41,12 @@ while (($#)); do
   esac
   shift
 done
+
+# A forced build is a new patch release, not merely a recompilation.
+# --package alone retains the existing version.
+if "$FORCE"; then
+  PACKAGE=true
+fi
 
 # Exit-code convention for --check: 0 compatible, 2 safely alignable,
 # 3 uncertain/incompatible toolchain, 4 requires a separate runtime.
@@ -99,9 +105,9 @@ if [[ -x node_modules/.bin/esbuild && -x node_modules/.bin/vsce ]] && npm ls --o
 fi
 
 mapfile -d '' BUILD_FILES < <(find src -type f -name '*.js' -print0 | LC_ALL=C sort -z)
-BUILD_FILES+=(package.json package-lock.json ../assets/js/preview/form_fields.js ../MARKDOWN-FORMS.md)
+BUILD_FILES+=(package.json package-lock.json ../assets/js/preview/form_fields.js ../assets/js/preview/dil_widgets.js ../assets/css/preview/dil_widgets.css ../MARKDOWN-FORMS.md)
 BUILD_HASH="$(fingerprint "${BUILD_FILES[@]}")"
-output_hash() { fingerprint dist/extension.js media/formFields.js MARKDOWN-FORMS.md; }
+output_hash() { fingerprint dist/extension.js media/formFields.js media/dilWidgets.js media/dilWidgets.css MARKDOWN-FORMS.md; }
 build_ready=false
 if [[ "$deps_ready" == true && -f dist/extension.js && "$(read_stamp "$BUILD_STAMP")" == "$BUILD_HASH" && "$(read_stamp "$OUTPUT_STAMP")" == "$(output_hash)" ]]; then
   build_ready=true
@@ -121,6 +127,10 @@ if [[ "$build_ready" == true && -s "$VSIX_FILE" && "$(read_stamp "$PACKAGE_STAMP
 fi
 
 if "$CHECK_ONLY"; then
+  if "$FORCE"; then
+    classification host_safely_alignable 'a forced run would create a new patch-versioned VSIX' 2
+    exit $?
+  fi
   if [[ "$deps_ready" == true && "$build_ready" == true && ( "$PACKAGE" == false || "$package_ready" == true ) ]]; then
     classification host_compatible 'npm dependencies and requested build artifacts are up to date' 0
   else
@@ -141,6 +151,16 @@ if [[ "$build_ready" != true || "$FORCE" == true ]]; then
   if "$RUN_TESTS"; then
     printf '[mdExt] Running regression tests...\n'
     npm test
+  fi
+  if "$FORCE"; then
+    printf '[mdExt] Incrementing patch version for the new VSIX...\n'
+    npm version patch --no-git-tag-version --ignore-scripts
+    # Version changes update both manifests, so refresh the cache hashes and
+    # destination filename before compiling and packaging the new release.
+    LOCK_HASH="$(fingerprint package.json package-lock.json)"
+    BUILD_HASH="$(fingerprint "${BUILD_FILES[@]}")"
+    printf '%s\n' "$LOCK_HASH" > "$DEPS_STAMP"
+    VSIX_FILE="mdext-$(node -p 'require("./package.json").version').vsix"
   fi
   printf '[mdExt] Compiling extension...\n'
   npm run build
