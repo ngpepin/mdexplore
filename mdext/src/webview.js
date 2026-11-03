@@ -12,10 +12,12 @@ function resourceUri(webview, context, ...parts) {
 function getWebviewHtml(webview, context) {
   const scriptNonce = nonce();
   const formScript = resourceUri(webview, context, 'media', 'formFields.js');
+  const dilWidgetScript = resourceUri(webview, context, 'media', 'dilWidgets.js');
   const previewScript = resourceUri(webview, context, 'media', 'preview.js');
   const searchCompatScript = resourceUri(webview, context, 'media', 'searchCompat.js');
   const highlightCompatScript = resourceUri(webview, context, 'media', 'highlightCompat.js');
   const previewStyle = resourceUri(webview, context, 'media', 'preview.css');
+  const dilWidgetStyle = resourceUri(webview, context, 'media', 'dilWidgets.css');
   const highlightStyle = resourceUri(webview, context, 'media', 'vendor', 'highlight.css');
   const mermaidScript = resourceUri(webview, context, 'media', 'vendor', 'mermaid.min.js');
   const mathJaxScript = resourceUri(webview, context, 'media', 'vendor', 'tex-svg.js');
@@ -35,6 +37,7 @@ function getWebviewHtml(webview, context) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <link rel="stylesheet" href="${previewStyle}">
+  <link rel="stylesheet" href="${dilWidgetStyle}">
   <link rel="stylesheet" href="${highlightStyle}">
   <script nonce="${scriptNonce}">
     window.MathJax = {
@@ -105,6 +108,7 @@ function getWebviewHtml(webview, context) {
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${formScript}"></script>
+  <script nonce="${scriptNonce}" src="${dilWidgetScript}"></script>
   <script nonce="${scriptNonce}" src="${previewScript}"></script>
 </body>
 </html>`;

@@ -1,0 +1,34 @@
+/* Scoped AIgile widgets; document source expressions are never executed. */
+.aigile-roadmap, .aigile-readiness { margin: 1.3rem 0; padding: 1rem; border: 1px solid var(--border, var(--mdext-border, #bbb)); border-radius: 12px; }
+.aigile-roadmap header, .aigile-readiness header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.aigile-roadmap h3, .aigile-readiness h3 { font-size: 1.12rem; margin: 0; padding: 0; border: 0; }
+.aigile-proposed { padding: .2rem .6rem; border-radius: 999px; background: rgba(100,116,139,.16); font-size: .78rem; }
+.aigile-roadmap-days { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .4rem; margin-bottom: 1.1rem; }
+.aigile-roadmap-day { display: flex; flex-direction: column; align-items: center; padding: .65rem .2rem; gap: .2rem; text-align: center; border-radius: 6px; font-size: .83rem; background: rgba(100,116,139,.12); }
+.aigile-roadmap-day:nth-child(2) { background: rgba(13,148,136,.13); }
+.aigile-roadmap-day:nth-child(3) { background: rgba(59,130,246,.12); }
+.aigile-roadmap-day span { opacity: .78; }
+.aigile-roadmap-phase { border-top: 1px solid var(--border, var(--mdext-border, #bbb)); padding-top: .7rem; margin-top: .7rem; }
+.aigile-roadmap-phase h4 { margin: .15rem 0 .5rem; font-size: 1rem; }
+.aigile-roadmap-phase p { margin: .45rem 0; }
+.aigile-readiness header p { margin: .25rem 0 0; font-size: .83rem; opacity: .8; }
+.aigile-readiness-total { display: flex; align-items: end; flex-direction: column; flex-shrink: 0; white-space: nowrap; }
+.aigile-readiness-total strong { font-size: 1.2rem; }
+.aigile-readiness-total span { font-size: .75rem; opacity: .75; }
+.aigile-readiness-area { margin: 1.1rem 0; }
+.aigile-readiness-label { display: flex; justify-content: space-between; gap: .7rem; font-size: .9rem; }
+.aigile-readiness-label span { flex-shrink: 0; opacity: .75; font-size: .82rem; }
+.aigile-readiness-area p { font-size: .82rem; opacity: .8; margin: .3rem 0 .5rem; }
+.aigile-rating-row { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: .45rem; }
+.aigile-rating { min-height: 35px; border: 1px solid var(--border, var(--mdext-border, #aaa)); border-radius: 7px; padding: .35rem; background: rgba(127,127,127,.08); color: inherit; font: inherit; cursor: pointer; }
+.aigile-rating[aria-pressed="true"] { background: rgba(13,148,136,.19); border-color: #0d9488; font-weight: 700; }
+.aigile-rating:focus-visible, .aigile-prepare:focus-visible { outline: 2px solid #0d9488; outline-offset: 2px; }
+.aigile-readiness-hint, .aigile-readiness-help { font-size: .8rem; opacity: .8; }
+.aigile-readiness-results { display: none; border-top: 1px solid var(--border, var(--mdext-border, #bbb)); margin-top: 1rem; padding-top: 1rem; }
+.aigile-readiness[data-aigile-complete="true"] .aigile-readiness-results { display: block; }
+.aigile-readiness[data-aigile-complete="true"] .aigile-readiness-hint { display: none; }
+.aigile-readiness-results h4 { font-size: .95rem; margin: .6rem 0; }
+.aigile-priority { display: flex; justify-content: space-between; gap: .7rem; padding: .2rem 0; font-size: .85rem; }
+.aigile-prepare { margin: .75rem 0 .45rem; border: 1px solid #0d9488; border-radius: 6px; background: rgba(13,148,136,.16); color: inherit; padding: .5rem .8rem; cursor: pointer; }
+.aigile-request-output { display: block; width: 100%; min-height: 6rem; box-sizing: border-box; padding: .55rem; border-radius: 5px; border: 1px solid var(--border, var(--mdext-border, #bbb)); background: rgba(127,127,127,.07); color: inherit; font: inherit; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; cursor: text; }
+@media (max-width: 480px) { .aigile-roadmap-days { grid-template-columns: 1fr; } .aigile-readiness header { flex-wrap: wrap; } }

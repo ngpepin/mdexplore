@@ -3,6 +3,7 @@
 const MarkdownIt = require('markdown-it');
 const { prepareForms, finishForms } = require('./formFields');
 const { normalizeDilMarkdown } = require('./dilMarkdown');
+const { renderKnownDilWidgets } = require('./dilWidgets');
 const taskLists = require('markdown-it-task-lists');
 const hljs = require('highlight.js');
 const sanitizeHtml = require('sanitize-html');
@@ -95,15 +96,16 @@ function sanitizeRenderedMarkdown(body) {
   return sanitizeHtml(body, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
       'img', 'details', 'summary', 'mark', 'kbd', 's', 'del', 'ins', 'sub', 'sup',
-      'aside', 'section', 'input',
+      'aside', 'section', 'input', 'button',
     ]),
     allowedAttributes: {
-      '*': ['class', 'id', 'title', 'aria-label', 'role', 'data-*'],
+      '*': ['class', 'id', 'title', 'aria-label', 'aria-pressed', 'role', 'tabindex', 'data-*'],
       a: ['href', 'title', 'data-mdext-href', 'data-mdext-external'],
       img: ['src', 'alt', 'title', 'width', 'height', 'loading'],
       code: ['class'],
       ol: ['start'],
       input: ['type', 'checked', 'disabled'],
+      button: ['type', 'aria-pressed', 'class', 'data-*'],
     },
     allowedSchemes: ['http', 'https', 'mailto', 'tel', 'data'],
     allowedSchemesByTag: {
@@ -290,7 +292,7 @@ async function renderMarkdown({ markdown, documentPath, resolveAsset, diagramRen
   };
 
   const forms = prepareForms(String(markdown || ''));
-  let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(forms.source, embeddedSvgs)));
+  let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(renderKnownDilWidgets(forms.source), embeddedSvgs)));
   body = transformCallouts(body);
 
   for (const embeddedSvg of embeddedSvgs) {

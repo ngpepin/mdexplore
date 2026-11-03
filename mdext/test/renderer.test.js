@@ -177,6 +177,36 @@ test('legacy ChatGPT layout in reported document renders as prose and links, not
   assert.doesNotMatch(result.body, /mdext-svg-error/);
 });
 
+test('exported AIgile readiness and 90-day roadmap become accessible safe HTML widgets', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../issues/SVG-rendering/2026-11-02 Create AIgile Summary.md'), 'utf8');
+  const result = await renderMarkdown({
+    markdown: source,
+    documentPath: '/tmp/docs/aigile.md',
+    resolveAsset: (_documentPath, value) => value,
+    diagramRenderers: fakeRenderers,
+  });
+  const body = result.body;
+  assert.match(body, /data-aigile-roadmap="1"/);
+  assert.match(body, /data-aigile-readiness="1"/);
+  assert.equal((body.match(/class="aigile-roadmap-day"/g) || []).length, 3);
+  assert.equal((body.match(/class="aigile-roadmap-phase"/g) || []).length, 3);
+  assert.equal((body.match(/class="aigile-readiness-area"/g) || []).length, 7);
+  assert.equal((body.match(/class="aigile-rating"/g) || []).length, 35);
+  assert.match(body, /aria-pressed="false"/);
+  assert.match(body, /data-aigile-prepare/);
+  assert.match(body, /data-aigile-request/);
+  assert.match(body, /Technical knowledge/);
+  assert.match(body, /Phase 2 - Run controlled end-to-end pilots/);
+  assert.doesNotMatch(body, /\{@body const dimensions|\{#each dimensions|\{#if answered/);
+  assert.doesNotMatch(body, /<pressable|<title size="lg">90-day roadmap/);
+});
+
+test('unknown DIL code is not interpreted as a script by the readiness converter', () => {
+  const { renderKnownDilWidgets } = require('../src/dilWidgets');
+  const source = '{@body const dimensions = [{name:"<img>",detail:"evil"}]}\n';
+  assert.equal(renderKnownDilWidgets(source), source);
+});
+
 test('legacy DIL layout cleanup does not consume actual fenced code', async () => {
   const result = await renderMarkdown({
     markdown: '<box gap={2}>\n\n```javascript\nconst answer = 42;\n```\n\n  Normal prose.\n</box>\n',

@@ -1104,6 +1104,7 @@ async function applyRender(message) {
   }
   window.MathJax?.typesetClear?.([content]);
   content.innerHTML = String(message.body || '');
+  window.MdAigileWidgets?.install(content);
   window.MdForm?.configure({revision:message.formRevision,documentKey:message.documentKey,send:payload=>vscode.postMessage({type:'saveFormField',...payload})});
   window.MdForm?.disableOrdinaryCheckboxes(content);
   titleNode.textContent = String(message.title || 'Markdown');

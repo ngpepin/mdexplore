@@ -7,6 +7,7 @@ import re
 import unittest
 
 from mdexplore_app.dil_markdown import normalize_dil_markdown
+from mdexplore_app.dil_widgets import render_known_dil_widgets
 
 
 REPORT = (
@@ -45,6 +46,37 @@ class DilMarkdownTests(unittest.TestCase):
         self.assertIn("```python\nprint(42)\n```", normalized)
         self.assertIn("\nNormal prose.\n", normalized)
         self.assertEqual(source.count("\n"), normalized.count("\n"))
+
+    def test_aigile_widgets_render_without_evaluating_dil(self) -> None:
+        original = REPORT.read_text(encoding="utf-8")
+        widgets = render_known_dil_widgets(original)
+        self.assertEqual(original.count("\n"), widgets.count("\n"))
+        self.assertEqual(widgets.count('class="aigile-roadmap-day"'), 3)
+        self.assertEqual(widgets.count('class="aigile-roadmap-phase"'), 3)
+        self.assertEqual(widgets.count('class="aigile-readiness-area"'), 7)
+        self.assertEqual(widgets.count('class="aigile-rating"'), 35)
+        self.assertIn('data-aigile-readiness="1"', widgets)
+        self.assertIn('data-aigile-prepare', widgets)
+        self.assertIn('Agile and product delivery', widgets)
+        self.assertIn('Phase 3 - Evaluate and institutionalize', widgets)
+        self.assertNotIn('{@body const dimensions', widgets)
+        self.assertNotIn('{#if answered===7}', widgets)
+        normalized = normalize_dil_markdown(widgets)
+        self.assertIn('<section class="aigile-readiness"', normalized)
+        self.assertIn('<section class="aigile-roadmap"', normalized)
+        self.assertEqual(original.count("\n"), normalized.count("\n"))
+
+    def test_unsupported_widget_shape_remains_literal_and_inert(self) -> None:
+        source = '{@body const dimensions = [{name:"<script>",detail:"evil"}]}\n'
+        self.assertEqual(source, render_known_dil_widgets(source))
+        self.assertEqual('Simple paragraph\n', render_known_dil_widgets('Simple paragraph\n'))
+
+    def test_aigile_dimension_labels_are_html_escaped(self) -> None:
+        source = REPORT.read_text(encoding="utf-8")
+        altered = source.replace('Agile and product delivery', 'Agile & <test> delivery', 1)
+        rendered = render_known_dil_widgets(altered)
+        self.assertIn('Agile &amp; &lt;test&gt; delivery', rendered)
+        self.assertNotIn('>Agile & <test> delivery<', rendered)
 
     def test_document_without_dil_is_unchanged(self) -> None:
         source = "# Plain Markdown\n\n```svg\n<svg></svg>\n```\n"

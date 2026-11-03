@@ -107,6 +107,7 @@ from PySide6.QtWidgets import (
 
 from mdexplore_app.dil_svg import DilSvgError, expand_dil_svg
 from mdexplore_app.dil_markdown import normalize_dil_markdown
+from mdexplore_app.dil_widgets import render_known_dil_widgets
 from mdexplore_app.constants import (
     CONFIG_FILE_NAME,
     DIAGRAM_VIEW_STATE_JSON_TOKEN,
@@ -1841,6 +1842,7 @@ class MarkdownRenderer:
         markdown_text, form_fields, form_error = _prepare_forms(markdown_text)
         prepared_markdown = self._prepare_markdown_for_render(markdown_text)
         prepared_markdown = self._rewrite_raw_embedded_svg_blocks(prepared_markdown)
+        prepared_markdown = render_known_dil_widgets(prepared_markdown)
         prepared_markdown = normalize_dil_markdown(prepared_markdown)
         body: str | None = None
         if self._should_use_cmark_fast_path(
@@ -1894,6 +1896,14 @@ class MarkdownRenderer:
                 "__BODY_HTML__": _finish_forms(body, form_fields),
             },
         )
+        if 'data-aigile-readiness="1"' in prepared_markdown or 'data-aigile-roadmap="1"' in prepared_markdown:
+            widget_css = (
+                Path(__file__).resolve().parent / "assets/css/preview/dil_widgets.css"
+            ).read_text(encoding="utf-8")
+            document_html = document_html.replace("</head>", '<style>' + widget_css + '</style></head>')
+        if 'data-aigile-readiness="1"' in prepared_markdown:
+            widget_js = _get_js_asset("preview/dil_widgets.js")
+            document_html = document_html.replace("</body>", '<script>' + widget_js + '</script></body>')
         if form_error:
             notice = '<p role="alert">Form editing unavailable: ' + html.escape(form_error) + "</p>"
             document_html = document_html.replace("</body>", notice + "</body>")

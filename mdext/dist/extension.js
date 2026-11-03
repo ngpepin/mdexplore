@@ -6716,6 +6716,63 @@ var require_dilMarkdown = __commonJS({
   }
 });
 
+// src/dilWidgets.js
+var require_dilWidgets = __commonJS({
+  "src/dilWidgets.js"(exports2, module2) {
+    "use strict";
+    var { escapeHtml } = require_utils();
+    function replaceSameLines(source, start, end, html) {
+      return source.slice(0, start) + html + "\n".repeat((source.slice(start, end).match(/\n/g) || []).length) + source.slice(end);
+    }
+    function roadmap(source) {
+      const marker = '<box border radius="lg" padding={3} gap={3}>';
+      let start = source.indexOf(marker);
+      while (start >= 0 && !source.slice(start, start + 190).includes('<title size="lg">90-day roadmap</title>')) {
+        start = source.indexOf(marker, start + marker.length);
+      }
+      if (start < 0) return source;
+      const close = source.indexOf("\n</box>", start);
+      if (close < 0 || close - start > 8500) return source;
+      const end = close + "\n</box>".length;
+      const part = source.slice(start, end);
+      const dayLabels = [...part.matchAll(/<text weight="medium" size="xs">(Days \d+-\d+)<\/text>/g)].map((m) => m[1]);
+      const dayDetails = [...part.matchAll(/<text color="secondary" size="3xs">([^<>]+)<\/text>/g)].map((m) => m[1]);
+      const titles = [...part.matchAll(/<text weight="medium">(Phase [123] - [^<>]+)<\/text>/g)];
+      if (dayLabels.length !== 3 || dayDetails.length !== 3 || titles.length !== 3) return source;
+      const descriptions = titles.map((title, i) => {
+        const from = title.index + title[0].length;
+        const to = i + 1 < titles.length ? titles[i + 1].index : part.length;
+        return [...part.slice(from, to).matchAll(/<text size="sm">([^<>]+)<\/text>/g)].map((m) => m[1]);
+      });
+      if (descriptions.some((group) => group.length !== 2)) return source;
+      const cards = dayLabels.map((day, i) => `<div class="aigile-roadmap-day"><strong>${escapeHtml(day)}</strong><span>${escapeHtml(dayDetails[i])}</span></div>`).join("");
+      const phases = titles.map((title, i) => `<div class="aigile-roadmap-phase"><h4>${escapeHtml(title[1])}</h4>${descriptions[i].map((v) => `<p>${escapeHtml(v)}</p>`).join("")}</div>`).join("");
+      return replaceSameLines(source, start, end, `<section class="aigile-roadmap" data-aigile-roadmap="1"><header><h3>90-day roadmap</h3><span class="aigile-proposed">Proposed</span></header><div class="aigile-roadmap-days">${cards}</div>${phases}</section>`);
+    }
+    function readiness(source) {
+      const start = source.indexOf("{@body const dimensions = ");
+      if (start < 0) return source;
+      const end = source.indexOf("\n---", start);
+      if (end < 0 || end - start > 1e4) return source;
+      const part = source.slice(start, end);
+      const required = ["Readiness self-assessment", "DIL.useState(Array(7).fill(0))", "{#each dimensions as d,i}", "{#if answered===7}", "Lowest-scoring priorities", "Analyze my readiness results"];
+      if (!required.every((v) => part.includes(v))) return source;
+      const dimensions = [...part.matchAll(/\{name:"([^"\\\n]{1,160})",detail:"([^"\\\n]{1,700})"\}/g)].map((m) => [m[1], m[2]]);
+      if (dimensions.length !== 7 || new Set(dimensions.map((d) => d[0])).size !== 7) return source;
+      const areas = dimensions.map(([name, detail], i) => {
+        const buttons = [1, 2, 3, 4, 5].map((n) => `<button type="button" class="aigile-rating" data-aigile-rate="${n}" data-aigile-index="${i}" aria-pressed="false">${n}</button>`).join("");
+        return `<div class="aigile-readiness-area" data-aigile-area="${i}"><div class="aigile-readiness-label"><strong>${escapeHtml(name)}</strong><span data-aigile-area-score>Not rated</span></div><p>${escapeHtml(detail)}</p><div class="aigile-rating-row" role="group" aria-label="${escapeHtml(name + " readiness rating")}">${buttons}</div></div>`;
+      }).join("");
+      const html = '<section class="aigile-readiness" data-aigile-readiness="1" data-aigile-complete="false"><header><div><h3>Readiness self-assessment</h3><p>Rate each area from 1 (weak) to 5 (strong).</p></div><div class="aigile-readiness-total"><strong data-aigile-total>0/7</strong><span data-aigile-total-label>Areas rated</span></div></header>' + areas + '<p class="aigile-readiness-hint">The results will identify the three lowest-scoring areas and suggest how to prioritize the implementation effort. These are indicative management scores, not empirically validated maturity thresholds.</p><div class="aigile-readiness-results"><h4>Interpretation</h4><p data-aigile-interpretation></p><h4>Lowest-scoring priorities</h4><div data-aigile-priorities></div><button type="button" class="aigile-prepare" data-aigile-prepare>Prepare analysis request</button><div class="aigile-request-output" data-aigile-request role="textbox" aria-label="Readiness analysis request" tabindex="0"></div><p class="aigile-readiness-help">Copy this request into your AI assistant for a tailored 90-day implementation plan.</p></div></section>';
+      return replaceSameLines(source, start, end, html);
+    }
+    function renderKnownDilWidgets(markdown) {
+      return readiness(roadmap(String(markdown || "")));
+    }
+    module2.exports = { renderKnownDilWidgets };
+  }
+});
+
 // node_modules/markdown-it-task-lists/index.js
 var require_markdown_it_task_lists = __commonJS({
   "node_modules/markdown-it-task-lists/index.js"(exports2, module2) {
@@ -68926,6 +68983,7 @@ var require_renderer = __commonJS({
     var MarkdownIt = require_index_cjs4();
     var { prepareForms, finishForms } = require_formFields();
     var { normalizeDilMarkdown } = require_dilMarkdown();
+    var { renderKnownDilWidgets } = require_dilWidgets();
     var taskLists = require_markdown_it_task_lists();
     var hljs = require_lib2();
     var sanitizeHtml = require_sanitize_html();
@@ -69020,15 +69078,17 @@ var require_renderer = __commonJS({
           "sup",
           "aside",
           "section",
-          "input"
+          "input",
+          "button"
         ]),
         allowedAttributes: {
-          "*": ["class", "id", "title", "aria-label", "role", "data-*"],
+          "*": ["class", "id", "title", "aria-label", "aria-pressed", "role", "tabindex", "data-*"],
           a: ["href", "title", "data-mdext-href", "data-mdext-external"],
           img: ["src", "alt", "title", "width", "height", "loading"],
           code: ["class"],
           ol: ["start"],
-          input: ["type", "checked", "disabled"]
+          input: ["type", "checked", "disabled"],
+          button: ["type", "aria-pressed", "class", "data-*"]
         },
         allowedSchemes: ["http", "https", "mailto", "tel", "data"],
         allowedSchemesByTag: {
@@ -69176,7 +69236,7 @@ var require_renderer = __commonJS({
         return defaultLinkOpen(tokens, index, options, env, self);
       };
       const forms = prepareForms(String(markdown || ""));
-      let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(forms.source, embeddedSvgs)));
+      let body = md.render(normalizeDilMarkdown(extractRawSvgBlocks(renderKnownDilWidgets(forms.source), embeddedSvgs)));
       body = transformCallouts(body);
       for (const embeddedSvg of embeddedSvgs) {
         const result = typeof diagramRenderers?.renderEmbeddedSvg === "function" ? diagramRenderers.renderEmbeddedSvg(embeddedSvg.source) : { dataUri: "", error: "Embedded SVG renderer is unavailable." };
@@ -69399,10 +69459,12 @@ var require_webview = __commonJS({
     function getWebviewHtml(webview, context) {
       const scriptNonce = nonce();
       const formScript = resourceUri(webview, context, "media", "formFields.js");
+      const dilWidgetScript = resourceUri(webview, context, "media", "dilWidgets.js");
       const previewScript = resourceUri(webview, context, "media", "preview.js");
       const searchCompatScript = resourceUri(webview, context, "media", "searchCompat.js");
       const highlightCompatScript = resourceUri(webview, context, "media", "highlightCompat.js");
       const previewStyle = resourceUri(webview, context, "media", "preview.css");
+      const dilWidgetStyle = resourceUri(webview, context, "media", "dilWidgets.css");
       const highlightStyle = resourceUri(webview, context, "media", "vendor", "highlight.css");
       const mermaidScript = resourceUri(webview, context, "media", "vendor", "mermaid.min.js");
       const mathJaxScript = resourceUri(webview, context, "media", "vendor", "tex-svg.js");
@@ -69421,6 +69483,7 @@ var require_webview = __commonJS({
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <link rel="stylesheet" href="${previewStyle}">
+  <link rel="stylesheet" href="${dilWidgetStyle}">
   <link rel="stylesheet" href="${highlightStyle}">
   <script nonce="${scriptNonce}">
     window.MathJax = {
@@ -69491,6 +69554,7 @@ var require_webview = __commonJS({
   <script nonce="${scriptNonce}" src="${searchCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${highlightCompatScript}"></script>
   <script nonce="${scriptNonce}" src="${formScript}"></script>
+  <script nonce="${scriptNonce}" src="${dilWidgetScript}"></script>
   <script nonce="${scriptNonce}" src="${previewScript}"></script>
 </body>
 </html>`;
